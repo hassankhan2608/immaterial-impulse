@@ -48,9 +48,8 @@ ShellRoot {
                 // sibling file is a type resolved through the package's qmldir.
                 // These are not: Widget.qml loads one of them by URL, so each is
                 // a standalone component and compiles - or does not - on its own.
-                Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-media/LayoutLarge.qml"),
-                Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-media/LayoutCookie.qml"),
-                Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-media/LayoutCompact.qml"),
+                Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-media/Widget.qml"),
+                Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-media/MediaTransportButton.qml"),
                 Quickshell.shellPath("modules/common/plugins/PluginOptions.qml"),
                 // The desktop-widget host. It only compiles once a plugin is
                 // enabled on some monitor, so a bad property on it is invisible
@@ -58,6 +57,31 @@ ShellRoot {
                 Quickshell.shellPath("modules/common/plugins/PluginWidget.qml"),
                 Quickshell.shellPath("modules/common/widgets/AutostartApps.qml"),
                 Quickshell.shellPath("modules/common/widgets/WallpaperSubmenu.qml"),
+                // The clock depth picker sits behind an inactive Loader in the
+                // wallpaper selector, so it compiles for the first time when
+                // someone clicks its toolbar button - which on a shell where
+                // nobody has is never.
+                Quickshell.shellPath("modules/imi/wallpaperSelector/ClockDepthPicker.qml"),
+                // Same shape one step on: the desktop subject selector's
+                // surface is behind a Loader that stays inactive until somebody
+                // arms the mode from that picker, so an ordinary run never
+                // compiles it.
+                Quickshell.shellPath("modules/imi/clockDepthSelect/ClockDepthSelectSurface.qml"),
+                // And again for Edit Mode's chrome: the surface, and the
+                // toolbar and tab bar drawn on it, sit behind a Loader that is
+                // inactive until somebody enters the mode, so a shell that is
+                // merely running has never compiled either of them.
+                Quickshell.shellPath("modules/imi/editMode/EditModeChromeSurface.qml"),
+                Quickshell.shellPath("modules/imi/editMode/EditModeChromeContent.qml"),
+                Quickshell.shellPath("modules/imi/editMode/EditWidgetMenu.qml"),
+                Quickshell.shellPath("modules/imi/editMode/EditWidgetMenuContent.qml"),
+                // Stage 9's Lockscreen tab: the preview context compiles for
+                // the first time when somebody opens that tab, and the lock
+                // surface itself only when the screen actually locks - so a
+                // bad property in either passes every test on a shell that is
+                // merely running.
+                Quickshell.shellPath("modules/imi/lock/LockSurface.qml"),
+                Quickshell.shellPath("modules/common/panels/lock/LockPreviewContext.qml"),
                 // The cheatsheet only compiles when the user presses Super+/,
                 // and the keybind editor only when a row's pencil is clicked.
                 Quickshell.shellPath("modules/imi/cheatsheet/CheatsheetKeybinds.qml"),
@@ -78,9 +102,46 @@ ShellRoot {
                 Quickshell.shellPath("modules/imi/bar/SysTray.qml"),
                 Quickshell.shellPath("modules/imi/bar/DockerPlugin.qml"),
                 Quickshell.shellPath("modules/imi/bar/DiscordVoicePlugin.qml"),
+                // The generic package bar host, which compiles only once some
+                // installed plugin's widget is in the user's bar layout.
+                Quickshell.shellPath("modules/imi/bar/PluginBarWidget.qml"),
+                // Both bars. The vertical one is the dock's case exactly -
+                // bar.vertical defaults false, so a bad property or a missing
+                // import in it passes every test and is found by whoever turns
+                // it on. The two bars drifting apart unobserved is the whole
+                // defect a47462fcc ("fix(verticalBar): render plugin bar
+                // widgets instead of an empty stub") came out of.
+                Quickshell.shellPath("modules/imi/bar/BarContent.qml"),
+                Quickshell.shellPath("modules/imi/verticalBar/VerticalBar.qml"),
+                Quickshell.shellPath("modules/imi/verticalBar/VerticalBarContent.qml"),
                 Quickshell.shellPath("modules/common/plugins/bundled/docker/DockerPopup.qml"),
                 Quickshell.shellPath("modules/common/plugins/bundled/docker/DockerWidget.qml"),
-                Quickshell.shellPath("modules/common/plugins/bundled/discordVoice/DiscordVoicePopup.qml")
+                Quickshell.shellPath("modules/common/plugins/bundled/discordVoice/DiscordVoicePopup.qml"),
+                // The dock. It is opt-in - dock.enable defaults to false - so
+                // on a shell without it a FINAL override or a missing import in
+                // any of these passes every test and is found by whoever
+                // switches the dock on. Now that all four edges reach one tree,
+                // that is every user of it rather than the ones who moved it.
+                Quickshell.shellPath("modules/imi/dock/Dock.qml"),
+                Quickshell.shellPath("modules/imi/dock/DockMedia.qml"),
+                Quickshell.shellPath("modules/common/widgets/DockButton.qml"),
+                Quickshell.shellPath("modules/common/widgets/DockAppButton.qml"),
+                Quickshell.shellPath("modules/common/widgets/DockSeparator.qml"),
+                Quickshell.shellPath("modules/common/widgets/DockIconMotion.qml"),
+                Quickshell.shellPath("modules/common/widgets/DockContextMenu.qml"),
+                Quickshell.shellPath("modules/common/widgets/DragApps.qml"),
+
+                // The two other places something is dragged into order.
+                // DocktoPanel is a bar widget the bar loads BY URL, so nothing
+                // above reaches it - it compiles for the first time on the
+                // desktop of whoever puts it in their bar.
+                // AndroidQuickToggleButton sits behind a quick-toggle style
+                // that is not the default, which is the dock's argument above:
+                // a FINAL override or a missing import there passes every test
+                // until someone switches the style on.
+                Quickshell.shellPath("modules/imi/bar/DocktoPanel.qml"),
+                Quickshell.shellPath(
+                    "modules/imi/sidebarRight/quickToggles/androidStyle/AndroidQuickToggleButton.qml")
             ]);
             for (const path of paths) {
                 const component = Qt.createComponent(`file://${path}`, Component.PreferSynchronous);

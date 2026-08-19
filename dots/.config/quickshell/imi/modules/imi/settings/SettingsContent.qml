@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
@@ -128,11 +129,17 @@ Item {
             if (GlobalStates.settingsPage === "") return
             
             let parts = GlobalStates.settingsPage.split(":");
-            let pageName = parts[0];
+            let pageId = parts[0];
             let searchTerm = parts.length > 1 ? parts[1] : "";
 
-            const idx = root.pages.findIndex(p => p.name.toLowerCase() === pageName.toLowerCase());
-            
+            // Addressed by the page's stable `id`, never by its `name`: every
+            // name in the catalogue is a Translation.tr() call, so a link
+            // matched on one resolves only while the shell is in English. In any
+            // other language findIndex returns -1, the handler below clears
+            // GlobalStates.settingsPage regardless, and the window opens on
+            // whatever page was last shown - no error, no log line, no retry.
+            const idx = root.pages.findIndex(p => p.id === pageId);
+
             if (idx >= 0) {
                 root.currentPage = idx;
                 root.showingProfile = false;
@@ -165,20 +172,20 @@ Item {
     
     property var pages: {
         let list = [
-            { name: Translation.tr("Quick"), icon: "instant_mix", component: Qt.resolvedUrl("pages/QuickConfig.qml"), sections: [Translation.tr("Wallpaper & Colors"), Translation.tr("Bar & Screen")] },
-            { name: Translation.tr("Appearance"), icon: "palette", component: Qt.resolvedUrl("pages/AppearanceConfig.qml"), sections: [Translation.tr("Icon pack"), Translation.tr("Fonts"), Translation.tr("Terminal"), Translation.tr("Color generation")] },
-            { name: Translation.tr("Cursor"), icon: "arrow_selector_tool", component: Qt.resolvedUrl("pages/CursorConfig.qml"), sections: [Translation.tr("Pointer"), Translation.tr("Pointer behavior")] },
-            { name: Translation.tr("Wallpaper & Desktop"), icon: "texture", component: Qt.resolvedUrl("pages/BackgroundConfig.qml"), sections: [Translation.tr("Wallpaper"), Translation.tr("Widgets"), Translation.tr("Wallpaper selector")], searchTerms: [Translation.tr("Parallax"), Translation.tr("Centered wallpaper"), Translation.tr("Show widgets on"), Translation.tr("Canvas")] },
-            { name: Translation.tr("Bar & Dock"), icon: "toast", iconRotation: 180, component: Qt.resolvedUrl("pages/BarConfig.qml"), sections: [Translation.tr("Screens"), Translation.tr("Bar layout"), Translation.tr("Positioning & Styles"), Translation.tr("Tray"), Translation.tr("Divider"), Translation.tr("Utility buttons"), Translation.tr("Workspaces"), Translation.tr("Resources"), Translation.tr("Media"), Translation.tr("Tooltips"), Translation.tr("Dock")], searchTerms: [Translation.tr("Show bar on"), Translation.tr("Buttons & Media")] },
-            { name: Translation.tr("Sidebars & Panels"), icon: "side_navigation", component: Qt.resolvedUrl("pages/SidebarsPanelsConfig.qml"), sections: [Translation.tr("Left Sidebar"), Translation.tr("Right Sidebar"), Translation.tr("Overview"), Translation.tr("Overlay"), Translation.tr("On-screen display"), Translation.tr("Drop shelf")], searchTerms: [Translation.tr("Quick toggles"), Translation.tr("Sliders"), Translation.tr("Corner open"), Translation.tr("Default Settings"), Translation.tr("Floating Image"), Translation.tr("Crosshair")] },
-            { name: Translation.tr("Notifications"), icon: "notifications", component: Qt.resolvedUrl("pages/NotificationsConfig.qml"), sections: [Translation.tr("Notifications")] },
-            { name: Translation.tr("Lock & Idle"), icon: "lock", component: Qt.resolvedUrl("pages/LockIdleConfig.qml"), sections: [Translation.tr("Lock screen"), Translation.tr("Keep awake"), Translation.tr("Screensaver"), Translation.tr("Work safety")], searchTerms: [Translation.tr("Security"), Translation.tr("Style: General"), Translation.tr("Style: Blurred")] },
-            { name: Translation.tr("Capture"), icon: "screen_record", component: Qt.resolvedUrl("pages/CaptureConfig.qml"), sections: [Translation.tr("Screen recorder"), Translation.tr("Screenshot popup"), Translation.tr("Region selector (screen snipping/Google Lens)"), Translation.tr("Save paths")], searchTerms: [Translation.tr("Instant replay"), Translation.tr("Hint target regions"), Translation.tr("Google Lens"), Translation.tr("Rectangular selection"), Translation.tr("Circle selection")] },
-            { name: Translation.tr("General"), icon: "browse", component: Qt.resolvedUrl("pages/GeneralConfig.qml"), sections: [Translation.tr("Time"), Translation.tr("Battery"), Translation.tr("Audio"), Translation.tr("Sounds"), Translation.tr("Language")] },
-            { name: Translation.tr("Services"), icon: "cloud", component: Qt.resolvedUrl("pages/ServicesConfig.qml"), sections: [Translation.tr("AI"), Translation.tr("Networking"), Translation.tr("Music Recognition"), Translation.tr("Search"), Translation.tr("System updates (Arch only)"), Translation.tr("Clight"), Translation.tr("Weather")], searchTerms: [Translation.tr("Custom OpenAI-compatible Providers"), Translation.tr("Phone Connect"), Translation.tr("Prefixes"), Translation.tr("File search"), Translation.tr("Web search")] },
-            { name: Translation.tr("Widgets"), icon: "widgets", component: Qt.resolvedUrl("pages/PluginsPage.qml"), sections: [Translation.tr("Widget settings"), Translation.tr("Available Widgets")] },
-            { name: Translation.tr("Hyprland"), icon: "select_window_2", component: Qt.resolvedUrl("pages/HyprlandConfig.qml"), sections: [Translation.tr("Displays"), Translation.tr("Layout"), Translation.tr("Input"), Translation.tr("Keybinds"), Translation.tr("Visual & Aesthetics"), Translation.tr("Blur"), Translation.tr("Autostart Apps"), Translation.tr("Animations")], searchTerms: [Translation.tr("Keyboard"), Translation.tr("Touchpad"), Translation.tr("Add a shortcut")] },
-            { name: Translation.tr("About"), icon: "info", component: Qt.resolvedUrl("pages/About.qml"), sections: [] }
+            { name: Translation.tr("Quick"), id: "quick", icon: "instant_mix", component: Qt.resolvedUrl("pages/QuickConfig.qml"), sections: [Translation.tr("Wallpaper & Colors"), Translation.tr("Bar & Screen")] },
+            { name: Translation.tr("Appearance"), id: "appearance", icon: "palette", component: Qt.resolvedUrl("pages/AppearanceConfig.qml"), sections: [Translation.tr("Icon pack"), Translation.tr("Motion"), Translation.tr("Fonts"), Translation.tr("Terminal"), Translation.tr("Color generation")] },
+            { name: Translation.tr("Cursor"), id: "cursor", icon: "arrow_selector_tool", component: Qt.resolvedUrl("pages/CursorConfig.qml"), sections: [Translation.tr("Pointer"), Translation.tr("Pointer behavior")] },
+            { name: Translation.tr("Wallpaper & Desktop"), id: "wallpaper-desktop", icon: "texture", component: Qt.resolvedUrl("pages/BackgroundConfig.qml"), sections: [Translation.tr("Wallpaper"), Translation.tr("Wallpaper selector")], searchTerms: [Translation.tr("Parallax"), Translation.tr("Depth"), Translation.tr("Centered wallpaper")] },
+            { name: Translation.tr("Bar & Dock"), id: "bar-dock", icon: "toast", iconRotation: 180, component: Qt.resolvedUrl("pages/BarConfig.qml"), sections: [Translation.tr("Screens"), Translation.tr("Bar layout"), Translation.tr("Positioning & Styles"), Translation.tr("Privacy"), Translation.tr("Tray"), Translation.tr("Divider"), Translation.tr("Utility buttons"), Translation.tr("Workspaces"), Translation.tr("Resources"), Translation.tr("Media"), Translation.tr("Tooltips"), Translation.tr("Dock")], searchTerms: [Translation.tr("Show bar on"), Translation.tr("Buttons & Media")] },
+            { name: Translation.tr("Sidebars & Panels"), id: "sidebars-panels", icon: "side_navigation", component: Qt.resolvedUrl("pages/SidebarsPanelsConfig.qml"), sections: [Translation.tr("Left Sidebar"), Translation.tr("Right Sidebar"), Translation.tr("Overview"), Translation.tr("Overlay"), Translation.tr("On-screen display"), Translation.tr("Drop shelf")], searchTerms: [Translation.tr("Quick toggles"), Translation.tr("Sliders"), Translation.tr("Corner open"), Translation.tr("Default Settings"), Translation.tr("Floating Image"), Translation.tr("Crosshair")] },
+            { name: Translation.tr("Notifications"), id: "notifications", icon: "notifications", component: Qt.resolvedUrl("pages/NotificationsConfig.qml"), sections: [Translation.tr("Notifications")] },
+            { name: Translation.tr("Lock & Idle"), id: "lock-idle", icon: "lock", component: Qt.resolvedUrl("pages/LockIdleConfig.qml"), sections: [Translation.tr("Lock screen"), Translation.tr("Keep awake"), Translation.tr("Screensaver"), Translation.tr("Work safety")], searchTerms: [Translation.tr("Security"), Translation.tr("Style: General"), Translation.tr("Style: Blurred")] },
+            { name: Translation.tr("Capture"), id: "capture", icon: "screen_record", component: Qt.resolvedUrl("pages/CaptureConfig.qml"), sections: [Translation.tr("Screen recorder"), Translation.tr("Screenshot popup"), Translation.tr("Region selector (screen snipping/Google Lens)"), Translation.tr("Save paths")], searchTerms: [Translation.tr("Instant replay"), Translation.tr("Hint target regions"), Translation.tr("Google Lens"), Translation.tr("Rectangular selection"), Translation.tr("Circle selection")] },
+            { name: Translation.tr("General"), id: "general", icon: "browse", component: Qt.resolvedUrl("pages/GeneralConfig.qml"), sections: [Translation.tr("Time"), Translation.tr("Battery"), Translation.tr("Audio"), Translation.tr("Sounds"), Translation.tr("Language")] },
+            { name: Translation.tr("Services"), id: "services", icon: "cloud", component: Qt.resolvedUrl("pages/ServicesConfig.qml"), sections: [Translation.tr("AI"), Translation.tr("Networking"), Translation.tr("Music Recognition"), Translation.tr("Search"), Translation.tr("System updates (Arch only)"), Translation.tr("Clight"), Translation.tr("Weather")], searchTerms: [Translation.tr("Custom OpenAI-compatible Providers"), Translation.tr("Phone Connect"), Translation.tr("Prefixes"), Translation.tr("File search"), Translation.tr("Web search")] },
+            { name: Translation.tr("Widgets"), id: "widgets", icon: "widgets", component: Qt.resolvedUrl("pages/PluginsPage.qml"), sections: [Translation.tr("Placement & canvas"), Translation.tr("Widget settings"), Translation.tr("Available Widgets")], searchTerms: [Translation.tr("Show widgets on"), Translation.tr("Canvas")] },
+            { name: Translation.tr("Hyprland"), id: "hyprland", icon: "select_window_2", component: Qt.resolvedUrl("pages/HyprlandConfig.qml"), sections: [Translation.tr("Displays"), Translation.tr("Layout"), Translation.tr("Input"), Translation.tr("Keybinds"), Translation.tr("Visual & Aesthetics"), Translation.tr("Blur"), Translation.tr("Autostart Apps"), Translation.tr("Animations")], searchTerms: [Translation.tr("Keyboard"), Translation.tr("Touchpad"), Translation.tr("Add a shortcut")] },
+            { name: Translation.tr("About"), id: "about", icon: "info", component: Qt.resolvedUrl("pages/About.qml"), sections: [] }
         ]
         return list
     }
@@ -194,9 +201,39 @@ Item {
         })
     }
 
+    // Three ways to the search field, because three different habits reach for
+    // it: the platform's Find, the palette-style Ctrl+K, and the bare slash.
+    function focusSearch() {
+        settingsSearchField.forceActiveFocus();
+        // Select what is there rather than appending to it: the shortcut is
+        // pressed to start a NEW search far more often than to extend the last
+        // one, and a first keystroke that replaces is undone by one arrow key.
+        settingsSearchField.selectAll();
+    }
+
+    // A bare `/` has to yield to anything that takes typing, or a slash can
+    // never be entered into a field on any settings page - a path, a command,
+    // a URL. Text inputs are the things that expose `selectedText`; nothing
+    // else focusable in this window does.
+    readonly property bool typingSomewhere: {
+        const focused = root.Window.activeFocusItem;
+        return !!focused && focused.selectedText !== undefined;
+    }
+
     Shortcut {
         sequence: StandardKey.Find
-        onActivated: settingsSearchField.forceActiveFocus()
+        onActivated: root.focusSearch()
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+K"]
+        onActivated: root.focusSearch()
+    }
+
+    Shortcut {
+        sequence: "/"
+        enabled: !root.typingSomewhere
+        onActivated: root.focusSearch()
     }
 
     Rectangle {
@@ -266,7 +303,11 @@ Item {
                     StyledText {
                         anchors.verticalCenter: parent.verticalCenter
                         visible: settingsSearchField.text.length === 0
-                        text: Translation.tr("Search settings and sections")
+                        // Names the shortcut, because a shortcut nobody is told
+                        // about is a shortcut nobody uses. `/` is the one worth
+                        // showing: it is the shorter reach and the one people
+                        // do not expect a settings window to have.
+                        text: Translation.tr("Search settings and sections  —  / or Ctrl+K")
                         color: Appearance.colors.colSubtext
                         font.pixelSize: Appearance.font.pixelSize.normal
                     }

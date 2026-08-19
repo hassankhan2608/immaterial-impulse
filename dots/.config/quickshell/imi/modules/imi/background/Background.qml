@@ -7,6 +7,11 @@ import qs.modules.common.widgets
 import qs.modules.common.widgets.widgetCanvas
 import qs.modules.common.functions as CF
 import "../../common/functions/parallax.js" as ParallaxMath
+import "../../common/functions/clockDepth.js" as ClockDepthLogic
+import "../../common/functions/edit_mode.js" as EditMode
+import qs.modules.imi.editMode
+import qs.modules.imi.lock
+import qs.modules.common.panels.lock
 import QtQuick
 import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
@@ -248,8 +253,33 @@ Variants {
             ? ParallaxMath.offsets(bgRoot.parallaxState)
             : ({ x: 0, y: 0 })
 
+        // Hands the depth layer's live box to the subject selector, which is a
+        // layer surface of its own and therefore in another window. Keyed by
+        // screen name and written per screen rather than as one rect, because
+        // the same wallpaper is cropped differently on every output and a
+        // cutout drawn into the wrong screen's box is a silhouette in the wrong
+        // place. Removing the entry on disarm rather than leaving a stale one
+        // behind keeps the map's contents equal to "the screens currently
+        // publishing", which is what the surface tests to know it can draw.
+        function publishDepthViewport(viewport): void {
+            const published = Object.assign({}, GlobalStates.clockDepthViewports)
+            if (viewport === null)
+                delete published[bgRoot.screen.name]
+            else
+                published[bgRoot.screen.name] = viewport
+            GlobalStates.clockDepthViewports = published
+        }
+
+        // The lock terms below read `GlobalStates.lockLookActive` - the one
+        // spelling of "the lock's look is on screen", which is the session
+        // lock OR Edit Mode's Lockscreen tab - because that tab is a FILTER on
+        // this viewport (spec §1.4):
+        // it switches these same layers to their locked inputs rather than
+        // drawing a second copy of any of them, so the preview inside the
+        // shrunk card is the picture the lock screen will actually show.
         property string effectiveWallpaperPath: {
-            if (GlobalStates.screenLocked && Config.options.background.lockWall !== "")
+            if (GlobalStates.lockLookActive
+                    && Config.options.background.lockWall !== "")
                 return Config.options.background.lockWall
             return Wallpapers.previewPath || Wallpapers.confirmedPath || Config.options.background.wallpaperPath
         }
@@ -262,7 +292,8 @@ Variants {
         // on unlock): the WE surface reloads the lock project and the existing
         // WE<->WE peel plays, so one renderer covers both - no second surface.
         property string weProjectPath: {
-            if (GlobalStates.screenLocked && Config.options.background.lockWallEngine !== "")
+            if (GlobalStates.lockLookActive
+                    && Config.options.background.lockWallEngine !== "")
                 return Config.options.background.lockWallEngine
             return Config.options.wallpaperSelector.wallpaperEngine.activePath ?? ""
         }
@@ -297,7 +328,7 @@ Variants {
         // Image lock wallpaper only. A WE lock wallpaper (lockWallEngine set) is
         // served by switching weProjectPath instead, so exclude it here even though
         // its preview lives in lockWall for palette generation.
-        property bool lockWallShown: GlobalStates.screenLocked
+        property bool lockWallShown: GlobalStates.lockLookActive
             && Config.options.background.lockWall !== ""
             && Config.options.background.lockWallEngine === "" && bgRoot.weActive
         property bool lockRevealWe: false // true = peeling back to WE (unlock)
@@ -398,8 +429,15 @@ Variants {
             // next unrelated color event. The grab's completion is the event
             // the sync has to observe - see GreeterSync.
             weLoader.item.grabToImage(result => {
-                if (result.saveToFile(target))
+                if (result.saveToFile(target)) {
                     GreeterSync.request();
+                    // The depth picker's other consumer of this still. A
+                    // project on screen for the first time had no still when
+                    // it was asked about, and the grab's completion is the
+                    // event that changes the answer - observed, not polled.
+                    if (ClockDepth.watching)
+                        ClockDepth.refresh();
+                }
             });
         }
 
@@ -507,6 +545,87 @@ Variants {
             const sensitiveNetwork = (CF.StringUtils.stringListContainsSubstring(Network.networkName.toLowerCase(), Config.options.workSafety.triggerCondition.networkNameKeywords));
             return enabled && sensitiveWallpaper && sensitiveNetwork;
         }
+
+        // Whichever layer is painting the wallpaper right now, as an item. Both
+        // things that blur the wallpaper - the lock backdrop and Edit Mode's -
+        // read this rather than each resolving the same four-way choice, since
+        // two copies of it would disagree the first time a fifth layer arrived.
+        readonly property Item liveWallpaperLayer: (bgRoot.weShown
+                && (bgRoot.lockWallShown || lockPeelTimer.running))
+            ? lockPeel
+            : (bgRoot.weShown
+                ? weLoader.item
+                : (bgRoot.wallpaperAnimation === "" ? wallpaper : transitionEffect))
+
+        // ---- Edit Mode's viewport ----------------------------------------
+        //
+        // The desktop stops being the whole screen and becomes an object on it:
+        // the wallpaper viewport, the widget canvas and the clock-depth layer
+        // all take one transform, so what the user is arranging keeps its
+        // proportions and its coordinates. Derived, never chosen - see
+        // edit_mode.js for why the drawer's width is the input.
+        // The bar and the dock keep their edges at full size, so the desktop
+        // shrinks inside what is LEFT of the screen rather than inside the raw
+        // screen - see EditModeInsets for why the two surfaces share one object
+        // for those four numbers and re-derive everything else.
+        readonly property var editInsets: EditModeInsets.insetsFor(bgRoot.screen?.name ?? "")
+        readonly property var editViewport: EditMode.viewportGeometry({
+            screenWidth: bgRoot.width,
+            screenHeight: bgRoot.height,
+            drawerWidth: Appearance.sizes.editModeDrawerWidth,
+            margin: Appearance.sizes.editModeMargin,
+            chromeThickness: Appearance.sizes.toolbarHeight,
+            insetTop: bgRoot.editInsets.top,
+            insetBottom: bgRoot.editInsets.bottom,
+            insetLeft: bgRoot.editInsets.left,
+            insetRight: bgRoot.editInsets.right
+        })
+        // One animated scalar for the whole entry, so the scale and the offset
+        // cannot arrive on different frames - and it is GlobalStates' scalar
+        // rather than this window's, because the chrome that frames this
+        // desktop is a different layer surface deriving its geometry from the
+        // same number. The animation, and why it is `elementMove` rather than
+        // an entrance tier, are stated where the property lives.
+        readonly property real editProgress: GlobalStates.editProgress
+        // The ONLY term of the transform the drawer's open state reaches: the
+        // desktop's sideways travel, spent out of the room the geometry above
+        // reserved. The size takes the drawer's WIDTH whether or not it is
+        // open, so opening it translates the desktop and can never resize it -
+        // a viewport that changed size mid-edit would rescale every widget
+        // under the cursor (spec §1.3, b710ef731's moving target).
+        readonly property real editShift: EditMode.drawerTravel(bgRoot.editViewport)
+            * GlobalStates.editDrawerProgress
+        readonly property var editTransform: EditMode.atProgress(bgRoot.editViewport,
+            bgRoot.editProgress, bgRoot.editShift)
+        // A scale about the top-left followed by a translation, written as one
+        // matrix rather than as a [Scale, Translate] pair: the order a transform
+        // list composes in is exactly the kind of thing that is wrong by a
+        // factor of the scale and still looks plausible. Row-major, so a point
+        // maps to (s*x + tx, s*y + ty).
+        //
+        // What it DRAWS is a scale about the CENTRE, and that is the geometry's
+        // doing rather than this matrix's: the offset edit_mode.js hands in is
+        // the centring offset for the scale beside it, on every frame. A centred
+        // scale is a different matrix, not a different structure.
+        readonly property matrix4x4 editMatrix: Qt.matrix4x4(
+            bgRoot.editTransform.scale, 0, 0, bgRoot.editTransform.x,
+            0, bgRoot.editTransform.scale, 0, bgRoot.editTransform.y,
+            0, 0, 1, 0,
+            0, 0, 0, 1)
+        // Where that transform puts the desktop, for the chrome drawn around
+        // it. Out of the module rather than off the matrix's own terms: the
+        // corner, the outline and the shadow have to sit on the desktop's edge
+        // exactly, and a second derivation of a registration is the drift
+        // ClockDepthCutout exists as one component to prevent.
+        readonly property rect editCard: EditMode.cardRect(bgRoot.editViewport,
+            bgRoot.editProgress, bgRoot.width, bgRoot.height, bgRoot.editShift)
+        // The corner grows with the shrink, so a desktop at rest has no radius
+        // applied to it at all rather than one that happens to be hidden. The
+        // ladder's own name for the tier, per docs/M3_GUIDELINES.md - a whole
+        // desktop is the "major distinct UI block" that tier is for, and the
+        // `extraLarge` alias exists for the vendored design system's call sites
+        // rather than for mainline ones.
+        readonly property real editCardRadius: Appearance.rounding.verylarge * bgRoot.editProgress
 
         property bool shouldBlur: (GlobalStates.screenLocked && Config.options.lock.blur.enable)
         property color dominantColor: Appearance.colors.colPrimary
@@ -667,6 +786,15 @@ Variants {
             // Everything the background draws hangs off here, so this is what
             // `hideWhenFullscreen` switches off - see suppressContents above.
             visible: !bgRoot.suppressContents
+
+            // Edit Mode shrinks the wallpaper and the widgets on it by the same
+            // transform, so the desktop reads as one object. A transform and
+            // not x/y/width: those four are what the parallax animates, what
+            // every widget's clamp measures against and what the frost samples
+            // by, and folding a second meaning into them is the mistake
+            // b710ef731 ("fix(plugins): stop the position Behavior swallowing
+            // the parallax cancellation") cost a store full of walked positions.
+            transform: Matrix4x4 { matrix: bgRoot.editMatrix }
 
             // Slower than a workspace switch on purpose: the wallpaper trails
             // the workspace animation rather than racing it, which is what reads
@@ -880,7 +1008,17 @@ Variants {
                 cache: false
                 smooth: true
                 asynchronous: true
-                layer.enabled: true
+                // An offscreen render target the size of the output, held for
+                // the whole session. With no lock wallpaper configured there is
+                // nothing to sample and the layer is pure cost, so skip it.
+                //
+                // Deliberately NOT gated on "is the lock peel showing": the
+                // shader samples this the frame the lock appears, and a layer
+                // built one frame late would sample the raw texture instead of
+                // the PreserveAspectCrop'd render - the exact bug the comment
+                // above describes. Narrowing it further needs the lock path
+                // exercised, which is a test rather than a guess.
+                layer.enabled: lockWallImage.source.toString() !== ""
                 visible: false
             }
             // Lock peel: live WE <-> lock image, using the configured shader. Above
@@ -904,9 +1042,14 @@ Variants {
 
             Loader {
                 id: blurLoader
-                active: Config.options.lock.blur.enable && (GlobalStates.screenLocked || scaleAnim.running)
+                // `lockLook` rather than screenLocked alone: Edit Mode's
+                // Lockscreen tab shows the lock's own blur inside the shrunk
+                // card, through this same loader - a child of the viewport, so
+                // it takes the edit transform with everything else in here.
+                readonly property bool lockLook: GlobalStates.lockLookActive
+                active: Config.options.lock.blur.enable && (blurLoader.lockLook || scaleAnim.running)
                 anchors.fill: parent
-                scale: GlobalStates.screenLocked ? Config.options.lock.blur.extraZoom : 1
+                scale: blurLoader.lockLook ? Config.options.lock.blur.extraZoom : 1
                 Behavior on scale {
                     NumberAnimation {
                         id: scaleAnim
@@ -915,22 +1058,14 @@ Variants {
                         easing.bezierCurve: Appearance.animationCurves.expressiveDefaultSpatial
                     }
                 }
-                sourceComponent: GaussianBlur {
-                    // Blur the lock peel (WE<->lock-image) when a lock wallpaper is
+                sourceComponent: WallpaperBlurBackdrop {
+                    // The lock peel (WE<->lock-image) when a lock wallpaper is
                     // in play; the live WE surface when it is the wallpaper;
                     // otherwise the static image / transition.
-                    source: (bgRoot.weShown && (bgRoot.lockWallShown || lockPeelTimer.running))
-                        ? lockPeel
-                        : (bgRoot.weShown
-                            ? weLoader.item
-                            : (bgRoot.wallpaperAnimation === "" ? wallpaper : transitionEffect))
-                    radius: GlobalStates.screenLocked ? Config.options.lock.blur.radius : 0
-                    samples: Config.options.lock.blur.size 
-                    Rectangle {
-                        opacity: GlobalStates.screenLocked ? 1 : 0
-                        anchors.fill: parent
-                        color: CF.ColorUtils.transparentize(Appearance.colors.colLayer0, 0.7)
-                    }
+                    source: bgRoot.liveWallpaperLayer
+                    radius: blurLoader.lockLook ? Config.options.lock.blur.radius : 0
+                    samples: Config.options.lock.blur.size
+                    tintOpacity: blurLoader.lockLook ? 1 : 0
                 }
             }
 
@@ -1149,6 +1284,17 @@ Variants {
             // The desktop is the canvas the marquee exists for: rubber-band
             // several widgets, then drag any of them to move the cluster.
             selectionEnabled: true
+            // The one desktop canvas is the one that edits. The overlay reuses
+            // this component and must never enter the mode, so the flag is
+            // handed in here rather than read from GlobalStates inside it.
+            editMode: GlobalStates.editMode
+            // The same transform the wallpaper takes. `scale` is a render-time
+            // transform and touches none of x, y, width or height, so every
+            // stored position still means the same point, every clamp range is
+            // unchanged, and the hand-computed drag stays exact - it maps the
+            // pointer through the moving item into this frame, and the current
+            // transform cancels itself out (AbstractWidget).
+            transform: Matrix4x4 { matrix: bgRoot.editMatrix }
 
             transitions: Transition {
                 PropertyAnimation {
@@ -1232,6 +1378,214 @@ Variants {
                                 parallaxViewport.width, parallaxViewport.height)
                     }
                 }
+            }
+        }
+
+        // Clock depth: the wallpaper's subject, painted back over the desktop
+        // widgets, so the clock sits behind the person in the photo.
+        //
+        // A FOURTH sibling, not a child of the viewport. A child's z only
+        // reorders it against its viewport siblings and can never lift it above
+        // widgetCanvas (weTransition at z 1 is exactly that case), so a cutout
+        // declared inside the viewport would be drawn UNDER the clock - which
+        // is the effect the shell already has. Being a sibling means it
+        // inherits nothing, and each of the three things it reconstructs below
+        // is a bug this file has already been through once.
+        Item {
+            id: clockDepthLayer
+            // The viewport's LIVE geometry, not bgRoot.parallaxOffsets. Those
+            // are the 600ms Behavior's destination: bound to them, the subject
+            // would jump to the new position while the wallpaper under it took
+            // 600ms to arrive - detached from its own image for the whole of
+            // every workspace switch. Same mistake as #157, and the frost's
+            // wallpaperRect one screen up reads these four for the same reason.
+            x: parallaxViewport.x
+            y: parallaxViewport.y
+            width: parallaxViewport.width
+            height: parallaxViewport.height
+            // Above widgetCanvas (z 2), which is the whole point.
+            z: 3
+            // A fourth thing that reconstructs the viewport, so a fourth copy
+            // of the edit transform: this layer paints the wallpaper's own
+            // pixels back over the widgets, and a subject drawn at full size
+            // over a shrunk desktop is a picture of a different wallpaper.
+            transform: Matrix4x4 { matrix: bgRoot.editMatrix }
+            // Its own copy of the fullscreen gate. The viewport carries one for
+            // its children and widgetCanvas carries a second because it moved
+            // out; a fourth sibling needs a fourth, or the subject floats over
+            // fullscreen video with the wallpaper gone.
+            visible: !bgRoot.suppressContents && clockDepthLayer.opacity > 0
+            // Takes no input, ever. desktopRightClickArea sits at z -2, below
+            // everything, and works only because every layer above it lets
+            // clicks fall through; a MouseArea or a HoverHandler anywhere in
+            // here would silently kill the desktop menu, every widget drag and
+            // the drop shelf. This root is a plain Item, so the gate cascades.
+            enabled: false
+            opacity: ClockDepthLogic.eligible({
+                enable: ClockDepth.enabled,
+                maskPath: ClockDepth.maskPath,
+                optedOut: ClockDepth.optedOut,
+                // The selection surface draws the candidate over these same
+                // widgets while it is up; two cutouts arguing is not a thing
+                // anyone can give a verdict on.
+                selecting: GlobalStates.clockDepthSelectOpen,
+                editing: GlobalStates.editMode,
+                weActive: bgRoot.weActive,
+                // Whether the mask on offer was cut from the project's still
+                // rather than the static wallpaper. Compared against
+                // weActive INSIDE the predicate: this instance can fall back
+                // to the static image on its own (weFailed, the safety
+                // screen) while the service is still asking about the
+                // project, and that mismatch is the wrong silhouette either
+                // way round.
+                maskIsWe: ClockDepth.askingWe,
+                wallpaperIsVideo: bgRoot.wallpaperIsVideo,
+                centeredWallpaper: bgRoot.centeredWallpaperEnabled,
+                screenLocked: GlobalStates.screenLocked,
+                transitionInFlight: bgRoot.transitionProgress < 1
+            }) ? 1 : 0
+            Behavior on opacity {
+                NumberAnimation {
+                    duration: Appearance.animation.elementMove.duration
+                    easing.type: Appearance.animation.elementMove.type
+                    easing.bezierCurve: Appearance.animation.elementMove.bezierCurve
+                }
+            }
+
+            // What the selection surface has to be handed to draw the same
+            // cutout on the same pixels. It is a separate layer surface in a
+            // separate window, so it can read neither this item nor the
+            // wallpaper item - and reconstructing the pan from parallax.js on
+            // the other side would be a second derivation of the one number
+            // this whole component exists to have only one of.
+            //
+            // Null while the mode is disarmed, so the binding is a comparison
+            // rather than a fresh object on every frame of every pan for the
+            // rest of the session.
+            readonly property var publishedViewport: GlobalStates.clockDepthSelectOpen
+                ? ({
+                    x: clockDepthLayer.x,
+                    y: clockDepthLayer.y,
+                    width: clockDepthLayer.width,
+                    height: clockDepthLayer.height,
+                    // A live project's picture is its still (spec §8): the
+                    // selector is another window and cannot sample this
+                    // scene's surface, so it draws the candidate cut from the
+                    // still over the live scene - frozen inside the
+                    // silhouette, live everywhere else - which is exactly the
+                    // honesty question §8.4 asks the user to judge.
+                    source: bgRoot.weActive && ClockDepth.askingWe
+                        ? `file://${ClockDepth.weStillPath}` : String(wallpaper.source)
+                })
+                : null
+            onPublishedViewportChanged: bgRoot.publishDepthViewport(clockDepthLayer.publishedViewport)
+
+            // The registration lives in the component, not here, because the
+            // wallpaper selector's picker draws the same cutout to ask whether
+            // it is any good - and a picker that computed its own crop could
+            // certify a mask against a geometry the desktop never uses.
+            ClockDepthCutout {
+                id: clockDepthCutout
+                anchors.fill: parent
+                // The wallpaper ITEM, not bgRoot.wallpaperPath: a switch
+                // assigns that source imperatively so it can snapshot the
+                // outgoing frame, and reading the path would put the incoming
+                // image under the outgoing image's mask for the length of it.
+                wallpaperSource: wallpaper.source
+                // The live surface, never its still (spec §8.3): a masked
+                // still would freeze every animated pixel inside the
+                // silhouette. weLiveSource is the texture the WE transition
+                // already samples, so this adds no second render pass.
+                liveSource: bgRoot.weActive ? weLiveSource : null
+                maskPath: ClockDepth.maskPath
+                maskRevision: ClockDepth.maskRevision
+            }
+        }
+
+        // Edit Mode's Lockscreen tab: the real lock islands, rendered by the
+        // preview context that cannot authenticate (spec §4.3, and the whole
+        // of tests/test_lock_preview_contract.py). A FIFTH sibling carrying
+        // the one edit transform, at z 4 - above the widget canvas (z 2)
+        // because the real session lock surface draws over the desktop
+        // widgets, and above the clock depth layer (z 3), which stands down
+        // for the mode anyway.
+        //
+        // The surface is the real LockSurface, `interactive: false`: its root
+        // area stands down through its own enabled, every handler in it
+        // returns first thing, and the context handed in here is the plain
+        // object whose unlock paths are empty by contract - never the real
+        // LockContext, which runs a fingerprint enumeration and declares two
+        // pam contexts the moment it is built. Declared inside the Loader so
+        // the preview context exists only while the tab is showing.
+        //
+        // Its own copy of the fullscreen gate, like every sibling that left
+        // the viewport: without it the islands would float over fullscreen
+        // video with the wallpaper gone.
+        Loader {
+            id: lockPreviewIslands
+            active: GlobalStates.editLockPreview && !bgRoot.suppressContents
+            width: bgRoot.width
+            height: bgRoot.height
+            z: 4
+            transform: Matrix4x4 { matrix: bgRoot.editMatrix }
+            sourceComponent: LockSurface {
+                interactive: false
+                context: LockPreviewContext {}
+            }
+        }
+
+        // Edit Mode's chrome: the wallpaper blurred around the shrunk desktop,
+        // the desktop's corner, its outline and its shadow. That blur plus the
+        // shrink IS the mode signal - there is no scrim - so it is not optional
+        // and is not gated on the lock's own blur preference; only its radius is
+        // borrowed from there, since it is the same picture and a second setting
+        // for it would be a second thing to disagree.
+        //
+        // A SIBLING of the viewport rather than a second gate on the lock's
+        // blurLoader, which is what the spec asked for and which cannot work:
+        // that loader is a CHILD of parallaxViewport, so it takes the edit
+        // transform with everything else in there and shrinks along with the
+        // desktop it is supposed to sit behind. Sourcing the wallpaper item is
+        // unaffected - a ShaderEffectSource renders its source item in that
+        // item's own coordinates, not the scene's.
+        //
+        // ABOVE the wallpaper rather than behind it, which is what rounds the
+        // corner: see EditModeCard for why covering the corner with the picture
+        // behind it is the only cheap way to round a transformed sibling. And
+        // BELOW the widget canvas at z 2, which is the whole of what stops it
+        // rounding the widgets too.
+        //
+        // It sat at z 4, over everything, and a cover over everything cuts
+        // everything: the desktop scales about its own centre, so the canvas's
+        // edge lands exactly on the card's edge and a widget parked against a
+        // screen edge has its own edge flush with it. At a CORNER the rounding
+        // comes in on both axes at once and takes a bite out of whatever is
+        // there - measured at 5120x1440, a widget at the desktop's corner lost
+        // 20px along each edge and 10px on the diagonal. `visualizer` sits at
+        // 0,1200 in this machine's own store, so the desktop editor was cutting
+        // a corner off a widget while the user was arranging it.
+        //
+        // What that costs, and it is the deliberate trade: a widget in the
+        // corner now OVERHANGS the rounding, drawn whole over the blurred
+        // backdrop. It says "this widget is at the edge of your desktop", which
+        // is true and is information; the alternative was hiding part of a
+        // widget in the mode that exists to place it.
+        //
+        // Non-interactive either way, because desktopRightClickArea at z -2
+        // works only while everything over it lets clicks through.
+        Loader {
+            id: editChrome
+            active: bgRoot.editProgress > 0 && !bgRoot.suppressContents
+            anchors.fill: parent
+            z: 1
+            enabled: false
+            opacity: bgRoot.editProgress
+            sourceComponent: EditModeCard {
+                wallpaperLayer: bgRoot.liveWallpaperLayer
+                blurRadius: Config.options.lock.blur.radius
+                blurSamples: Config.options.lock.blur.size
+                card: bgRoot.editCard
+                cardRadius: bgRoot.editCardRadius
             }
         }
 

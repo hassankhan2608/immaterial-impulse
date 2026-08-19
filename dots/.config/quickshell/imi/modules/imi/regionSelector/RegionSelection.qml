@@ -208,6 +208,18 @@ PanelWindow {
         }
     }
     property bool isRecording: root.action === RegionSelection.SnipAction.Record || root.action === RegionSelection.SnipAction.RecordWithSound
+
+    // Whole-output capture: the same confirm path every other target takes,
+    // handed the screen's own rect. There is no separate full-screen code -
+    // `snip()` crops the frozen frame it already has, and a region covering
+    // the output is a crop of everything.
+    function snipFullScreen() {
+        root.regionX = 0;
+        root.regionY = 0;
+        root.regionWidth = root.width;
+        root.regionHeight = root.height;
+        root.snip();
+    }
     property bool recordingShouldStop: false
     Process {
         id: checkRecordingProc
@@ -514,10 +526,33 @@ PanelWindow {
             }
         }
 
+        // The loupe, so an edge can be framed by the pixel rather than by eye.
+        // Samples the same frozen grim frame the crop will use - see
+        // Magnifier.qml for why not a live screencopy.
+        Magnifier {
+            id: magnifier
+            z: 10000
+            shown: root.phase === RegionSelection.Phase.Select
+                && root.screenshotReady
+                && !mouseArea.pointerOverChrome
+                && Config.options.regionSelector.magnifier.enable
+            source: root.screenshotSource
+            pointerX: mouseArea.mouseX
+            pointerY: mouseArea.mouseY
+            frameWidth: root.width
+            frameHeight: root.height
+            zoom: Config.options.regionSelector.magnifier.zoom
+            // The shape says what a click would take: a region being dragged,
+            // or the window the pointer has locked onto.
+            framing: root.dragging
+            onWindow: !root.dragging && root.targetedRegionValid()
+        }
+
         // The thing to the bottom-right with an icon
         CursorGuide {
+            id: cursorGuide
             z: 9999
-            visible: root.phase === RegionSelection.Phase.Select
+            shown: root.phase === RegionSelection.Phase.Select && !mouseArea.pointerOverChrome
             x: root.dragging ? root.regionX + root.regionWidth : mouseArea.mouseX
             y: root.dragging ? root.regionY + root.regionHeight : mouseArea.mouseY
             action: root.action
@@ -662,6 +697,26 @@ PanelWindow {
             }
         }
 
+        // While the pointer is on the chrome, the real cursor is what the user
+        // is aiming with - so the crosshair's own markers get out of the way
+        // rather than sitting on top of the buttons being pressed.
+        //
+        // Keyed to the POINTER being on the row, not to the markers coming
+        // near it: they go away when the toolbar is being used, and at no
+        // other time. Hiding them on approach makes them vanish over an
+        // ordinary part of the canvas, which reads as a glitch.
+        //
+        // A point test on the row's rect rather than a HoverHandler on it,
+        // because this MouseArea holds the pointer for the whole overlay and a
+        // handler underneath it never fired. The position tested is the same
+        // mouseX/mouseY the markers are placed with, so the test cannot
+        // disagree with where they are drawn.
+        property bool pointerOverChrome: regionSelectionControls.visible
+            && mouseArea.mouseX >= regionSelectionControls.x
+            && mouseArea.mouseX <= regionSelectionControls.x + regionSelectionControls.width
+            && mouseArea.mouseY >= regionSelectionControls.y
+            && mouseArea.mouseY <= regionSelectionControls.y + regionSelectionControls.height
+
         // Controls
         Row {
             id: regionSelectionControls
@@ -696,7 +751,9 @@ PanelWindow {
                 Synchronizer on selectionMode {
                     property alias source: root.selectionMode
                 }
+                windowTargeting: root.enableWindowRegions
                 onDismiss: if (!GlobalStates.snipCopyInFlight) root.dismiss();
+                onCaptureFullScreen: if (!GlobalStates.snipCopyInFlight) root.snipFullScreen();
             }
             ToolbarPairedFab {
                 anchors.verticalCenter: parent.verticalCenter

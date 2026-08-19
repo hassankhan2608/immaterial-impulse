@@ -25,7 +25,11 @@ Scope {
         }
         LazyLoader {
             id: barLoader
+            // The Lockscreen tab takes the bar down exactly as the real lock
+            // does, through the same gate (spec §1.5) - a teardown/rebuild per
+            // tab flip, same as per lock/unlock.
             active: GlobalStates.barOpen && !GlobalStates.screenLocked
+                && !GlobalStates.editLockPreview
             required property ShellScreen modelData
             component: PanelWindow { // Bar window
                 id: barRoot
@@ -54,7 +58,16 @@ Scope {
                 // Stay shown while a bar popup is open so it isn't orphaned above
                 // a hidden bar; the popup closes itself on pointer-leave, then the
                 // bar hides. See issues #30, #31.
+                //
+                // Edit Mode is a term here and NEVER a write to `visible`: the
+                // bar is edited in place at full size (spec §4.2), so an
+                // auto-hidden bar has to stay on screen for the mode - and
+                // `visible: false` on a layer surface destroys the surface
+                // rather than hiding it. The mode's viewport reservation does
+                // not read this (EditModeInsets is configuration-only), so
+                // holding the bar out changes nothing about the shrunk desktop.
                 property bool mustShow: hoverRegion.containsMouse || superShow
+                    || GlobalStates.editMode
                     || ((GlobalStates.mediaControlsOpen || GlobalStates.sysTrayOverflowOpen) && Config?.options.bar.autoHide.dismissPopups)
                 property var thisMonitorData: HyprlandData.monitors.find(m => m.name === barRoot.screen?.name)
                 property bool monitorHasFullscreen: HyprlandData.workspaceById[thisMonitorData?.activeWorkspace?.id]?.hasfullscreen ?? false
@@ -78,7 +91,11 @@ Scope {
                 // content carries the gap instead, which looks identical and
                 // costs no surface reconfiguration.
                 readonly property real detachInset: Appearance.sizes.barDetachInset
-                implicitHeight: Appearance.sizes.barHeight + Appearance.rounding.screenRounding + detachInset
+                // The sum lives in Appearance because Edit Mode has to know how
+                // much of the screen this surface occupies and cannot measure
+                // it - the two are on different layer surfaces, in different
+                // scene graphs.
+                implicitHeight: Appearance.sizes.barSurfaceHeight
                 // When Overlay-layer, bar shares a layer with the screen-corner click zones (ScreenCorners.qml)
                 // and same-layer overlap is resolved by stacking, not layer priority - bar was winning and
                 // swallowing the tiny corner-open hit rects. Carve them out of the bar's own mask so clicks

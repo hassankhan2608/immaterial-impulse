@@ -23,7 +23,10 @@ AbstractWidget {
     x: targetX
     y: targetY
     visible: opacity > 0
-    opacity: (GlobalStates.screenLocked && !visibleWhenLocked) ? 0 : 1
+    // `editLockPreview` beside the real lock: Edit Mode's Lockscreen tab shows
+    // the widgets the lock screen will show, through this same filter rather
+    // than a second one that could disagree with it.
+    opacity: (GlobalStates.lockLookActive && !visibleWhenLocked) ? 0 : 1
     Behavior on opacity {
         animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
     }
@@ -49,10 +52,17 @@ AbstractWidget {
     // Dragging is pointer input, so a click-through widget is necessarily
     // locked as well; the reverse does not hold, and a locked-but-clickable
     // widget (pinned media controls, say) stays a useful state.
+    //
+    // Edit Mode subtracts the GLOBAL term and only that one. The per-widget pin
+    // survives, which is the same invariant read the other way round: an editor
+    // that unpinned everything would be unlocking exactly what the user pinned
+    // on purpose. And it subtracts rather than writing `widgetsLocked = false`,
+    // which would destroy a stored preference and leave the desktop unlocked
+    // after the mode ended.
     property bool positionLocked: false
     property bool clickThrough: false
     readonly property bool interactionLocked: clickThrough || positionLocked
-        || Config.options.background.widgetsLocked
+        || (Config.options.background.widgetsLocked && !GlobalStates.editMode)
 
     // Two gates, because one property name means two different things here and
     // neither covers the other.
@@ -95,10 +105,30 @@ AbstractWidget {
         root.y = Qt.binding(() => root.targetY);
     }
 
-    function clampX(v) { return Math.max(0, Math.min(v, scaledScreenWidth - width)); }
-    function clampY(v) { return Math.max(0, Math.min(v, scaledScreenHeight - height)); }
+    // The size the clamp measures this widget by. `width`/`height` for
+    // everything that changes size in one frame - but a subclass whose size
+    // *animates* overrides them with the size the animation is heading for,
+    // because a clamp taken mid-flight is taken against a size the widget is
+    // about to leave, and nothing runs again once the animation lands: the
+    // widget settles past the screen edge and stays there (PluginWidget's span
+    // resize). Two properties rather than an extra argument on the clamp - a
+    // call site that forgets to pass one clamps against the wrong size in
+    // silence, and this function exists so there is one clamp and not several.
+    property real clampWidth: root.width
+    property real clampHeight: root.height
 
-    onReleased: root.commitPosition()
+    function clampX(v) { return Math.max(0, Math.min(v, scaledScreenWidth - clampWidth)); }
+    function clampY(v) { return Math.max(0, Math.min(v, scaledScreenHeight - clampHeight)); }
+
+    // A cancelled gesture swallows exactly its own release: see dragCancelled
+    // in AbstractWidget for why the release still arrives at all.
+    onReleased: {
+        if (root.dragCancelled) {
+            root.dragCancelled = false;
+            return;
+        }
+        root.commitPosition();
+    }
 
     // The one write-back path for a finished move. A real release runs it via
     // the handler above; a group drag runs it on every follower through

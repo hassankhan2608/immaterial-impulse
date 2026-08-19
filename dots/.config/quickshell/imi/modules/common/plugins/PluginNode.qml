@@ -42,6 +42,11 @@ Item {
         ? componentLoader.item.visibleWhenLocked === true : false
     readonly property bool wantsForceCenter: componentLoader.item
         ? componentLoader.item.forceCenter === true : false
+    // A one-tree widget repositions its own elements through a span change,
+    // so the host's midpoint cross-fade would put a dissolve over elements
+    // that deliberately never disappear.
+    readonly property bool wantsOwnSpanTransition: componentLoader.item
+        ? componentLoader.item.handlesSpanTransition === true : false
     readonly property bool wantsAdaptiveTextColor: componentLoader.item
         ? componentLoader.item.needsColText === true : false
 
@@ -58,6 +63,15 @@ Item {
     // manifest declares no grid. It tracks the resize grip's live preview, so a
     // drag reshapes the content as it goes instead of on release.
     property string gridSize: ""
+    // The resize grip's live edge distortion, forwarded to widgets whose cards
+    // bow under tension. A point of pixels; (0,0) at rest.
+    property point resizeBow: Qt.point(0, 0)
+    // Whether the host is currently being dragged, for a widget that lifts
+    // its cards while handled.
+    property bool hostDragging: false
+    // Whether the host's own box is animating. A widget uses it to stop
+    // re-rendering effects that cost a frame each while it moves.
+    property bool hostBoxInMotion: false
 
     readonly property string effectiveBasePath: manifestNode?._basePath || basePath
     readonly property string componentPath: manifestNode?.component && effectiveBasePath
@@ -161,6 +175,12 @@ Item {
                     item.hostInteractionLocked = Qt.binding(() => rootNode.hostInteractionLocked);
                 if (item.hostGridSize !== undefined)
                     item.hostGridSize = Qt.binding(() => rootNode.gridSize);
+                if (item.hostResizeBow !== undefined)
+                    item.hostResizeBow = Qt.binding(() => rootNode.resizeBow);
+                if (item.hostDragging !== undefined)
+                    item.hostDragging = Qt.binding(() => rootNode.hostDragging);
+                if (item.hostBoxInMotion !== undefined)
+                    item.hostBoxInMotion = Qt.binding(() => rootNode.hostBoxInMotion);
                 return;
             }
             if (manifestNode.props) {

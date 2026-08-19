@@ -258,14 +258,16 @@ Scope {
                             // Hover opens the quick submenu; a CLICK goes to the
                             // full Settings page. It used to just close the menu -
                             // a dead click on a row drawn like a button.
-                            // settingsPage is matched by page NAME in
-                            // SettingsContent (an index here goes stale the day a
-                            // page is inserted - the plugin context menu shipped
-                            // that bug with a hardcoded index).
+                            // settingsPage carries the page's stable `id` from
+                            // SettingsContent's catalogue - not its display name,
+                            // which is translated, and not an index, which goes
+                            // stale the day a page is inserted (the plugin
+                            // context menu shipped that bug with a hardcoded
+                            // index).
                             onClicked: {
                                 GlobalStates.desktopMenuOpen = false
                                 GlobalStates.settingsOpen = true
-                                GlobalStates.settingsPage = "Wallpaper & Desktop"
+                                GlobalStates.settingsPage = "wallpaper-desktop"
                             }
                         }
 
@@ -280,31 +282,67 @@ Scope {
                                 spacing: Appearance.spacing.space150
                                 MaterialSymbol { text: "widgets"; iconSize: Appearance.font.pixelSize.larger; color: Appearance.colors.colOnLayer1 }
                                 StyledText { Layout.fillWidth: true; text: "Widgets"; font.pixelSize: Appearance.font.pixelSize.normal; color: Appearance.colors.colOnLayer1 }
-                                MaterialSymbol { text: "chevron_right"; iconSize: Appearance.font.pixelSize.normal; color: Appearance.colors.colOnLayer1; opacity: 0.4 }
                             }
 
-                            Component {
-                                id: widgetsSubmenu
-                                WidgetsSubmenu {}
-                            }
-
-                            HoverHandler {
-                                onHoveredChanged: {
-                                    if (hovered) {
-                                        submenuCloseTimer.stop()
-                                        menuWindow.submenuAnchorY = menuCard.y + widgetsRow.mapToItem(menuCard, 0, 0).y
-                                        menuWindow.openSubmenuComponent = widgetsSubmenu
-                                    } else {
-                                        submenuCloseTimer.restart()
-                                    }
-                                }
-                            }
-                            // Same pattern as Wallpaper & style: hover for the
-                            // quick submenu, click for the full Settings page.
+                            // No hover submenu any more: WidgetsSubmenu's only
+                            // live control was the global widget lock, which
+                            // Edit Mode suppresses - a switch that turns off
+                            // something the editor turns back on - and its
+                            // widget list has been empty since the desktop
+                            // widgets became plugins. The click is the row's
+                            // whole meaning now, same as Edit layout below.
                             onClicked: {
                                 GlobalStates.desktopMenuOpen = false
                                 GlobalStates.settingsOpen = true
-                                GlobalStates.settingsPage = "Widgets"
+                                GlobalStates.settingsPage = "widgets"
+                            }
+                        }
+
+                        // Edit layout. A verb, so no submenu and no chevron:
+                        // unlike Wallpaper & style and Widgets, this row has no
+                        // quick-settings half and no Settings page behind it.
+                        //
+                        // The way IN, and now only that. It stood in as the way
+                        // out as well while the mode had no toolbar, because
+                        // Escape depends on the compositor delivering keys to a
+                        // Bottom-layer surface and that was never established -
+                        // a mode whose only exit is unproven is not one to ship.
+                        // The toolbar's Done is that exit now, on screen for the
+                        // whole mode, so a second one here would leave the exit
+                        // ALSO hidden behind a right-click, two rows deep in a
+                        // context menu: precisely the discoverability failure
+                        // the mode exists to fix. The row disappears while the
+                        // mode is on rather than becoming a no-op, because a
+                        // control that does nothing is worse than one that is
+                        // not there.
+                        RippleButton {
+                            // `rowVisible`, not `visible`: a GroupedList row
+                            // hidden the second way keeps its plate, which is
+                            // the row-height band of empty `colLayer0` this
+                            // menu grew between Widgets and DropShelf while the
+                            // mode was on. See GroupedList.qml.
+                            property bool rowVisible: !GlobalStates.editMode
+                            implicitHeight: 40
+                            colBackground: "transparent"
+                            colBackgroundHover: Appearance.colors.colLayer2
+                            contentItem: RowLayout {
+                                anchors { fill: parent; leftMargin: Appearance.spacing.space150; rightMargin: Appearance.spacing.space150 }
+                                spacing: Appearance.spacing.space150
+                                MaterialSymbol {
+                                    text: "edit"
+                                    iconSize: Appearance.font.pixelSize.larger
+                                    color: Appearance.colors.colOnLayer1
+                                }
+                                StyledText {
+                                    Layout.fillWidth: true
+                                    text: "Edit layout"
+                                    font.pixelSize: Appearance.font.pixelSize.normal
+                                    color: Appearance.colors.colOnLayer1
+                                }
+                            }
+                            onClicked: {
+                                GlobalStates.desktopMenuOpen = false
+                                GlobalStates.editMode = true
                             }
                         }
 

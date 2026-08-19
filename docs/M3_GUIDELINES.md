@@ -56,6 +56,21 @@ Always use predefined rounding values from `Appearance.rounding`. Never use hard
 - `verylarge` (30px): Prominent dialogs, major distinct UI blocks.
 - `full` (9999px): Circular elements, full-bleed pills, FABs.
 
+Three rungs carry a second, Material-3-spelled name, because the vendored design system under
+`modules/common/plugins/designsystem` speaks the M3 shape-scale dialect (its `ExpressiveTokens`
+exposes `Appearance.rounding` as `shape`). They are aliases, not extra values - a tier with two
+names cannot disagree with itself, the way a tier with two numbers eventually does:
+
+- `button` = `small` (12px).
+- `card` = `normal` (17px).
+- `extraLarge` = `verylarge` (30px) - M3 calls its top non-`full` tier "extra large".
+
+Prefer the ladder's own name in new mainline code; the aliases exist so the vendored library's call
+sites resolve. All three were read for the whole life of that port without being declared, which
+renders as a 0 radius (or a NaN, where the call site does arithmetic on it) rather than as an
+error - `tests/lint_appearance_tokens.py` now fails the suite on an undeclared token, and
+`tests/tst_spacing_scale.qml` pins both the ladder and the three aliases.
+
 A radius that is deliberately *computed* from a parent's radius (e.g. a child nested inside a
 rounded parent, sized to the parent's radius minus its inset so the corners nest correctly) is not
 a violation of this rule - keep the computed expression rather than snapping it to a token.
@@ -94,6 +109,42 @@ a worked example of why growing the container is the expensive choice.
 This codebase uses the **M3 Expressive** motion scheme. You must use the component factories in `Appearance.animation` or the explicit curve/duration definitions in `Appearance.animationCurves`. 
 
 Never use raw integer durations (e.g., `duration: 150`), generic QML easing curves (e.g., `Easing.OutCubic`, `Easing.Linear`), or ad hoc bezier curves.
+
+**Take a tier whole.** Naming a tier's `duration` and setting no easing is not half-compliant — it
+leaves `easing.type` at Qt's default, which is `Easing.Linear`, the generic curve this section
+forbids. Prefer the tier's own `numberAnimation`/`colorAnimation` factory, which carries the
+duration, the type and the curve together; write out `<tier>.type` and `<tier>.bezierCurve` beside
+the duration only where the factory's `alwaysRunToEnd` would change the behaviour (a transition the
+user can reverse mid-flight). `tests/lint_motion_tier_partial.py` fails the suite on a new partial
+take and holds the existing ones in a per-file register that may only shrink; the durations quoted
+below are the *base* values, before the user's speed multiplier.
+
+### Speed, and the reduce-motion floor
+
+Every duration in `Appearance.animation` — and every tier of `Appearance.interaction` — is scaled by
+`Appearance.animation.multiplier`, the user's speed preference, clamped to a range that stops well
+short of the floor. `Appearance.animation.reduceMotion` is a **separate** state that collapses every
+one of them to `reduceMotionFloor`. Do not re-derive "motion is off" from the multiplier's value:
+accessibility is a declared switch, not the far end of a slider. New motion needs nothing for either
+of these as long as it takes its duration from a tier.
+
+### Stagger
+
+A group that arrives in sequence uses `Appearance.animation.staggerRanks()`,
+`Appearance.animation.staggerStep` and `Appearance.animation.staggerDelay()` — never `index * <ms>`.
+Rank by *visible* position (a hidden member that spends a slot leaves a hole in the middle of the
+wave), take the clamp (`index * step` is unbounded and a long list cascades for seconds), and let
+the step be a fraction of a catalogued duration rather than a literal. Scale the step and the lead-in
+once, at the call site, so a wave collapses to nothing under reduce motion with no second gate.
+
+### Swapping content that cannot be interpolated
+
+To make a `url`/`string`/`Component` swap wait for the outgoing content's exit, put a `Behavior` on
+that property whose animation ends in a **bare** `PropertyAction {}` — no target, no property, no
+value. Inside a `Behavior` that means "apply the pending write here", so the exit runs first and the
+entrance runs after. Do not build a state machine with a pending-value field and chained `Timer`s
+for this; the wait *is* the animation, so no interval has to be kept in agreement with a duration
+declared elsewhere.
 
 ### Spatial Moves (Position and Size)
 For elements changing position, dimensions, or layout:

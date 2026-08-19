@@ -110,6 +110,14 @@ Component paths must be relative, remain inside the package, and must not contai
 entry points are `barWidget`, `desktopWidget`, `controlCenterWidget`, `launcherProvider`, `panel`,
 and `settingsUi`. Bar entries use the stable `plugin:<id>` layout identifier.
 
+`barWidget` is drawn by both bars — the horizontal one and the vertical one share
+`Config.options.bar.layouts.*`, so a widget placed on one is placed on the other. The whole
+orientation API is one duck-typed property: declare `property bool vertical: false` on the entry
+point's root and the host writes it (`true` in the vertical bar), as `docker`'s `DockerWidget.qml`
+and `discordVoice`'s `BarWidget.qml` do. There is nothing to opt out of — a widget that declares no
+`vertical` is still rendered in a vertical bar, laid out as it was written, because a widget the
+user placed and then cannot find is exactly the failure this replaced.
+
 `desktopWidget` additionally takes three optional booleans — `blur`, `locked` and `clickThrough`.
 None of them is a setting: each **seeds the default** of the matching per-plugin option in
 `plugin-state.json` (`blurEnabled`, `positionLocked`, `clickThrough`), so a widget can ship an
@@ -428,6 +436,24 @@ whose files are already gone (a listed-but-dirless entry left by an out-of-band 
 scan) still counts as removed, so such a row can always be cleared rather than being trapped behind an
 error. The id is also dropped from `plugins.enabled` so a stale entry cannot re-enable a package that
 no longer exists.
+
+## Overlay surfaces and fullscreen windows
+
+A plugin that maps a wlr-layer-shell surface on the **Overlay** layer — itself, or through a
+process it spawns — blocks the compositor's fullscreen fast path for as long as that surface exists,
+at any size. Hyprland names it in `hyprctl monitors`: `solitaryBlockedBy: other overlays`. With
+the fast path blocked the compositor composites every frame; with it open it hands the fullscreen
+window the output and does nothing. On the maintainer's machine the bundled Activate Linux
+watermark — a 340×120 Overlay surface from `/usr/bin/activate-linux` — was the last thing between
+a fullscreen game and that path, worth ~8 fps and all of the compositor's remaining GPU time.
+
+If your plugin needs an Overlay surface, stand it down while a fullscreen window is up. Read the
+fact off `HyprlandData` — `hasfullscreen` on each monitor's active workspace, the same field the
+shell's bar and dock gate on — not by walking `Hyprland.workspaces[..].toplevels` in a binding,
+whose nested `.values` reads do not re-evaluate when a workspace changes underneath them. The
+Activate Linux plugin's `ActivateLinuxHost.qml` is the reference: `fullscreenSomewhere` folds into
+`desiredCommand()`, and the process is stopped and relaunched through the same debounced `apply()`
+every other option change goes through.
 
 ## Process lifecycle safety
 

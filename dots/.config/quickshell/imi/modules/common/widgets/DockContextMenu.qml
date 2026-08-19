@@ -6,6 +6,7 @@ import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
 import qs.modules.common.functions
+import "../../imi/dock/dock_geometry.js" as DockGeometry
 
 /**
  * Right-click context menu for dock app icons (ported from upstream
@@ -18,6 +19,10 @@ import qs.modules.common.functions
  */
 Item {
     id: root
+
+    readonly property string dockEdge: DockGeometry.normalizedEdge(
+        Config.options?.dock.edge ?? "bottom")
+    readonly property bool dockVertical: DockGeometry.isVertical(root.dockEdge)
 
     property var appToplevel: null
     // Authoritative app id for pin/launch actions. For pinned apps this is the
@@ -65,11 +70,20 @@ Item {
             id: contextPopup
             visible: true
 
+            // Away from the edge the dock is on: a menu that opens upward
+            // from a top dock is drawn off the screen, and one that opens
+            // upward from a side dock runs off the top of a tall strip.
+            readonly property string openSide: DockGeometry.popupGravity(root.dockEdge)
+            readonly property int openFlag: contextPopup.openSide === "top" ? Edges.Top
+                : contextPopup.openSide === "bottom" ? Edges.Bottom
+                : contextPopup.openSide === "left" ? Edges.Left : Edges.Right
             anchor {
                 item: root.targetButton
-                gravity: Edges.Top
-                edges: Edges.Top
-                adjustment: PopupAdjustment.SlideX
+                gravity: contextPopup.openFlag
+                edges: contextPopup.openFlag
+                // Slide along the screen edge the menu is running out of, not
+                // along the one it opened away from.
+                adjustment: root.dockVertical ? PopupAdjustment.SlideY : PopupAdjustment.SlideX
             }
 
             color: "transparent"
@@ -90,11 +104,13 @@ Item {
                 id: menuBackground
                 property real contentPadding: Appearance.spacing.space50
 
-                anchors {
-                    bottom: parent.bottom
-                    horizontalCenter: parent.horizontalCenter
-                    bottomMargin: Appearance.sizes.elevationMargin
-                }
+                // The surface is the card plus an elevation margin on every
+                // side, so centring IS the old "hug the side facing the dock
+                // and push off it by the elevation margin" - it lands on the
+                // same pixel at all four edges, and it does so without an
+                // anchor that has to move to another side when the dock turns
+                // (see Dock.qml's strip for what that costs).
+                anchors.centerIn: parent
                 color: Appearance.m3colors.m3surfaceContainer
                 radius: Appearance.rounding.normal
                 implicitWidth: menuColumn.implicitWidth + contentPadding * 2
@@ -118,6 +134,7 @@ Item {
                             label: modelData.name
                             onClicked: {
                                 DockLaunchTracker.markLaunching(root.menuAppId)
+                                AppUsage.recordLaunch(root.desktopEntry?.id)
                                 modelData.execute()
                                 root.close()
                             }
@@ -138,6 +155,7 @@ Item {
                         enabled: root.desktopEntry !== null
                         onClicked: {
                             DockLaunchTracker.markLaunching(root.menuAppId)
+                            AppUsage.recordLaunch(root.desktopEntry?.id)
                             root.desktopEntry?.execute()
                             root.close()
                         }

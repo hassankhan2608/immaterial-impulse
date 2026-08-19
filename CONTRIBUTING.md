@@ -250,10 +250,16 @@ bug in anything that qualifies:
   for `ERROR:` - not just `WARN` - before calling the change verified. See AGENT.md's "Where to look
   when something goes wrong" for the cascade format and the `pgrep -af 'qs -c imi'` caveat.
   `DesignSystemCompile.qml` (run by `run_tests.sh`, skipped without `WAYLAND_DISPLAY`) narrows this
-  for the design system, the bundled packages, every settings page and the desktop-widget host
-  (`PluginWidget.qml`, which only compiles once a plugin is enabled on some monitor) - it compiles
-  them, so a bad property on a page nobody opened is caught. Everything else still needs the live
-  load. 494580b65 ("feat(plugins): resolve a placed widget's span from its stored choice").
+  for the design system, the bundled packages, every settings page, the desktop-widget host
+  (`PluginWidget.qml`, which only compiles once a plugin is enabled on some monitor) and both bars
+  - it compiles them, so a bad property on a page nobody opened is caught. Everything else still
+  needs the live load. 494580b65 ("feat(plugins): resolve a placed widget's span from its stored
+  choice"). The vertical bar joined that list for the same reason the dock is on it: it is opt-in,
+  so anything wrong with it stays green until someone switches it on - which is how the two bars
+  came to resolve widget files differently in the first place. Note the limit the sweep has, which
+  is easy to over-read: it proves a file *compiles*, and a missing `.js` import resolves at binding
+  time rather than compile time, so it passes one. ("fix(verticalBar): render plugin bar widgets
+  instead of an empty stub").
   **It sweeps a bundled package through its `Widget.qml` only**, on the reasoning that a sibling
   file is a type resolved through the package's `qmldir` and so is reached from the entry point
   anyway. A file the entry point loads *by URL* is not that - it is a standalone component that
@@ -267,6 +273,17 @@ bug in anything that qualifies:
   three modules shipped as silent no-ops precisely because nobody checked that.
 - **Prove a new static check can fail.** These checks match source text; a pattern with baked-in
   indentation passes vacuously after any reformat.
+- **A runtime harness states how many checks it ran, and its driver asserts the number.** The
+  verdict is `[Tag] checks: ${harness.checksRun} failures: ${harness.failures}`, with `checksRun`
+  incremented inside the harness's own `check()`; the driver holds the expected count in a
+  module-level `EXPECTED_CHECKS` (one per shape, where it launches the harness in more than one)
+  and asserts the whole line. Neither half is optional: `failures: 0` is what a harness that ran
+  *nothing* prints, so a loop that stops iterating or a step deleted from a list used to shrink
+  the suite in silence — and a count read back out of the harness's own output would agree with
+  itself by construction. The count must come from the counter rather than from a constant, or a
+  harness that gives up half way still reports the full number.
+  `tests/lint_harness_check_counts.py` fails the suite on either half.
+  0b3a900f4 ("test(lint): fail on a harness verdict that states no check count").
 - **Plant mutations only in a clean tree.** Proving a check can fail means planting a bad input and
   reverting it — and `git checkout -- <file>` reverts to HEAD, destroying every uncommitted edit in
   that file along with the mutation. That exact trap has fired three times in two days, most
@@ -326,6 +343,38 @@ both files and fails the suite if one resolves to nothing. It resolves by SHA **
 subject line, because this repo merges with "Rebase and merge": a doc entry landing in the same PR
 as the commit it cites will have that SHA rewritten at merge, and the subject is the half that
 survives.
+
+## Keep CHANGELOG.md fed
+
+`CHANGELOG.md`'s `[Unreleased]` section is written by the PR that earns the entry, not by the
+release. A release that finds it empty has to reconstruct what shipped from the git log — a worse
+changelog, written weeks later by someone reading subject lines instead of the change.
+
+**Every PR that changes anything under `dots/` must carry a `Changelog:` receipt line, and CI
+rejects PRs without one** (`.github/workflows/changelog-receipt.yml`). One of:
+
+- `Changelog: updated` — the entry is in this PR, under `[Unreleased]`. **The diff must actually
+  touch `CHANGELOG.md`, and CI checks that**: a receipt satisfiable by typing the line is the prose
+  rule again with a green tick on it, which is what the two empty releases already had.
+- `Changelog: not user-visible — <reason>` — a refactor, a test, a lint, an internal rename.
+  Liberal about the separator (em dash, en dash or a plain hyphen, spaced however you like), strict
+  about the reason: everything after the dash *is* the receipt, so it may not be empty.
+
+A PR that changes nothing under `dots/` — docs-only, CI-only, a proposal — is not asked for one at
+all. Docs-only and CI-only PRs are the common case here, and a receipt every PR must carry whether
+or not it could possibly need one is a receipt people paste without reading.
+
+This exists because `[Unreleased]` was found **empty at two consecutive releases**: 43d1ffd01
+("release: 0.25.0"), with 61 PRs merged behind it, and 58bd53a30 ("release: 0.26.0"), with five
+more — whose own message says "the section was empty again". Both reconstructed the changelog after
+the fact. The rule was prose both times, so a third paragraph is the one repair already known not to
+work: a mistake made twice becomes a failing check in the same PR, never another note.
+
+The matching lives in `dots/.config/quickshell/imi/tests/changelog_receipt.py` and nowhere else —
+the workflow checks the repo out and runs that module rather than carrying its own `grep -E`, so the
+CI half and the local half cannot become two answers. `tests/test_changelog_receipt.py` drives it
+over in-memory PR fixtures, including the two forms offered above, so the rule is testable without
+pushing anything.
 
 ## Multi-agent / parallel workflows (git worktrees)
 

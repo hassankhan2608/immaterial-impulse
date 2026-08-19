@@ -144,7 +144,34 @@ hl.layer_rule({ match = { namespace = "quickshell:.*" }, ignore_alpha = 0.05})
 hl.layer_rule({ match = { namespace = "quickshell:bar" }, animation = "slide"})
 hl.layer_rule({ match = { namespace = "quickshell:actionCenter" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:cheatsheet" }, animation = "slide bottom"})
-hl.layer_rule({ match = { namespace = "quickshell:dock" }, animation = "slide bottom"})
+-- The subject selector: a full-screen surface that is transparent everywhere
+-- except one toolbar, because the wallpaper and the widgets it is judging are
+-- the real ones underneath it. Under the catch-all above that is the worst
+-- possible case - a screen-sized surface asking the compositor to blur the
+-- entire screen behind it - so its blur is scoped to the toolbar's own rect
+-- through a region, the same way the bar's and the sidebars' are. It also opens
+-- and closes on a button, so a map animation on something this size reads as
+-- the desktop lurching.
+hl.layer_rule({ match = { namespace = "quickshell:clockDepthSelect" }, no_anim = true})
+hl.layer_rule({ match = { namespace = "quickshell:clockDepthSelect" }, blur = false})
+-- Bare `slide`, like the bar above: the compositor slides toward whichever
+-- edge the surface is anchored to, so the dock's exit and entry follow its
+-- configured edge. Naming the edge here pinned it to the bottom, and a top
+-- dock then slid downward, into the screen, to leave.
+hl.layer_rule({ match = { namespace = "quickshell:dock" }, animation = "slide"})
+-- Edit Mode's chrome: another full-screen surface that is transparent
+-- everywhere except two opaque toolbars, because the desktop it frames is the
+-- real one underneath it. Same hazard as the subject selector above - under the
+-- catch-all 0.05 its transparent pixels clear the threshold and the compositor
+-- is asked to blur the whole screen - answered the other way round, because the
+-- toolbar bodies are m3surfaceContainer and therefore fully opaque: at
+-- ignore_alpha = 1 the bodies are the only thing blurred, and their shadows and
+-- everything else on the surface are left alone. That is the treatment
+-- quickshell:overlay and quickshell:recordingRegion already carry for this
+-- shape. The surface is created and destroyed by a toggle, so a map animation
+-- on something screen-sized reads as the desktop lurching.
+hl.layer_rule({ match = { namespace = "quickshell:editMode" }, ignore_alpha = 1})
+hl.layer_rule({ match = { namespace = "quickshell:editMode" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:screenCorners" }, animation = "popin 120%"})
 hl.layer_rule({ match = { namespace = "quickshell:lockWindowPusher" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:notificationPopup" }, animation = "fade"})
@@ -157,6 +184,13 @@ hl.layer_rule({ match = { namespace = "quickshell:popup" }, xray = false}) -- No
 hl.layer_rule({ match = { namespace = "quickshell:popup" }, ignore_alpha = 1}) -- No weird color for bar tooltips (but somehow this is necessary)
 hl.layer_rule({ match = { namespace = "quickshell:mediaControls" }, ignore_alpha = 1}) -- Same as above
 hl.layer_rule({ match = { namespace = "quickshell:reloadPopup" }, animation = "slide"})
+-- The recording controls are a small toolbar in a window that is mostly
+-- transparent: the extra room is for the toolbar's own shadow. The
+-- catch-all above blurs anything over 5% alpha, which frosts that shadow
+-- into a haze the size of the window. Same treatment as the popup and
+-- overlay surfaces, and for the same reason.
+hl.layer_rule({ match = { namespace = "quickshell:recordingRegion" }, ignore_alpha = 1})
+hl.layer_rule({ match = { namespace = "quickshell:recordingRegion" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:regionSelector" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:screenshot" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:session" }, blur = true})

@@ -13,10 +13,21 @@ Item {
     implicitWidth: 420 * Appearance.effectiveScale
     implicitHeight: 228 * Appearance.effectiveScale
 
+    // Hosted by the media widget's one tree (nandoroid-media/Widget.qml): the
+    // tree owns the card, the transport, the slider and the time label, so
+    // this instance draws only what is unshared - title, artist, the lyrics
+    // page and its toggles. Standalone (the component registry) it stays the
+    // complete widget it always was.
+    property bool chromeless: false
+
     property bool showLyrics: Config.options.appearance.mediaWidget.showLyrics
     property bool useRomaji: Config.options.appearance.lyrics.lyricsUseRomaji
     property bool viewLyrics: false
     property bool useBlurBackground: false
+    // Handled state, for the card's elevation.
+    property bool dragging: false
+    // The host's box is animating; the cards drop their shadow for it.
+    property bool boxInMotion: false
     // The host wrapper overrides this with its own plugin id; the fallback keeps
     // the toggle honoured for a component instantiated without one.
 
@@ -30,14 +41,15 @@ Item {
         LyricsService.desktopWidgetLyricsActive = viewLyrics;
     }
 
-    // Main Card Background
-    Rectangle {
+    // Main Card Background. Card bg = play/pause icon color (user request).
+    WidgetCard {
         id: bgCard
+        visible: !root.chromeless
         anchors.fill: parent
-        radius: 30 * Appearance.effectiveScale
-        color: root.useBlurBackground
-            ? Functions.ColorUtils.applyAlpha(Appearance.colors.colOnPrimary, root.backgroundOpacity)
-            : Appearance.colors.colOnPrimary // Card bg = play/pause icon color (user request)
+        dragging: root.dragging
+        hostMotionActive: root.boxInMotion
+        useBlurBackground: root.useBlurBackground
+        backgroundOpacity: root.backgroundOpacity
     }
 
     // Toggle button in top right corner (M3 Styled Shape)
@@ -131,6 +143,7 @@ Item {
 
             // 3. BUTTONS (Centered, SANGAT BESAR)
             RowLayout {
+                visible: !root.chromeless
                 Layout.alignment: Qt.AlignHCenter
                 spacing: 12 * Appearance.effectiveScale
 
@@ -154,7 +167,11 @@ Item {
                         shape: MaterialShape.Shape.Cookie12Sided
                         color: Appearance.m3colors.darkmode ? Appearance.colors.colOnTertiaryContainer : Appearance.colors.colSecondaryContainer
 
-                        property bool spinning: MprisController.isPlaying
+                        // `visible` beside the transport state: a reel spinning
+                        // inside a hidden desktop still dirties the scene every
+                        // frame, and the compositor repaints the output for each
+                        // frame the shell commits.
+                        property bool spinning: MprisController.isPlaying && prevShape.visible
                         RotationAnimator on rotation {
                             from: 0
                             to: 360
@@ -254,7 +271,7 @@ Item {
                         shape: MaterialShape.Shape.Cookie12Sided
                         color: Appearance.m3colors.darkmode ? Appearance.colors.colOnTertiaryContainer : Appearance.colors.colSecondaryContainer
 
-                        property bool spinning: MprisController.isPlaying
+                        property bool spinning: MprisController.isPlaying && nextShape.visible
                         RotationAnimator on rotation {
                             from: 0
                             to: 360
@@ -299,6 +316,7 @@ Item {
             // 4. DURASI SAAT INI / DURASI TOTAL (Centered with tabular figures)
             StyledText {
                 Layout.fillWidth: true
+                visible: !root.chromeless
                 horizontalAlignment: Text.AlignHCenter
                 text: Functions.StringUtils.friendlyTimeForSeconds(MprisController.position) + " / " + Functions.StringUtils.friendlyTimeForSeconds(MprisController.length)
                 font.pixelSize: Appearance.font.pixelSize.smallest
@@ -312,6 +330,7 @@ Item {
             // 5. PROGRESS BAR
             StyledSlider {
                 id: progressSlider
+                visible: !root.chromeless
                 Layout.preferredWidth: 170 * Appearance.effectiveScale
                 Layout.fillWidth: false
                 Layout.alignment: Qt.AlignHCenter
@@ -516,8 +535,13 @@ Item {
                 onEntered: romajiToggleBtn.hovered = true
                 onExited: romajiToggleBtn.hovered = false
                 onClicked: {
+                    // Write the CONFIG, not the property bound to it: assigning
+                    // to `root.useRomaji` destroyed its binding on the first
+                    // click, after which the toggle showed local state that
+                    // never persisted and no preset could move.
                     if (Config.ready) {
-                        root.useRomaji = !root.useRomaji;
+                        Config.options.appearance.lyrics.lyricsUseRomaji =
+                            !Config.options.appearance.lyrics.lyricsUseRomaji;
                     }
                 }
             }

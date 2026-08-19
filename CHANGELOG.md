@@ -12,6 +12,223 @@ own repo; the installer pins which revision it builds.
 
 ## [Unreleased]
 
+### Added
+- **Clock depth works on a live Wallpaper Engine scene.** The depth picker
+  segments the still the shell already photographs of the active project, keyed
+  on the project rather than on the still (which is re-grabbed every session),
+  and the desktop layer masks the *live* surface with it — the silhouette stays
+  put while the pixels inside it keep moving. The picker says so, and says when
+  a project has not drawn its first frame yet. A mask cut from a still picture
+  never lands on a live scene, and a project's mask never lands on the static
+  fallback the desktop shows when the renderer gives up.
+
+### Fixed
+- **The motion speed slider and reduce motion now reach every animation.** Nine
+  places read a motion tier's base duration instead of the scaled one, so they
+  ignored both settings — the settings-page scroll settle and its rubber band,
+  the navigation rail's tab highlight, the privacy popup's fade, the recording
+  panel's pulse, and both shape-morph canvases. A shape morph could not be
+  retimed at all.
+- **Clock depth masks are crisp.** On wide wallpapers the subject's outline
+  used to claim a soft band of background around fine structure like hair, and
+  whatever was behind it showed through — a striped wall came through as
+  subject. The producer now stores the mask aspect-true at 4096 on the long
+  side instead of a 1024 square and hardens the edge around the model's own
+  boundary at that size, so the outline is about a pixel wide instead of a
+  five-pixel ramp. Same cost per run; re-run a wallpaper's models in the depth
+  picker to get the new mask.
+
+## [0.26.0] — 2026-08-19
+
+The lock screen gets its own widget layout, snapping stops gluing widgets
+together, and two things that could not be stopped or found their place now
+can.
+
+### Added
+- **The lock screen's widget layout is its own.** Move a widget on Edit Mode's
+  Lockscreen tab and that screen forks: from then on the lock and the desktop
+  arrange — and size — their widgets independently, so the media widget can be
+  3×2 on the desktop and 1×2 on the lock. Nothing changes until you move
+  something; a screen you have never edited there keeps following the desktop,
+  and the drawer's Lock section says which state you are in and offers **Use
+  desktop layout** to re-link. Undo works across tabs, and presets carry both
+  layouts — a preset from an older shell leaves your fork alone.
+- **An edge-snapping toggle on Edit Mode's toolbar**, beside "Add widgets". It
+  is the same switch Settings already offers, surfaced where the snapping
+  happens.
+
+### Fixed
+- **Widgets snapped side by side keep one gap between them** — the same 12px
+  that already separates the cells inside a wider widget — instead of gluing
+  into a slab. Aligning an edge to an edge still lands exactly on the line.
+- **A recording you cannot stop.** Every stop path sends the recorder one
+  SIGINT, and a background job in a non-interactive shell is born ignoring it;
+  the recorder normally undoes that once capturing, but one stuck before its
+  first frame never did. The stop now escalates INT → TERM → KILL, the launch
+  no longer hands the recorder an ignored INT, and a recording that produces
+  no frames within 25 seconds is torn down and reported instead of sitting
+  behind an indicator that says "recording". (The underlying cause on the
+  reporting machine was a hung `xdg-desktop-portal-hyprland`; fullscreen
+  recordings go through the portal, region recordings do not, which is why
+  only one of them appeared broken.)
+- **A bar popup that opened in the top-left corner** rather than under its
+  widget. The popup surface now unmaps while idle (0.25.0's fullscreen frame
+  fix), and a layer surface that has just been shown reports a placeholder
+  size for its first tick — the card was being clamped against 500×500. It
+  places itself again once its real geometry arrives.
+
+## [0.25.0] — 2026-08-18
+
+The Edit Mode release. Press the button and the desktop shrinks into a card
+lifted off the wallpaper, and everything the shell normally hides comes out:
+drag widgets, drop new ones from a drawer, right-click one for its size, arrange
+the bar and the dock in place at full size, and lay out the lock screen from a
+preview that cannot authenticate. Undo is Ctrl+Z. Done puts it all back.
+
+Also in here: a fullscreen game gets its frames back, the wallpaper's subject
+can stand in front of the clock, and the OLED screensaver has a key.
+
+### Added
+- **Edit Mode.** One mode, four in-place editors, on one clock. The desktop
+  shrinks about its own centre into a card with a shadow and a glass edge; the
+  bar and the dock stay at full size and are edited where they are, with visible
+  bucket boundaries and remove badges; the Lockscreen tab filters the same
+  viewport into what the lock will show — its wallpaper, its palette, its
+  widgets, its islands — through a preview context that constructs no
+  authenticator by contract. A drawer catalogues every widget the shell can add
+  and drops it where you let go of it. Right-click a widget for Remove, Pin and a
+  Size stepper. A dragged widget holds a neighbour's edge through hysteresis
+  rather than snapping and unsnapping on the boundary. Ctrl+Z walks the whole
+  edit back, Ctrl+Shift+Z forward. The grid appears when you start dragging, not
+  when you enter the mode.
+- **The lock screen's islands reorder.** Drag the pieces of each island into the
+  order you want; the password field is the one that will not move. A list
+  written by a newer shell loses nothing when an older one reads it back.
+- **Clock depth.** The wallpaper's subject drawn over the desktop widgets, so
+  the clock sits behind the person or object in the picture. Off by default,
+  per-wallpaper, and accepted once by you rather than judged automatically — the
+  detectors' confidence numbers do not rank cutout quality, and this ships as a
+  verdict you give. Where the detectors find no subject at all (half of one real
+  library), click the subject yourself, on the desktop at full size, over the
+  real widgets, with undo — a thumbnail was too small to aim at a shoulder.
+- **The OLED screensaver has a key** (`CTRL+SUPER+L`), blanks the focused
+  monitor rather than the one under the cursor, and holds an idle inhibitor for
+  a screen you blanked on purpose so it never walks the session into a lock.
+- **Region capture grew a toolbar.** Shot/Record and full-screen in the overlay
+  itself, a loupe at the cursor while framing, and — while a region records —
+  stop, pause and save-clip beside the rectangle. The toolbar is never placed
+  inside the region, because it would be in every frame of a clip that cannot
+  be retaken.
+- **The privacy pill acts.** Click it for a card that mutes a stream, or ends
+  the capture, scoped to one app; hover still reads.
+- **A real XDG sound-theme engine.** System sounds resolve through the installed
+  theme and its `Inherits=` chain and play once, in place of two hand-built
+  paths and an `ffplay` at each, one of them always doomed.
+- **Launcher apps rank by how often you launch them.**
+- **An animation multiplier with a named reduce-motion floor**, one stagger
+  policy for every list, and content that swaps only after the shape it lives
+  in has finished moving. About 700 call sites take it without changing.
+- **Widget behaviour is a toggle bar**, not six switch rows.
+
+### Fixed
+- **A fullscreen game no longer loses half its frames to the shell.** One
+  infinite rotation — the cookie clock's dial, thirty seconds per turn — kept
+  the whole 5120×1440 output repainting behind an opaque game, because a running
+  animation is a scene the compositor must redraw every frame whether or not
+  anyone can see it. Measured against the game's own counter: 52 fps with the
+  shell running, 108 with it stopped; 92 against a 94 ceiling after. Every
+  looping animation now stops when what it animates is off screen, the bar's
+  hover-card surface unmaps when it has nothing to show, and the Activate Linux
+  watermark stands down under a fullscreen window — a 340×120 Overlay surface
+  was the last thing holding the compositor's fullscreen fast path shut. The
+  background surface stays mapped on purpose: destroying it is what once left
+  Wallpaper Engine strobing at 30 Hz.
+- **The launcher stopped spawning a calculator per keystroke** — eight
+  processes for the word "firefox".
+- **The updater no longer destroys local work** in the suite checkout: a
+  hard reset to the fetched head is now a rescue branch, a stash and a log.
+- **The vertical bar renders plugin bar widgets** instead of an empty stub.
+- **Four binding loops**, each the same shape: a property that read the thing
+  it drove.
+- **The dock's turn is a size, not a different set of anchors**, so switching
+  edges no longer resizes it from its parent.
+- **A settings deep link finds its page by id**, not by the page's translated
+  name.
+- **The anti-flashbang's weak rung has the shader it always named.**
+- **A tray menu opened from a bar hover card is blurred**, and the card's
+  translucent shadow is not.
+- **Two easing bugs.** The bar's util button and every resize grip had run on
+  `Easing.Linear` since they were written, from naming a motion tier's duration
+  and dropping its curve; a check now fails on a new one and holds the 40
+  existing partial takes as a ratchet.
+
+### Changed
+- **The shell's own test harnesses run on a private session bus.** One of them
+  read the developer's browser as a media player, which hides two lock-screen
+  slots, and failed on one machine while passing on every other with the code
+  identical. New harnesses must decide their bus; the 33 existing ones are a
+  register.
+- Reordering a widget moves it rather than swapping it with the neighbour it
+  lands on, at every call site.
+- The three shape tokens the design system reads are declared once.
+
+## [0.24.0] — 2026-08-13
+
+The Material 3 Expressive morphing release: desktop widgets stopped disappearing
+when they resize. Every shared element of a widget is now declared once and
+travels between the places its spans put it, on one clock, over a card that
+bows when you pull it and casts a shadow that lifts when you handle it.
+
+### Added
+- **Widgets morph instead of swapping.** A widget used to hold one layout per
+  span and cross-fade between them, so its own parts vanished and reappeared on
+  a resize. Media, weather and currency are each one tree now: the play button,
+  the seek bar, the glyph, the rates panel are single elements whose geometry
+  comes from a per-span table, and the resize animates them from one place to
+  the other. Only what genuinely has no home at the next span fades.
+- **Elastic resize.** A widget's card resists the pull, bows at the edge you are
+  dragging, and breaks to the next span when you pass the threshold — with the
+  constants tuned on screen rather than guessed, and expressed as time so they
+  do not change with the frame rate.
+- **Desktop cards cast a shadow**, lifting on hover and further while dragged.
+  The five older bundled widgets that carried their own hand-rolled shadow at
+  their own values now share the one elevation, and calendar — the copy the
+  design spec recorded as having already drifted — draws on the shared card.
+- **One interaction model** for hover and press, in `Appearance`, adopted by
+  both RippleButtons and the media transport controls. A press is acknowledged
+  faster than it is released, and a release animates even when the pointer has
+  already left the control.
+- **The dock lives on any edge.** Top is a mirror of bottom; left and right are
+  a genuinely different layout, ported from the vertical dock strip the shell
+  already shipped in its bar. One derivation decides anchors, thickness, the
+  reserved zone and the margin pair for all four. The settings UI declines to
+  put the dock on an edge an auto-hiding bar already owns.
+- **A weather forecast on the desktop.** The weather card gains a 3x2 span whose
+  second row is the day-by-day outlook, from either provider, and a background
+  line tracing today's daylight with the sun's position on it.
+- **A media widget at three sizes**, whose play button *is* the visualiser and
+  whose seek bar bends from a straight line to a ring inside the button to the
+  button's own outline.
+
+### Fixed
+- **Screen recordings were washed out.** The tonemap assumed a signal peak of
+  ten times reference white; a desktop capture peaks near one. Measured from the
+  pixels instead, white lands at 210/255 rather than 136.
+- **Only the first notification of a session was blurred.** The popup refreshed
+  its blur region from a signal that never fired again, so from the second
+  notification on the compositor was handed the region of a destroyed card.
+- **The currency widget stopped saying "Network timeout" forever.** It made one
+  attempt per session; it now walks both hosts and retries with backoff.
+- **A paused player no longer repaints an invisible bar visualiser at 237 fps.**
+- **Weather icons match the provider that reported them.** Both providers' codes
+  were resolved through one provider's table, drawing a clear sky through every
+  storm on the default provider.
+
+### Changed
+- The morphing machinery is shared rather than copied: one module for the shape
+  morphs, one spelling of the travel animation, one card component. Checks fail
+  on a fourth copy rather than a note asking for one.
+
 ## [0.23.1] — 2026-08-10
 
 ### Fixed
@@ -1952,7 +2169,8 @@ illogical-impulse), collecting the work done to date:
   (`Super`+`/`).
 - This changelog and versioning.
 
-[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.9...HEAD
+[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.23.1...v0.24.0
 [0.14.9]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.8...v0.14.9
 [0.14.8]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.7...v0.14.8
 [0.14.7]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.6...v0.14.7

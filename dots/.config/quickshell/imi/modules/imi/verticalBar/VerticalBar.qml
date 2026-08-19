@@ -25,7 +25,11 @@ Scope {
         }
         LazyLoader {
             id: barLoader
+            // The Lockscreen tab takes the bar down exactly as the real lock
+            // does, through the same gate (spec §1.5) - a teardown/rebuild per
+            // tab flip, same as per lock/unlock.
             active: GlobalStates.barOpen && !GlobalStates.screenLocked
+                && !GlobalStates.editLockPreview
             required property ShellScreen modelData
             component: PanelWindow {
                 id: barRoot
@@ -49,15 +53,20 @@ Scope {
                 }
                 property bool superShow: false
                 // See Bar.qml / issues #30, #31: stay shown while a bar popup is open.
+                // The editMode term is Bar.qml's too - the bar is edited in
+                // place, so auto-hide is suspended by this expression and never
+                // by a write to `visible`, which destroys a layer surface.
                 property bool mustShow: hoverRegion.containsMouse || superShow
+                    || GlobalStates.editMode
                     || ((GlobalStates.mediaControlsOpen || GlobalStates.sysTrayOverflowOpen) && Config?.options.bar.autoHide.dismissPopups)
                 exclusionMode: ExclusionMode.Ignore
                 exclusiveZone: (Config?.options.bar.autoHide.enable && (!mustShow || !Config?.options.bar.autoHide.pushWindows)) ? 0 :
                     Appearance.sizes.baseVerticalBarWidth + (Config.options.bar.cornerStyle === 1 ? Appearance.sizes.hyprlandGapsOut : 0)
                     + (Config.options.bar.cornerStyle === 3 ? (Config.options.hyprland.general.gapsOut || 5) : 0)
                 WlrLayershell.namespace: "quickshell:verticalBar"
-                implicitWidth: Appearance.sizes.verticalBarWidth + Appearance.rounding.screenRounding
-                    + (Config.options.bar.cornerStyle === 3 ? (Config.options.hyprland.general.gapsOut || 5) : 0)
+                // In Appearance for the reason Bar.qml's height is: Edit Mode
+                // keeps its chrome clear of this surface and cannot measure it.
+                implicitWidth: Appearance.sizes.verticalBarSurfaceWidth
                 mask: Region { item: hoverMaskRegion }
                 color: "transparent"
 

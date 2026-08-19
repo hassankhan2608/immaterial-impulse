@@ -9,6 +9,7 @@ import Qt.labs.folderlistmodel
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
+import "math_query.js" as MathQuery
 import ".."
 
 Singleton {
@@ -16,14 +17,41 @@ Singleton {
 
     property string query: ""
 
-    // Drive the file-search scan imperatively (never from the results binding,
-    // which would loop). Only scans while a file-prefixed query is active.
+    // Drive the external searches imperatively (never from the results
+    // binding, which would loop). Only scans while a file-prefixed query is
+    // active; only calculates while the query is arithmetic at all.
     onQueryChanged: {
         const filePrefix = Config.options.search.prefix.file ?? "~";
         if (root.query.startsWith(filePrefix))
             FileSearch.search(StringUtils.cleanPrefix(root.query, filePrefix));
         else
             FileSearch.reset();
+        root.refreshMathResult();
+    }
+
+    // Called, never bound. A `readonly property bool queryIsMath` read from
+    // onQueryChanged is one keystroke stale - the handler and the binding both
+    // hang off `query` and nothing orders them, so the gate answered for the
+    // previous query and the first character of every expression was dropped
+    // (measured: "2+2*10" reached qalc as "2+", "2+2", ...). The predicate is a
+    // regex on a short string; call it where it is needed.
+    function queryIsMath() {
+        return MathQuery.isMathQuery(root.query, Config.options.search.prefix.math);
+    }
+
+    // The qalc spawn used to be fired from inside the `results` binding, which
+    // re-evaluates on every keystroke AND again when `mathResult` lands - so
+    // typing "firefox" started eight qalc processes to be told eight times
+    // that "firefox" is not a number. Decide here, from the query alone,
+    // before anything is spawned.
+    function refreshMathResult() {
+        if (!root.queryIsMath()) {
+            nonAppResultsTimer.stop();
+            mathProc.running = false;
+            root.mathResult = "";
+            return;
+        }
+        nonAppResultsTimer.restart();
     }
 
     // One shape for a modpack result, built in both places that need it: the
@@ -60,7 +88,7 @@ Singleton {
     Process {
         id: keywordHarvester
         property var pendingPages: []
-        property string currentPageName: ""
+        property string currentPageId: ""
         
         function startHarvesting() {
             root.settingsKeywordsCache = {}; 
@@ -82,7 +110,7 @@ Singleton {
             
             command = ["bash", "-c", rawCommand];
             
-            keywordHarvester.currentPageName = currentPage.page;
+            keywordHarvester.currentPageId = currentPage.id;
             running = true;
         }
 
@@ -93,13 +121,14 @@ Singleton {
         stdout: SplitParser {
             onRead: data => {
                 let cache = root.settingsKeywordsCache;
-                cache[keywordHarvester.currentPageName] = (cache[keywordHarvester.currentPageName] || "") + " " + data;
+                cache[keywordHarvester.currentPageId] = (cache[keywordHarvester.currentPageId] || "") + " " + data;
                 root.settingsKeywordsCache = cache;
             }
         }
     }
 
     Component.onCompleted: {
+        root.rebuildResults();
         keywordHarvester.startHarvesting();
         // Constructs the Prism service so its detection runs now rather than
         // on the user's first keystroke - see the note on reload().
@@ -120,15 +149,28 @@ Singleton {
 
     property var settingsKeywordsCache: ({})
 
+    // One entry per page SettingsContent declares. `id` is the address - its
+    // stable page id - while `name` is what the user reads and types at, so a
+    // translated shell still matches on the noun on screen and the link itself
+    // does not move with the language. `path` is only the file the section
+    // keywords are harvested from; a grep over a missing file writes nothing
+    // and the harvester ignores its exit code, so a stale path here reads
+    // exactly like a page with no sections.
     property var settingsIndex: [
-        { page: "General",   path: "GeneralConfig.qml" },
-        { page: "Bar",       path: "BarConfig.qml" },
-        { page: "Desktop",   path: "BackgroundConfig.qml" },
-        { page: "Interface", path: "InterfaceConfig.qml" },
-        { page: "Services",  path: "ServicesConfig.qml" },
-        { page: "Hyprland",  path: "HyprlandConfig.qml" },
-        { page: "About",     path: "About.qml" },
-        { page: "Quick",     path: "QuickConfig.qml" },
+        { id: "quick",             name: Translation.tr("Quick"),               path: "QuickConfig.qml" },
+        { id: "appearance",        name: Translation.tr("Appearance"),          path: "AppearanceConfig.qml" },
+        { id: "cursor",            name: Translation.tr("Cursor"),              path: "CursorConfig.qml" },
+        { id: "wallpaper-desktop", name: Translation.tr("Wallpaper & Desktop"), path: "BackgroundConfig.qml" },
+        { id: "bar-dock",          name: Translation.tr("Bar & Dock"),          path: "BarConfig.qml" },
+        { id: "sidebars-panels",   name: Translation.tr("Sidebars & Panels"),   path: "SidebarsPanelsConfig.qml" },
+        { id: "notifications",     name: Translation.tr("Notifications"),       path: "NotificationsConfig.qml" },
+        { id: "lock-idle",         name: Translation.tr("Lock & Idle"),         path: "LockIdleConfig.qml" },
+        { id: "capture",           name: Translation.tr("Capture"),             path: "CaptureConfig.qml" },
+        { id: "general",           name: Translation.tr("General"),             path: "GeneralConfig.qml" },
+        { id: "services",          name: Translation.tr("Services"),            path: "ServicesConfig.qml" },
+        { id: "widgets",           name: Translation.tr("Widgets"),             path: "PluginsPage.qml" },
+        { id: "hyprland",          name: Translation.tr("Hyprland"),            path: "HyprlandConfig.qml" },
+        { id: "about",             name: Translation.tr("About"),               path: "About.qml" },
     ]
 
     // Load user action scripts from ~/.config/immaterial-impulse/actions/
@@ -272,11 +314,9 @@ Singleton {
         id: nonAppResultsTimer
         interval: Config.options.search.nonAppResultDelay
         onTriggered: {
-            let expr = root.query;
-            if (expr.startsWith(Config.options.search.prefix.math)) {
-                expr = expr.slice(Config.options.search.prefix.math.length);
-            }
-            mathProc.calculateExpression(expr);
+            if (!root.queryIsMath())
+                return;
+            mathProc.calculateExpression(MathQuery.expressionFor(root.query, Config.options.search.prefix.math));
         }
     }
 
@@ -295,7 +335,53 @@ Singleton {
         }
     }
 
-    property list<var> results: {
+    // A plain property, rebuilt once per turn of the event loop - not a live
+    // binding. Every result is a QML object built by `resultComp.createObject`,
+    // and as a binding this list was rebuilt once per input change: a keystroke
+    // that moves `query`, the app list, the settings keyword cache (fourteen
+    // asynchronous greps at startup) and a qalc answer landing were four
+    // separate rebuilds where the user made one edit. `Qt.callLater` coalesces
+    // whatever arrives in the same turn into one.
+    property list<var> results: []
+
+    // What a manual rebuild costs: the automatic dependency tracking a binding
+    // came with. Under-observation here is a stale result list, so this is the
+    // list of everything `buildResults()` reads, touched in a binding so QML
+    // still decides when to fire - generously, because firing is one array of
+    // references and rebuilding an empty query returns immediately.
+    //
+    // Only the values read while BUILDING belong here. Everything a result's
+    // `execute` closure reads (`apps.terminal`, `search.engineBaseUrl`,
+    // `search.excludedSites`) is read when the user picks the row, and pinning
+    // those would rebuild the list for settings that cannot change what it
+    // shows. `tests/test_launcher_result_inputs.py` fails the suite on a
+    // singleton the builder reads and this list does not name.
+    readonly property var resultInputs: [
+        root.query, root.mathResult, root.settingsIndex, root.settingsKeywordsCache,
+        root.allActions, root.clipboardWorkSafetyActive,
+        AppSearch.preppedNames, AppSearch.sloppySearch, AppUsage.revision,
+        Cliphist.entries, Cliphist.pins, Cliphist.sloppySearch,
+        Emojis.list,
+        FileSearch.results,
+        HyprlandKeybinds.keybinds,
+        MaterialSymbolsSearch.allSymbols,
+        PrismLauncher.available, PrismLauncher.instances,
+        Translation.translations,
+        Config.options.search.prefix.showDefaultActionsWithoutPrefix,
+        Config.options.search.prefix.action, Config.options.search.prefix.app,
+        Config.options.search.prefix.clipboard, Config.options.search.prefix.emojis,
+        Config.options.search.prefix.keybinds, Config.options.search.prefix.symbols,
+        Config.options.search.prefix.math, Config.options.search.prefix.shellCommand,
+        Config.options.search.prefix.webSearch, Config.options.search.prefix.file,
+        Config.options.search.prefix.prism,
+    ]
+    onResultInputsChanged: Qt.callLater(root.rebuildResults)
+
+    function rebuildResults() {
+        root.results = root.buildResults();
+    }
+
+    function buildResults() {
         // Search results are handled here
         ////////////////// Skip? //////////////////
         if (root.query == "")
@@ -467,8 +553,11 @@ Singleton {
         }
 
         ////////////////// Init ///////////////////
-        nonAppResultsTimer.restart();
-        const mathResultObject = resultComp.createObject(null, {
+        // No spawn from here - onQueryChanged owns that, see refreshMathResult().
+        // The row exists only once qalc has actually answered a query that was
+        // arithmetic to begin with; it used to be built unconditionally and so
+        // rendered qalc's opinion of whatever application name was being typed.
+        const mathResultObject = (root.queryIsMath() && root.mathResult.length > 0) ? resultComp.createObject(null, {
             name: root.mathResult,
             verb: Translation.tr("Copy"),
             type: Translation.tr("Math result"),
@@ -478,7 +567,7 @@ Singleton {
             execute: () => {
                 Quickshell.clipboardText = root.mathResult;
             }
-        });
+        }) : null;
         const appResultObjects = AppSearch.fuzzyQuery(StringUtils.cleanPrefix(root.query, Config.options.search.prefix.app)).map(entry => {
             return resultComp.createObject(null, {
                 type: Translation.tr("App"),
@@ -488,6 +577,7 @@ Singleton {
                 iconType: LauncherSearchResult.IconType.System,
                 verb: Translation.tr("Open"),
                 execute: () => {
+                    AppUsage.recordLaunch(entry.id);
                     if (!entry.runInTerminal)
                         entry.execute();
                     else {
@@ -505,6 +595,9 @@ Singleton {
                         iconName: action.icon,
                         iconType: LauncherSearchResult.IconType.System,
                         execute: () => {
+                            // A desktop action ("New Private Window") is a
+                            // launch of the app it belongs to, and ranks as one.
+                            AppUsage.recordLaunch(entry.id);
                             if (!action.runInTerminal)
                                 action.execute();
                             else {
@@ -526,14 +619,14 @@ Singleton {
         const settingsQuery = root.query.toLowerCase().trim();
 
         const settingsResults = root.settingsIndex.reduce((acc, page) => {
-            const dynamicKeywords = (root.settingsKeywordsCache[page.page] || "").toLowerCase();
+            const dynamicKeywords = (root.settingsKeywordsCache[page.id] || "").toLowerCase();
             const query = root.query.toLowerCase().trim();
             if (query === "") return acc;
 
-            if (page.page.toLowerCase().includes(query) || dynamicKeywords.includes(query)) {
+            if (page.name.toLowerCase().includes(query) || dynamicKeywords.includes(query)) {
                 acc.push(resultComp.createObject(null, {
-                    name: page.page,
-                    comment: dynamicKeywords.includes(query) ? "Section: " + query : "Settings for " + page.page,
+                    name: page.name,
+                    comment: dynamicKeywords.includes(query) ? "Section: " + query : "Settings for " + page.name,
                     verb: Translation.tr("Go"),
                     type: Translation.tr("Settings"),
                     iconName: "settings",
@@ -541,7 +634,7 @@ Singleton {
                     execute: () => {
                         GlobalStates.settingsOpen = true;
                         Qt.callLater(() => {
-                            GlobalStates.settingsPage = page.page + ":" + query;
+                            GlobalStates.settingsPage = page.id + ":" + query;
                         });
                         root.query = "";
                     }
@@ -603,7 +696,7 @@ Singleton {
         const startsWithMathPrefix = root.query.startsWith(Config.options.search.prefix.math);
         const startsWithShellCommandPrefix = root.query.startsWith(Config.options.search.prefix.shellCommand);
         const startsWithWebSearchPrefix = root.query.startsWith(Config.options.search.prefix.webSearch);
-        if (startsWithNumber || startsWithMathPrefix) {
+        if ((startsWithNumber || startsWithMathPrefix) && mathResultObject) {
             result.push(mathResultObject);
         } else if (startsWithShellCommandPrefix) {
             result.push(commandResultObject);
@@ -627,7 +720,7 @@ Singleton {
         if (Config.options.search.prefix.showDefaultActionsWithoutPrefix) {
             if (!startsWithShellCommandPrefix)
                 result.push(commandResultObject);
-            if (!startsWithNumber && !startsWithMathPrefix)
+            if (!startsWithNumber && !startsWithMathPrefix && mathResultObject)
                 result.push(mathResultObject);
             if (!startsWithWebSearchPrefix)
                 result.push(webSearchResultObject);

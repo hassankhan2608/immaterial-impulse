@@ -8,13 +8,23 @@ import QtQuick.Controls
 import QtQuick.Effects
 import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
+import "../functions/edit_mode.js" as EditMode
 import Quickshell.Io
 import Quickshell
 import Quickshell.Widgets
 import Quickshell.Wayland
+import "../../imi/dock/dock_geometry.js" as DockGeometry
+import "../functions/layout_ops.js" as LayoutOps
 
 Item {
     id: root
+
+    readonly property string dockEdge: DockGeometry.normalizedEdge(
+        Config.options?.dock.edge ?? "bottom")
+    // The reorder is one axis and one comparison, chosen here. It used to be
+    // x throughout - a column of slots that lays out perfectly while every
+    // drag compares the one coordinate that never changes.
+    readonly property bool vertical: DockGeometry.isVertical(root.dockEdge)
 
     property real btnSize: 46
     property real btnSpacing: Appearance.spacing.space25
@@ -39,27 +49,44 @@ Item {
         }
     }
 
-    implicitWidth:  _workOrder.length * btnSize + Math.max(0, _workOrder.length - 1) * btnSpacing
-    implicitHeight: parent?.height ?? btnSize
+    // How far the slots reach along the strip; across it the widget takes
+    // whatever the dock's thickness leaves.
+    readonly property real slotRun: _workOrder.length * btnSize
+        + Math.max(0, _workOrder.length - 1) * btnSpacing
+    implicitWidth:  root.vertical ? (parent?.width ?? btnSize) : slotRun
+    implicitHeight: root.vertical ? slotRun : (parent?.height ?? btnSize)
 
-    function popupCenterXForButton(button) {
+    // Where the preview popup centres itself on the hovered button: along the
+    // strip, so it is an x at a horizontal edge and a y at a vertical one.
+    function popupCenterForButton(button) {
         if (!button || !root.QsWindow) return 0
-        return root.QsWindow.mapFromItem(button, button.width / 2, 0).x
+        const centre = root.QsWindow.mapFromItem(button, button.width / 2, button.height / 2)
+        return root.vertical ? centre.y : centre.x
     }
 
-    function swapSlots(fromPos, toPos) {
-        if (fromPos === toPos) return
-        if (fromPos < 0 || fromPos >= _workOrder.length) return
-        if (toPos   < 0 || toPos   >= _workOrder.length) return
-        let arr = _workOrder.slice()
-        let tmp = arr[fromPos]
-        arr[fromPos] = arr[toPos]
-        arr[toPos]   = tmp
-        _workOrder = arr
+    // A move, not an exchange: an icon carried past three others has to leave
+    // those three in their own order one slot behind it, which is what the
+    // gesture looks like. Exchanging sent whichever icon happened to be at the
+    // drop slot back to where the dragged one started, several places away
+    // from anything the pointer touched.
+    function moveSlot(fromPos, toPos) {
+        root._workOrder = LayoutOps.move(root._workOrder, fromPos, toPos)
     }
 
     function commitOrder() {
         const newOrder = _workOrder.slice()
+        // A reorder drop is a committed mutation (spec §7.3). The push is
+        // gated on the mode inside editUndoPush, so the dock's everyday
+        // reorder records nothing; a drop that changed no order pushes
+        // nothing either, since commitOrder runs for every drag end.
+        const before = EditMode.listCopy(Config.options.dock.pinnedApps)
+        let changed = before.length !== newOrder.length
+        for (let i = 0; !changed && i < newOrder.length; i++)
+            changed = before[i] !== newOrder[i]
+        if (changed)
+            GlobalStates.editUndoPush(() => {
+                Config.options.dock.pinnedApps = before
+            })
         Config.options.dock.pinnedApps = newOrder
         orderChanged(newOrder)
     }
@@ -83,11 +110,19 @@ Item {
                 appId: slotItem.appId
             }
 
-            width:  root.btnSize
-            height: root.implicitHeight
-            x:      index * (root.btnSize + root.btnSpacing)
+            // Slot i sits i steps along the strip; the other axis is the
+            // dock's whole thickness.
+            readonly property real slotOffset: index * (root.btnSize + root.btnSpacing)
+            width:  root.vertical ? root.implicitWidth : root.btnSize
+            height: root.vertical ? root.btnSize : root.implicitHeight
+            x:      root.vertical ? 0 : slotOffset
+            y:      root.vertical ? slotOffset : 0
 
             Behavior on x {
+                enabled: root.activeDragVisualIndex !== slotItem.index
+                animation: Appearance.animation.elementMoveSmall.numberAnimation.createObject(this)
+            }
+            Behavior on y {
                 enabled: root.activeDragVisualIndex !== slotItem.index
                 animation: Appearance.animation.elementMoveSmall.numberAnimation.createObject(this)
             }
@@ -102,15 +137,24 @@ Item {
                 z: 1000
                 width:  root.btnSize
                 height: root.btnSize
-                anchors.verticalCenter: parent.verticalCenter
-
-                x: {
-                    if (!dragHandler.active) return 0
-                    var lp = slotItem.mapFromItem(null,
+                // Both coordinates are explicit rather than one anchored: an
+                // anchor on the axis the ghost is NOT travelling along would
+                // silently overwrite whichever of x and y the other branch
+                // wrote, and which one that is changes with the edge.
+                //
+                // The ghost follows the pointer along the strip only, so a
+                // sideways wobble does not drag the icon out of the dock.
+                readonly property point localPointer: dragHandler.active
+                    ? slotItem.mapFromItem(null,
                         dragHandler.centroid.scenePosition.x,
                         dragHandler.centroid.scenePosition.y)
-                    return lp.x - width / 2
-                }
+                    : Qt.point(0, 0)
+                x: root.vertical
+                    ? (slotItem.width - width) / 2
+                    : (dragHandler.active ? localPointer.x - width / 2 : 0)
+                y: root.vertical
+                    ? (dragHandler.active ? localPointer.y - height / 2 : 0)
+                    : (slotItem.height - height) / 2
 
                 scale: dragHandler.active ? 1.15 : 0.9
                 Behavior on scale {
@@ -145,10 +189,8 @@ Item {
 
                 property var appToplevel: slotItem.appEntry
 
-                topInset:    Appearance.sizes.hyprlandGapsOut + Appearance.spacing.space100
-                bottomInset: Appearance.sizes.hyprlandGapsOut + Appearance.spacing.space100
-
-                implicitWidth: implicitHeight - topInset - bottomInset
+                insetInward:  Appearance.sizes.hyprlandGapsOut + Appearance.spacing.space100
+                insetOutward: Appearance.sizes.hyprlandGapsOut + Appearance.spacing.space100
 
                 hoverEnabled: true
                 onHoveredChanged: {
@@ -164,6 +206,7 @@ Item {
                     const entry = slotItem.appEntry
                     if (!entry || entry.toplevels.length === 0) {
                         DockLaunchTracker.markLaunching(slotItem.appId)
+                        AppUsage.recordLaunch(slotItem.deskEntry?.id)
                         slotItem.deskEntry?.execute()
                         return
                     }
@@ -174,6 +217,7 @@ Item {
 
                 middleClickAction: () => {
                     DockLaunchTracker.markLaunching(slotItem.appId)
+                    AppUsage.recordLaunch(slotItem.deskEntry?.id)
                     slotItem.deskEntry?.execute()
                 }
                 altAction:         () => {
@@ -231,25 +275,49 @@ Item {
                             }
                         }
 
-                        RowLayout {
+                        Flow {
                             spacing: Appearance.spacing.space50
-                            anchors {
-                                top: appIcon.bottom
-                                topMargin: Appearance.spacing.space25
-                                horizontalCenter: parent.horizontalCenter
-                            }
+                            // The running dots sit between the icon and the
+                            // screen edge, so they swap sides with the dock -
+                            // and stack beside the icon at a side edge, where
+                            // a row under it points into the next icon.
+                            //
+                            // These are the PINNED apps' dots. DockAppButton
+                            // carries a second copy for the running unpinned
+                            // ones, and a dock of pinned icons shows nothing of
+                            // a change made only there.
+                            readonly property string dotSide: DockGeometry.outwardSide(root.dockEdge)
+                            flow: root.vertical ? Flow.TopToBottom : Flow.LeftToRight
+                            // The icon is centred in this slot, so hanging the
+                            // dots off it is a push from the same centre - and
+                            // an offset, unlike an anchor, cannot land on an
+                            // axis that already holds one when the dock turns.
+                            // See DockAppButton, which carries the other copy.
+                            readonly property real dotPushX:
+                                (appIcon.width + width) / 2 + Appearance.spacing.space25
+                            readonly property real dotPushY:
+                                (appIcon.height + height) / 2 + Appearance.spacing.space25
+                            anchors.centerIn: parent
+                            anchors.horizontalCenterOffset: dotSide === "right" ? dotPushX
+                                : (dotSide === "left" ? -dotPushX : 0)
+                            anchors.verticalCenterOffset: dotSide === "bottom" ? dotPushY
+                                : (dotSide === "top" ? -dotPushY : 0)
                             Repeater {
                                 model: Math.min(slotItem.appEntry?.toplevels?.length ?? 0, 3)
                                 delegate: Rectangle {
                                     required property int index
+                                    readonly property real pillLength:
+                                        (slotItem.appEntry?.toplevels?.length ?? 0) <= 3 ? 10 : 4
                                     radius:         Appearance.rounding.full
-                                    implicitWidth:  (slotItem.appEntry?.toplevels?.length ?? 0) <= 3
-                                                    ? 10 : 4
-                                    implicitHeight: 4
+                                    implicitWidth:  root.vertical ? 4 : pillLength
+                                    implicitHeight: root.vertical ? pillLength : 4
                                     color: slotItem.appActive
                                            ? Appearance.colors.colPrimary
                                            : ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.4)
                                     Behavior on implicitWidth {
+                                        animation: Appearance.animation.elementMoveSmall.numberAnimation.createObject(this)
+                                    }
+                                    Behavior on implicitHeight {
                                         animation: Appearance.animation.elementMoveSmall.numberAnimation.createObject(this)
                                     }
                                     Behavior on color {
@@ -257,6 +325,54 @@ Item {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Edit Mode: the pinned icon goes inert and grows its remove
+            // badge (spec §4.2 - the dock's own drag already reorders, so the
+            // mode adds presence editing, not a second gesture). An input
+            // EATER over the button rather than `enabled`: `enabled: false`
+            // on a MouseArea disables that area and nothing under it
+            // (AGENT.md), and the disabled route would also dim the icon
+            // through the button's own disabled state. The slot's DragHandler
+            // sits on the slot itself and steals past the drag threshold, so
+            // the reorder keeps working over the eater exactly as it works
+            // over the button.
+            Loader {
+                anchors.fill: parent
+                z: 500
+                active: GlobalStates.editMode
+                sourceComponent: Item {
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.AllButtons
+                        hoverEnabled: true
+                        onWheel: wheel => {
+                            wheel.accepted = true;
+                        }
+                    }
+                    EditRemoveBadge {
+                        objectName: "dockEditRemove"
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        // Presence on the dock is the pinned list; the removal
+                        // is the same store commitOrder writes, through the
+                        // shared arithmetic.
+                        onClicked: {
+                            // The slot index counts _workOrder, which only
+                            // matches pinnedApps outside a drag - a second
+                            // pointer (touch) could otherwise remove by a
+                            // mid-drag index into the wrong list.
+                            if (!GlobalStates.editMode || root._dragging) return;
+                            // A remove is a committed mutation (spec §7.3).
+                            const beforePins = EditMode.listCopy(Config.options.dock.pinnedApps);
+                            GlobalStates.editUndoPush(() => {
+                                Config.options.dock.pinnedApps = beforePins;
+                            });
+                            Config.options.dock.pinnedApps =
+                                LayoutOps.remove(root.pinnedApps, slotItem.index);
                         }
                     }
                 }
@@ -279,36 +395,52 @@ Item {
                     root.commitOrder()
                 }
 
+                // Everything below compares ONE coordinate: the one the slots
+                // are laid out along. Comparing x in a column is not a subtly
+                // wrong reorder, it is an inert one - every centre has the
+                // same x, so the nearest slot is always whichever the loop
+                // reached first and nothing ever moves.
+                readonly property string axis: root.vertical ? "y" : "x"
+                function alongAxis(point) {
+                    return point[axis]
+                }
+
+                // The dragged slot is a hole rather than a candidate: it is
+                // still laid out at the position it is being carried away
+                // from, so it would be its own nearest neighbour.
+                function slotCentres(skipIndex) {
+                    const centres = []
+                    for (let i = 0; i < slotRepeater.count; i++) {
+                        const child = i === skipIndex ? null : slotRepeater.itemAt(i)
+                        centres.push(child
+                            ? child.mapToItem(null, child.width / 2, child.height / 2)
+                            : null)
+                    }
+                    return centres
+                }
+
                 onCentroidChanged: {
                     if (!active) return
                     const currentVisualIdx = root.activeDragVisualIndex
                     if (currentVisualIdx < 0) return
 
-                    const dragX = dragHandler.centroid.scenePosition.x
-                    let minDist    = Infinity
-                    let nearestIdx = currentVisualIdx
+                    const dragPos = alongAxis(dragHandler.centroid.scenePosition)
+                    const centres = slotCentres(currentVisualIdx)
+                    const nearestIdx = LayoutOps.indexAt(
+                        centres, dragHandler.centroid.scenePosition, axis)
+                    if (nearestIdx === -1 || nearestIdx === currentVisualIdx) return
 
-                    for (let i = 0; i < slotRepeater.count; i++) {
-                        if (i === currentVisualIdx) continue
-                        const child = slotRepeater.itemAt(i)
-                        if (!child) continue
-                        const cc   = child.mapToItem(null, child.width / 2, child.height / 2)
-                        const dist = Math.abs(dragX - cc.x)
-                        if (dist < minDist) { minDist = dist; nearestIdx = i }
-                    }
+                    // Nearest is not enough on its own: the pointer has to have
+                    // reached the slot it is nearest to, or the strip reorders
+                    // itself while the gesture is still between two icons.
+                    const nc = alongAxis(centres[nearestIdx])
+                    const crossed = (nearestIdx > currentVisualIdx)
+                        ? (dragPos >= nc)
+                        : (dragPos <= nc)
 
-                    if (nearestIdx !== currentVisualIdx) {
-                        const neighbor = slotRepeater.itemAt(nearestIdx)
-                        if (!neighbor) return
-                        const nc = neighbor.mapToItem(null, neighbor.width / 2, neighbor.height / 2)
-                        const shouldSwap = (nearestIdx > currentVisualIdx)
-                            ? (dragX >= nc.x)
-                            : (dragX <= nc.x)
-
-                        if (shouldSwap) {
-                            root.swapSlots(currentVisualIdx, nearestIdx)
-                            root.activeDragVisualIndex = nearestIdx
-                        }
+                    if (crossed) {
+                        root.moveSlot(currentVisualIdx, nearestIdx)
+                        root.activeDragVisualIndex = nearestIdx
                     }
                 }
             }
@@ -321,23 +453,30 @@ Item {
 
         property bool shouldShow: (popupMouseArea.containsMouse || root.buttonHovered)
                                   && !root._dragging
+                                  // An inert dock does not answer hover with a
+                                  // window-preview card over the icons being
+                                  // arranged - same reasoning as StyledPopup's
+                                  // claim gate on the bar.
+                                  && !GlobalStates.editMode
                                   && !(root.contextMenu?.isOpen ?? false)
                                   && appTopLevel
                                   && appTopLevel.toplevels
                                   && appTopLevel.toplevels.length > 0
 
         property bool show: false
-        property real cachedCenterX: 0
+        // The hovered button's centre ALONG the strip - an x at a horizontal
+        // edge, a y at a vertical one.
+        property real cachedCenter: 0
 
         Connections {
             target: root
             function onLastHoveredButtonChanged() {
                 if (root.lastHoveredButton && root.QsWindow)
-                    previewPopup.cachedCenterX = root.popupCenterXForButton(root.lastHoveredButton)
+                    previewPopup.cachedCenter = root.popupCenterForButton(root.lastHoveredButton)
             }
             function onButtonHoveredChanged() {
                 if (root.buttonHovered && root.lastHoveredButton && root.QsWindow)
-                    previewPopup.cachedCenterX = root.popupCenterXForButton(root.lastHoveredButton)
+                    previewPopup.cachedCenter = root.popupCenterForButton(root.lastHoveredButton)
                 updateTimer.restart()
             }
         }
@@ -354,29 +493,75 @@ Item {
             }
         }
 
+        // The corner of the dock's own surface the popup hangs off, and the
+        // way it grows from there - both inward, or it opens into the screen
+        // edge and the compositor clips it. Named sides come from the one
+        // derivation; only the mapping onto Quickshell's flags is local,
+        // because a .pragma library has no QML enums in scope.
+        readonly property var anchorSides: DockGeometry.popupAnchorSides(root.dockEdge)
+        function edgeFlags(names) {
+            let flags = 0
+            for (const name of names) {
+                flags |= name === "top" ? Edges.Top
+                    : name === "bottom" ? Edges.Bottom
+                    : name === "left" ? Edges.Left : Edges.Right
+            }
+            return flags
+        }
+
         anchor {
             window: root.QsWindow.window
+            // The edges below are edges OF THIS RECT, and without it the rect
+            // is the window's origin - a point - so all four "edges" are the
+            // same place and only a corner that happens to be (0, 0) lands
+            // right. A bottom dock anchors top-left and a right dock
+            // left-top, so those two were correct by accident; a left dock
+            // wants (width, 0) and a top dock (0, height), and both opened
+            // ON TOP of the dock instead of beside it.
+            rect: Qt.rect(0, 0,
+                root.QsWindow.window?.width ?? 0,
+                root.QsWindow.window?.height ?? 0)
             adjustment: PopupAdjustment.None
-            gravity: Edges.Top | Edges.Right
-            edges: Edges.Top | Edges.Left
+            gravity: previewPopup.edgeFlags(previewPopup.anchorSides.gravity)
+            edges: previewPopup.edgeFlags(previewPopup.anchorSides.edges)
         }
 
         visible: popupBackground.opacity > 0
         color: "transparent"
-        implicitWidth: root.QsWindow.window?.width ?? 1
-        implicitHeight: popupMouseArea.implicitHeight
-                        + root.windowControlsHeight
-                        + Appearance.sizes.elevationMargin * 2
+        // The popup spans the dock's own long axis so the card can be placed
+        // anywhere along it, and is content-sized across.
+        implicitWidth: root.vertical
+            ? popupMouseArea.implicitWidth + Appearance.sizes.elevationMargin * 2
+            : (root.QsWindow.window?.width ?? 1)
+        implicitHeight: root.vertical
+            ? (root.QsWindow.window?.height ?? 1)
+            : popupMouseArea.implicitHeight
+                + root.windowControlsHeight
+                + Appearance.sizes.elevationMargin * 2
 
         MouseArea {
             id: popupMouseArea
-            anchors.bottom: parent.bottom
+            // Pinned to the popup's own inward side, which is the side facing
+            // the dock.
+            readonly property string dockSide: DockGeometry.outwardSide(root.dockEdge)
             implicitWidth:  popupBackground.implicitWidth + Appearance.sizes.elevationMargin * 2
             implicitHeight: root.maxWindowPreviewHeight
                             + root.windowControlsHeight
                             + Appearance.sizes.elevationMargin * 2
             hoverEnabled: true
-            x: previewPopup.cachedCenterX - width / 2
+            // Hugs the side of the surface facing the dock, and centres on the
+            // hovered button along the strip. Both coordinates are written
+            // out, because the side an anchor lands on moves with the edge and
+            // an anchor WRITES the coordinate it pins - so after a turn from a
+            // side edge to a horizontal one, `x` stayed latched at what
+            // anchors.left had written and this binding never ran again. The
+            // card sat at the start of the strip rather than under the pointer
+            // - measured at x = 0 with cachedCenter reading 2413. Same fault
+            // as Dock.qml's own strip, one surface up.
+            readonly property real acrossX: dockSide === "right" ? parent.width - width : 0
+            readonly property real acrossY: dockSide === "bottom" ? parent.height - height : 0
+            x: root.vertical ? acrossX : previewPopup.cachedCenter - width / 2
+            y: root.vertical ? previewPopup.cachedCenter - height / 2 : acrossY
 
             StyledRectangularShadow {
                 target: popupBackground
@@ -398,9 +583,21 @@ Item {
                 clip: true
                 color: Appearance.m3colors.m3surfaceContainer
                 radius: Appearance.rounding.normal
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: Appearance.sizes.elevationMargin
-                anchors.horizontalCenter: parent.horizontalCenter
+                // Pushed off the side facing the dock by the elevation margin,
+                // so the shadow has somewhere to fall - said as a push from
+                // the centre rather than as an anchor on that side, for the
+                // reason the running dots above carry: the side an anchor
+                // lands on moves when the dock turns, and it moves onto the
+                // axis the centre anchor was holding.
+                readonly property real cardPushX:
+                    (parent.width - width) / 2 - Appearance.sizes.elevationMargin
+                readonly property real cardPushY:
+                    (parent.height - height) / 2 - Appearance.sizes.elevationMargin
+                anchors.centerIn: parent
+                anchors.horizontalCenterOffset: popupMouseArea.dockSide === "right" ? cardPushX
+                    : (popupMouseArea.dockSide === "left" ? -cardPushX : 0)
+                anchors.verticalCenterOffset: popupMouseArea.dockSide === "bottom" ? cardPushY
+                    : (popupMouseArea.dockSide === "top" ? -cardPushY : 0)
                 implicitHeight: previewRowLayout.implicitHeight + padding * 2
                 implicitWidth:  previewRowLayout.implicitWidth  + padding * 2
                 Behavior on implicitWidth {

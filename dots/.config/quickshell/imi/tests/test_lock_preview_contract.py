@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""The lock screen's preview cannot authenticate, and the sweep proves it looked.
+
+Spec §11.2's last bullet (docs/superpowers/specs/2026-08-16-edit-mode-design.md):
+Edit Mode's Lockscreen tab renders the real lock islands inside the viewport,
+so `LockSurface` gains a single switch - `interactive` - and everything that
+could take a keystroke or dispatch a session action is gated on it. The other
+half is `LockPreviewContext`: a second component satisfying `LockContext`'s
+property surface whose unlock paths are empty and which constructs no
+`PamContext` and runs no `fprintd-list`. "The preview context is the real one
+with a flag" is how a preview ends up authenticating, which is why it is a
+separate file this module can hold to a negative.
+
+This is the one contract in the mode whose failure is a security bug rather
+than a layout bug, so every sweep here asserts it still FOUND the thing it
+swept - a grep that matches nothing must fail, not pass. Concretely:
+
+- the click-handler sweep asserts how many handlers it found before judging
+  them, so a rewrite that renames `onClicked` cannot leave the check green
+  over nothing;
+- the parity sweep asserts how many properties, signals and functions it
+  extracted from `LockContext.qml`, so a parser miss reads as a failure;
+- the negative sweeps (`PamContext`, `fprintd`, `Process`) sit beside a
+  positive assertion that the preview file exists and declares the surface.
+"""
+
+import re
+from pathlib import Path
+
+from contract_runner import run
+
+ROOT = Path(__file__).resolve().parent.parent
+LOCK_SURFACE = ROOT / "modules/imi/lock/LockSurface.qml"
+LOCK_CONTEXT = ROOT / "modules/common/panels/lock/LockContext.qml"
+PREVIEW_CONTEXT = ROOT / "modules/common/panels/lock/LockPreviewContext.qml"
+
+
+def read(path: Path) -> str:
+    assert path.exists(), f"{path} is gone - the sweep has nothing to look at"
+    text = path.read_text()
+    assert text.strip(), f"{path} is empty"
+    return text
+
+
+def code(path: Path) -> str:
+    """The file with its comments stripped, so a rule cannot be satisfied by
+    prose about the rule."""
+    text = read(path)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+GUARD = re.compile(r"if\s*\(!root\.interactive\)\s*return")
+
+
+def handler_bodies(text: str, name: str):
+    """Every `<name>:` handler in the file, as (offset, body-text) pairs.
+
+    A body is either the rest of the line (single-expression handler) or the
+    whole brace-matched block. Arrow-function parameter lists (`mouse =>`) are
+    skipped over to reach the body.
+    """
+    bodies = []
+    for match in re.finditer(rf"\b{name}\s*:", text):
+        rest = text[match.end():]
+        rest = re.sub(r"^\s*(?:\([^)]*\)|\w+)\s*=>\s*", "", rest)
+        stripped = rest.lstrip()
+        if not stripped.startswith("{"):
+            bodies.append((match.start(), stripped.split("\n", 1)[0]))
+            continue
+        depth = 0
+        start = rest.index("{")
+        for index in range(start, len(rest)):
+            if rest[index] == "{":
+                depth += 1
+            elif rest[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    bodies.append((match.start(), rest[start:index + 1]))
+                    break
+    return bodies
+
+
+def test_the_surface_declares_the_interactive_switch():
+    text = code(LOCK_SURFACE)
+    assert re.search(r"property bool interactive:\s*true", text), \
+        ("LockSurface must declare `interactive`, default true - the real lock "
+         "screen is the default and the preview is the exception")
+
+
+def test_force_field_focus_returns_before_reaching_the_field():
+    text = code(LOCK_SURFACE)
+    match = re.search(r"function forceFieldFocus\(\)\s*\{(.*?)\n    \}", text, re.S)
+    assert match, "LockSurface no longer defines forceFieldFocus"
+    body = match.group(1)
+    first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    assert GUARD.search(first), \
+        ("forceFieldFocus must return before touching the field when the "
+         f"surface is not interactive; its first statement is: {first!r}")
+
+
+def test_the_password_field_is_disabled_and_read_only_without_interactive():
+    # Anchored to the field's own block rather than matched anywhere in the
+    # file: a term on any OTHER control would otherwise satisfy the sweep
+    # while the field's own gate silently went.
+    text = code(LOCK_SURFACE)
+    start = text.find("ToolbarTextField {")
+    assert start != -1, "the password field is no longer a ToolbarTextField"
+    depth = 0
+    end = start
+    for index in range(text.index("{", start), len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    field = text[start:end]
+    assert re.search(r"^\s*enabled:\s*.+root\.interactive.*$", field, re.M), \
+        "the password field's `enabled` must carry the interactive term"
+    assert re.search(r"^\s*readOnly:\s*!root\.interactive\s*$", field, re.M), \
+        ("the password field must be readOnly when the surface is not "
+         "interactive - `enabled` alone still leaves programmatic paths open")
+
+
+def test_every_click_handler_in_the_surface_is_gated():
+    text = code(LOCK_SURFACE)
+    bodies = handler_bodies(text, "onClicked")
+    # The surface carries at least: the confirm button, the sleep button, the
+    # password-guarded power and reboot component, and three media transport
+    # buttons. Fewer matches than that means the sweep is looking at the wrong
+    # thing, not that the surface got safer.
+    assert len(bodies) >= 6, \
+        (f"expected at least 6 onClicked handlers in LockSurface.qml, found "
+         f"{len(bodies)} - the sweep may no longer be finding the file's handlers")
+    for offset, body in bodies:
+        inner = body.strip().lstrip("{").strip()
+        first = next((line.strip() for line in inner.splitlines() if line.strip()), "")
+        assert GUARD.search(first), \
+            (f"an onClicked at offset {offset} is not gated on the surface "
+             f"being interactive; its first statement is: {first!r}")
+
+
+def handler_spans(text: str):
+    """Every `on*:` handler in the file as (name_start, body_start, body_end)
+    character spans, arrow parameters skipped - the span form of
+    `handler_bodies`, for sweeps that need to ask which handler CONTAINS an
+    offset rather than what a named handler says."""
+    spans = []
+    for match in re.finditer(r"\b(?:Keys\.)?on[A-Z]\w*\s*:", text):
+        rest = text[match.end():]
+        without_arrow = re.sub(r"^\s*(?:\([^)]*\)|\w+)\s*=>\s*", "", rest)
+        base = match.end() + (len(rest) - len(without_arrow))
+        base += len(without_arrow) - len(without_arrow.lstrip())
+        if not text[base:].startswith("{"):
+            end = text.find("\n", base)
+            spans.append((match.start(), base, end if end != -1 else len(text)))
+            continue
+        depth = 0
+        for index in range(base, len(text)):
+            if text[index] == "{":
+                depth += 1
+            elif text[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    spans.append((match.start(), base, index + 1))
+                    break
+    return spans
+
+
+def test_every_session_action_sits_in_a_guarded_body():
+    # The handler-name sweeps beside this one anchor on `onClicked`/`Keys.*`,
+    # which leaves a structural blind spot: a dispatch inside a handler with
+    # another name - `onAccepted` was exactly that, and shipped unguarded
+    # behind two other layers - passes them unexamined. So this sweep anchors
+    # on the ACTIONS themselves: every occurrence of an unlock, session or
+    # media dispatch must sit inside a handler whose body starts with the
+    # guard, whatever the handler is called. The site count is asserted first,
+    # as always: a sweep that stops finding the actions must fail, not pass.
+    text = code(LOCK_SURFACE)
+    actions = re.compile(
+        r"tryUnlock\(|\.unlocked\(|Session\.\w+\(|"
+        r"MprisController\.(?:previous|togglePlaying|next)\(")
+    spans = handler_spans(text)
+    sites = list(actions.finditer(text))
+    assert len(sites) >= 7, \
+        (f"expected at least 7 session/media action sites in LockSurface.qml, "
+         f"found {len(sites)} - the sweep may be looking at the wrong thing")
+    for site in sites:
+        containing = [span for span in spans
+                      if span[1] <= site.start() < span[2]]
+        assert containing, \
+            (f"the action {site.group(0)!r} at offset {site.start()} is not "
+             f"inside any handler body - a dispatch outside a handler cannot "
+             f"carry the guard at all")
+        # The innermost containing handler is the one whose guard matters.
+        _, base, end = max(containing, key=lambda span: span[1])
+        body = text[base:end].strip().lstrip("{").strip()
+        first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+        assert GUARD.search(first), \
+            (f"the handler dispatching {site.group(0)!r} is not gated on the "
+             f"surface being interactive; its first statement is: {first!r}")
+
+
+def test_the_root_area_and_the_key_handlers_stand_down_too():
+    text = code(LOCK_SURFACE)
+    assert re.search(r"^\s*enabled:\s*root\.interactive\s*$", text, re.M), \
+        ("the surface's root MouseArea must be disabled when not interactive - "
+         "a preview that swallows every click over the whole screen is a "
+         "broken editor, and one that focuses the field on press is worse")
+    for handler in ("Keys\\.onPressed", "Keys\\.onReleased"):
+        bodies = handler_bodies(text, handler)
+        assert bodies, f"LockSurface no longer declares {handler}"
+        for offset, body in bodies:
+            inner = body.strip().lstrip("{").strip()
+            first = next((line.strip() for line in inner.splitlines() if line.strip()), "")
+            assert GUARD.search(first), \
+                (f"{handler} at offset {offset} is not gated on the surface "
+                 f"being interactive; its first statement is: {first!r}")
+
+
+def declarations_at_root(text: str):
+    """(properties, signals, functions) declared at the component's root level.
+
+    Depth-tracked rather than regexed flat, because `LockContext.qml` declares
+    children (Timer, Process, PamContext) whose own members are not part of
+    the surface a consumer sees.
+    """
+    properties, signals, functions = set(), set(), set()
+    depth = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if depth == 1:
+            prop = re.match(
+                r"(?:readonly\s+|default\s+)?property\s+[\w<>.]+\s+(\w+)", stripped)
+            if prop:
+                properties.add(prop.group(1))
+            sig = re.match(r"signal\s+(\w+)", stripped)
+            if sig:
+                signals.add(sig.group(1))
+            func = re.match(r"function\s+(\w+)\s*\(", stripped)
+            if func:
+                functions.add(func.group(1))
+        depth += stripped.count("{") - stripped.count("}")
+    return properties, signals, functions
+
+
+def test_the_preview_context_declares_the_real_contexts_whole_surface():
+    # The preview is a SEPARATE component, so the one way it stays honest is
+    # enumeration: every property, signal and function the real context
+    # declares at its root must exist on the preview, or the surface reads an
+    # `undefined` from it - which is a value, not an error, and shows up as a
+    # binding that silently stops meaning anything (AGENT.md's undeclared-key
+    # family). The counts guard the parser: a sweep that extracted nothing
+    # from LockContext.qml must fail here, not certify an empty set.
+    properties, signals, functions = declarations_at_root(code(LOCK_CONTEXT))
+    assert len(properties) >= 6, \
+        f"extracted only {sorted(properties)} properties from LockContext.qml"
+    assert len(signals) >= 3, \
+        f"extracted only {sorted(signals)} signals from LockContext.qml"
+    assert len(functions) >= 7, \
+        f"extracted only {sorted(functions)} functions from LockContext.qml"
+    preview_properties, preview_signals, preview_functions = \
+        declarations_at_root(code(PREVIEW_CONTEXT))
+    for name in properties:
+        assert name in preview_properties, \
+            f"LockPreviewContext is missing the property `{name}`"
+    for name in signals:
+        assert name in preview_signals, \
+            f"LockPreviewContext is missing the signal `{name}`"
+    for name in functions:
+        assert name in preview_functions, \
+            f"LockPreviewContext is missing the function `{name}`"
+
+
+def test_the_preview_context_cannot_authenticate_or_spawn_anything():
+    text = read(PREVIEW_CONTEXT)
+    # `read`, not `code`: a PamContext in a comment is not a defect, but this
+    # file has no business even discussing one - and more importantly, the
+    # check must not be routable around by wrapping the construct oddly.
+    for forbidden in ("PamContext", "fprintd", "Process", "Quickshell.Io",
+                      "Quickshell.Services.Pam", "exec", "running"):
+        assert forbidden not in text, \
+            (f"LockPreviewContext contains `{forbidden}` - the preview context "
+             f"must construct nothing that can authenticate or spawn")
+    # And its unlock paths are empty by construction, not merely unused: a
+    # body that forwards to anything is a body a later edit can point at pam.
+    for name in ("tryUnlock", "tryFingerUnlock"):
+        match = re.search(rf"function {name}\([^)]*\)\s*\{{(.*?)\}}",
+                          code(PREVIEW_CONTEXT), re.S)
+        assert match, f"LockPreviewContext no longer declares {name}"
+        assert match.group(1).strip() == "", \
+            f"{name} must have an empty body in the preview context"
+
+
+def test_the_preview_host_passes_interactive_false_and_the_preview_context():
+    # The other half of spec §11.2's last bullet: the one place that renders
+    # LockSurface outside the real session lock is Edit Mode's viewport, and it
+    # must pass `interactive: false` and hand in the preview context - never
+    # the real one. The block is matched whole so a host that keeps the
+    # property but points it at LockContext fails on the second assertion
+    # rather than passing on the first.
+    background = code(ROOT / "modules/imi/background/Background.qml")
+    host = re.search(r"sourceComponent:\s*LockSurface\s*\{(.*?)\n            \}",
+                     background, re.S)
+    assert host, "Background.qml no longer hosts the lock islands preview"
+    body = host.group(1)
+    assert re.search(r"interactive:\s*false", body), \
+        "the preview host must pass interactive: false"
+    assert "LockPreviewContext" in body, \
+        "the preview host must hand the surface the preview context"
+    # \b + optional whitespace, so neither a respelled `LockContext{` nor
+    # `LockPreviewContext {` confuses it in either direction.
+    assert not re.search(r"(?<![\w])LockContext\s*\{", background), \
+        ("Background.qml constructs a real LockContext - the preview must not "
+         "be able to authenticate")
+
+
+def test_the_surface_takes_the_context_as_a_plain_object():
+    # The typed `required property LockContext context` would refuse the
+    # preview component at assignment; QtObject admits both. The real caller
+    # (Lock.qml) still passes the real context.
+    text = code(LOCK_SURFACE)
+    assert re.search(r"required property QtObject context", text), \
+        "LockSurface must type its context as QtObject"
+    lock = read(ROOT / "modules/imi/lock/Lock.qml")
+    assert re.search(r"context:\s*root\.context", lock), \
+        "Lock.qml no longer hands the real LockContext to the surface"
+
+
+if __name__ == "__main__":
+    raise SystemExit(run(globals()))

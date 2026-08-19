@@ -4,6 +4,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
+import "modules/common/functions/edit_mode.js" as EditMode
 pragma Singleton
 pragma ComponentBehavior: Bound
 
@@ -15,7 +16,14 @@ Singleton {
     property bool sidebarRightOpen: false
     property bool mediaControlsOpen: false
     property bool sysTrayOverflowOpen: false
+    // The idle path: hypridle's listener blanks every screen, and the ladder
+    // behind it (lock, DPMS, suspend) is meant to keep running underneath.
     property bool screensaverActive: false
+    // The deliberate path: monitor names the user blacked out on purpose. Kept
+    // apart from the flag above because only this one holds an idle inhibitor
+    // (services/Idle.qml) - blanking a panel to work on another must not walk
+    // the session into a lock, and going idle still must.
+    property var screensaverScreens: []
     property bool osdBrightnessOpen: false
     property bool settingsOpen: false
     property bool osdVolumeOpen: false
@@ -24,6 +32,18 @@ Singleton {
     property bool overviewOpen: false
     property bool regionSelectorOpen: false
     property bool settingsHeldForRegionSelector: false
+    // Picking the wallpaper's subject on the desktop itself, at full size, over
+    // the real widgets - rather than on a 300px thumbnail in the wallpaper
+    // selector, where a click landing on a shoulder is several hundred pixels
+    // off by the time the mask is judged at screen size.
+    property bool clockDepthSelectOpen: false
+    // Per screen name: where the wallpaper's whole box sits in that screen's
+    // coordinates, plus the source the wallpaper item is actually drawing.
+    // Published by Background.qml while the selector above is armed, because the
+    // selection surface is a different window and cannot read that item. It
+    // draws its cutout into this box and measures its clicks against the same
+    // rectangle, so the pixels it judges are the pixels the depth layer masks.
+    property var clockDepthViewports: ({})
     // True while a copy snip's crop/clipboard pipeline runs; cancel paths
     // must not dismiss (and thereby kill) the in-flight process.
     property bool snipCopyInFlight: false
@@ -50,10 +70,233 @@ Singleton {
     // lingering one can paint over a newly opened neighbour; each popup watches
     // this so the previous one closes at once instead of overlapping the new one.
     property var activeBarPopup: null
+    // Edit Mode: the desktop shrinks into a viewport and every affordance it
+    // normally hides comes out (docs/superpowers/specs/2026-08-16-edit-mode-design.md).
+    //
+    // Here and not in `Config.options` deliberately: a persisted edit mode is a
+    // shell that comes back from a restart with the desktop shrunk, and every
+    // change the mode makes is written through to its own store as it happens,
+    // so the mode itself has nothing to remember. It is also what makes a
+    // hot-reload mid-edit correct with no code - the mode is gone, the edits
+    // are on disk.
+    //
+    // Global rather than per monitor: the bar and dock layouts it will edit are
+    // themselves global, and a per-monitor mode would have to explain why
+    // moving a bar chip on one screen changed another.
+    property bool editMode: false
+    // The entry and exit, as one animated scalar that every surface the mode
+    // draws on reads. It lives here rather than beside the transform it feeds
+    // because the desktop and the chrome that frames it are on two different
+    // layer surfaces, in two different scene graphs, and both derive their
+    // geometry from this number: a second Behavior on the other surface would
+    // be two values that have to agree, and the frames where they do not are
+    // the ones where the chrome frames a rectangle the desktop is not at.
+    //
+    // Interpolating one scalar rather than animating a scale and an offset
+    // separately is also what keeps the desktop's corner travelling in a
+    // straight line - there is no frame in which the scale has arrived and the
+    // inset has not.
+    //
+    // `elementMove`, taken whole, and deliberately not `elementMoveEnter` /
+    // `elementMoveExit`: those two carry `alwaysRunToEnd`, so a mode toggled
+    // twice inside its own duration would finish arriving before it started
+    // leaving.
+    property real editProgress: root.editMode ? 1 : 0
+    Behavior on editProgress {
+        animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
+    }
+
+    // The mode's tab (spec §1.4): a FILTER on what the viewport draws, never a
+    // mode of its own - one `editMode`, one entry, one exit ladder, and this
+    // string beside it saying which of the desktop's two faces the viewport is
+    // showing. Session state for the same reason the mode is, and reset on
+    // exit (below) so the next entry opens on the Desktop tab rather than
+    // mid-preview. The strings are edit_mode.js's constants - the ladder's
+    // `desktopTab` rung fires on the same values, so a second spelling here
+    // would be a tab Escape cannot leave.
+    property string editTab: EditMode.DESKTOP_TAB
+    // The ONE derivation of "the viewport is showing the lock screen". The
+    // wallpaper, the blur, the widget filter, the islands host, both bars and
+    // the dock all ask this question, and each comparing the tab itself would
+    // be that many answers to it - the contract holds every other file to
+    // reading this property.
+    readonly property bool editLockPreview: root.editMode
+        && root.editTab === EditMode.LOCKSCREEN_TAB
+
+    // "The lock's LOOK is on screen" - the real lock session OR the tab that
+    // filters the viewport into it. Separate from `editLockPreview` because
+    // the two questions have different consumers: the wallpaper, the islands
+    // and the widget filter ask which SOURCE to draw, and answer it per layer;
+    // the palette and the wallpaper's quantizer ask which THEME the picture is
+    // in, and there is only one of those for the whole shell.
+    //
+    // Stated here rather than spelled out at each site for the reason above:
+    // the theme sites keyed on `screenLocked` alone, so the tab switched every
+    // layer's source to the lock's and left the colours the desktop's - the
+    // preview showed the lock's wallpaper under the desktop's palette, which
+    // is a picture the lock screen never shows.
+    readonly property bool lockLookActive: root.screenLocked || root.editLockPreview
+
+    // The drawer - Edit Mode's catalogue of desktop widgets. Session state for
+    // the same reason the mode is, and beside it for the same reason the
+    // progress is: the desktop it translates and the panel that slides in are
+    // on two different layer surfaces, and both build their geometry out of
+    // this pair.
+    property bool editDrawerOpen: false
+    // The drawer's own animated scalar, second BESIDE `editProgress` and never
+    // a second animation OF it: this one carries the slide and the desktop's
+    // sideways travel, that one carries the shrink. `&& editMode` rather than
+    // the open flag alone so the exit closes the drawer even if nothing wrote
+    // the flag back - both scalars then run down together on the same tier,
+    // and edit_mode.js multiplies the shift by the mode's own t anyway, so the
+    // frame at progress 0 is the untransformed desktop whatever this holds.
+    property real editDrawerProgress: root.editMode && root.editDrawerOpen ? 1 : 0
+    Behavior on editDrawerProgress {
+        animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
+    }
+
+    // The per-widget context menu - Edit Mode's right-click on a widget
+    // (spec §4.1: Remove / Pin / Size). Session state like the mode itself,
+    // and shaped like the desktop menu's quad: which screen, where on it, and
+    // - the one field the desktop menu does not need - which widget it is
+    // about. The point is in SCREEN coordinates, mapped by the widget through
+    // its own transform chain on the way here, so the menu window needs no
+    // knowledge of the mode's viewport arithmetic.
+    property bool editWidgetMenuOpen: false
+    property string editWidgetMenuScreenName: ""
+    property real editWidgetMenuX: 0
+    property real editWidgetMenuY: 0
+    property string editWidgetMenuPluginId: ""
+
+    // A bar-widget reorder in flight (stage 8's in-place drag). Here rather
+    // than on either bar because the exit ladder is answered on the
+    // BACKGROUND surface's WidgetCanvas: the keyboard and the pointer are on
+    // two different layer surfaces during this gesture, and the ladder's
+    // `gestureInFlight` has to see the drag to cancel it instead of exiting
+    // the mode. `editReorderCancel` is the return path - the canvas raises it,
+    // whichever slot holds the grab abandons, and the release still coming
+    // lands on nothing.
+    property bool editBarDragActive: false
+    // A lock-island reorder in flight (stage 9b's drag inside the Lockscreen
+    // tab's preview). A flag of its own beside the bar's rather than a shared
+    // one: the two gestures live on different surfaces and are cleared by
+    // different teardowns, and one flag cleared by whichever ends first would
+    // strand the other in the ladder. `editReorderCancel` is shared - the
+    // ladder's cancel does not care which reorder is in flight, and each
+    // overlay only answers it while its own drag is.
+    property bool editLockDragActive: false
+    signal editReorderCancel()
+
+    // The undo stack (spec §7.3): in memory, session-scoped, bounded, one
+    // entry per COMMITTED mutation - a drag's release, a span commit, a
+    // reorder drop, an add, a remove - and ONE stack across all surfaces,
+    // because the user's notion of "the last thing I did" does not partition
+    // by surface. Each entry is a closure over the store write that reverses
+    // the mutation, captured at the call site that committed it; the
+    // arithmetic (LIFO, the ~50 bound, copy-on-write) is edit_mode.js's so a
+    // test can reach it. §7.4's restart argument holds with no code: the
+    // stack only ever offered to reverse committed changes, and it is gone
+    // with the process while the changes are on disk.
+    //
+    // Recording is gated on the mode: the same gestures commit all day with
+    // the mode off, and a Ctrl+Z inside the mode reversing a drag made hours
+    // before it would be undo reaching further back than the editor whose
+    // affordance it is. The stack survives leaving and re-entering the mode
+    // within a session - session-scoped is the spec's word, and clearing on
+    // exit would make Done destroy the very history "I did not mean that"
+    // asks for.
+    property var editUndoStack: []
+    // One GESTURE can commit several mutations - a group drag's release runs
+    // commitPosition once per member, followers first, leader last - and "the
+    // last thing I did" is the whole gesture: with one entry per member the
+    // leader's sits on top and the first Ctrl+Z would move the leader alone,
+    // deforming the cluster the user moved as a unit. While a batch is open,
+    // pushes collect; closing it folds them into ONE composite entry that
+    // replays every collected closure. The canvas opens it at a group
+    // release and closes it with Qt.callLater, because the leader's own
+    // commit runs later in the same signal chain and has to fall inside.
+    property var editUndoBatch: null
+    function editUndoBeginBatch() {
+        if (root.editUndoBatch === null) root.editUndoBatch = [];
+    }
+    function editUndoEndBatch() {
+        const entries = root.editUndoBatch;
+        root.editUndoBatch = null;
+        if (entries === null || entries.length === 0) return;
+        if (entries.length === 1) {
+            root.editUndoStack = EditMode.undoPush(root.editUndoStack, entries[0]);
+            return;
+        }
+        root.editUndoStack = EditMode.undoPush(root.editUndoStack, () => {
+            for (const entry of entries) entry();
+        });
+    }
+    function editUndoPush(entry) {
+        if (!root.editMode) return;
+        if (root.editUndoBatch !== null) {
+            root.editUndoBatch.push(entry);
+            return;
+        }
+        root.editUndoStack = EditMode.undoPush(root.editUndoStack, entry);
+    }
+    function editUndo() {
+        const popped = EditMode.undoPop(root.editUndoStack);
+        root.editUndoStack = popped.stack;
+        if (popped.entry !== null) popped.entry();
+    }
+
     property bool dropShelfOpen: false
     property real dropShelfX: 0
     property real dropShelfY: 0
     property bool dropShelfAnchorBelow: false // Shelf hangs below the anchor point (bar reveal) instead of above it
+
+    // Anything that takes the screen away ends the mode, because the desktop it
+    // shrinks is no longer the thing on screen. The lock is the one that
+    // matters: the background surface is promoted to Overlay and repurposed as
+    // the lock backdrop while locked, so a shrunk desktop would be the lock
+    // screen's wallpaper.
+    onScreenLockedChanged: if (root.screenLocked) root.editMode = false
+    onOverviewOpenChanged: if (root.overviewOpen) root.editMode = false
+    onSessionOpenChanged: if (root.sessionOpen) root.editMode = false
+
+    // Edit Mode and subject picking are both full-screen modes over the same
+    // desktop, and each shrinks or covers what the other needs at full size:
+    // picking must click the wallpaper at the size it is masked at, which a
+    // shrunk desktop is not, and Edit Mode's affordances would sit under the
+    // picker's surface. They land from separate branches, so the exclusion is
+    // stated once here rather than as a gate inside either mode - a mode that
+    // gated on the other's key would read `undefined` on the base that does not
+    // declare it yet and take its fallback forever.
+    onEditModeChanged: {
+        if (root.editMode) {
+            root.clockDepthSelectOpen = false;
+            // StyledPopup refuses NEW claims for the length of the mode; this
+            // is the popup already holding the card when the mode opens, whose
+            // card would otherwise sit over the bar being edited.
+            root.activeBarPopup = null;
+        }
+        // The open flag does not outlive the mode: a drawer left latched open
+        // would greet the NEXT entry mid-slide, with the desktop already
+        // shifted on the first frame of a shrink that is supposed to be
+        // concentric. The widget menu goes with it for the same reason - it is
+        // the mode's affordance, and one left open would greet the next entry
+        // pointing at wherever a widget used to be.
+        else {
+            root.editDrawerOpen = false;
+            root.editWidgetMenuOpen = false;
+            // The tab too: it is a filter on a viewport that no longer exists,
+            // and one left latched would greet the next entry already showing
+            // the lock screen's inputs.
+            root.editTab = EditMode.DESKTOP_TAB;
+            // The overlays holding a bar drag are torn down with the mode, so
+            // no end-of-drag handler is guaranteed to run - clear the flag
+            // here or a drag cut short by Done leaves the ladder believing a
+            // gesture is still in flight.
+            root.editBarDragActive = false;
+            root.editLockDragActive = false;
+        }
+    }
+    onClockDepthSelectOpenChanged: if (root.clockDepthSelectOpen) root.editMode = false
 
     onSidebarRightOpenChanged: {
         if (GlobalStates.sidebarRightOpen) {

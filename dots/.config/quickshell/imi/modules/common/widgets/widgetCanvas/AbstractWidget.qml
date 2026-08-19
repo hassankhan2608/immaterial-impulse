@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import qs.modules.common
+import "../../functions/edge_snap.js" as EdgeSnap
 
 /*
  * Widget to be placed on a WidgetCanvas
@@ -82,10 +83,33 @@ MouseArea {
     acceptedButtons: Qt.LeftButton | Qt.RightButton
     cursorShape: (draggable && containsPress) ? Qt.ClosedHandCursor : draggable ? Qt.OpenHandCursor : Qt.ArrowCursor
 
+    // Edit Mode's right-click, announced rather than handled: this base class
+    // knows nothing about what a widget IS, and only a subclass that carries an
+    // identity (PluginWidget's manifest) can open a menu about itself. The
+    // coordinates are this widget's own; whoever answers maps them onward.
+    signal contextMenuRequested(real atX, real atY)
+
     onClicked: (mouse) => {
-        if (mouse.button === Qt.RightButton) {
-            Config.options.background.widgetsLocked = !Config.options.background.widgetsLocked
+        if (mouse.button !== Qt.RightButton) return
+        // The mode is read off the owning canvas - the same property the
+        // marquee and the Escape ladder already run on - rather than from a
+        // second global source, which keeps the overlay's canvas (which never
+        // follows the mode) on today's behaviour without a special case.
+        //
+        // In the mode the click is the widget's menu (spec §4.1). Outside it
+        // the click keeps being the one quick gesture for the global lock -
+        // the spec's table changes only the in-mode column, and this is the
+        // lock's sole sanctioned writer outside Settings
+        // (test_edit_mode_contract.py pins that). It also stops being a
+        // SILENT write: since the mode began suppressing the global lock,
+        // an in-mode right-click flipped a stored preference whose effect
+        // was invisible until the mode ended.
+        const canvas = findCanvas(root.parent)
+        if (canvas && canvas.editMode === true) {
+            root.contextMenuRequested(mouse.x, mouse.y)
+            return
         }
+        Config.options.background.widgetsLocked = !Config.options.background.widgetsLocked
     }
 
     // The canvas cannot see this widget's press/drag on its own, so report it.
@@ -94,6 +118,7 @@ MouseArea {
     // canvas captures cannot bake a first-step jump into the cluster.
     onPressed: (mouse) => {
         if (mouse.button !== Qt.LeftButton || !root.draggable) return
+        root.dragCancelled = false
         const p = root.mapToItem(root.parent, mouse.x, mouse.y)
         root.dragPressParentX = p.x
         root.dragPressParentY = p.y
@@ -103,6 +128,11 @@ MouseArea {
         dragProxy.y = root.y
         const canvas = findCanvas(root.parent)
         if (canvas && canvas.widgetDragStarted) canvas.widgetDragStarted(root)
+        // After widgetDragStarted: that call is what flags a group drag's
+        // followers, and a follower must not be captured as a neighbour.
+        root.edgeSnapHeldX = null
+        root.edgeSnapHeldY = null
+        root.edgeSnapNeighbours = root.collectEdgeSnapNeighbours()
     }
     onPositionChanged: (mouse) => {
         if (!root.draggable || !(root.pressedButtons & Qt.LeftButton)) return
@@ -127,11 +157,46 @@ MouseArea {
         root.dragActive = false
         const canvas = findCanvas(root.parent)
         if (canvas && canvas.widgetDragEnded) canvas.widgetDragEnded(root)
+        // A plain click never raises dragActive, so onDraggingChanged never
+        // schedules the clear and the rects captured at the press would sit
+        // held until the next one. Idempotent for a real drag, which has
+        // already scheduled the same call.
+        Qt.callLater(root.clearEdgeSnap)
     }
     onCanceled: {
         root.dragActive = false
         const canvas = findCanvas(root.parent)
         if (canvas && canvas.widgetDragEnded) canvas.widgetDragEnded(root)
+        Qt.callLater(root.clearEdgeSnap)
+    }
+
+    // Put the widget back where the press found it and commit nothing. Called
+    // when something ends the gesture that is not the user finishing it - Edit
+    // Mode being left mid-drag, and Escape while dragging.
+    //
+    // Restoring the BINDING is what returns the position: only a commit writes
+    // targetX/targetY, so re-binding x/y through them is the pre-press place.
+    // A widget with no such binding (the overlay's) is put back by hand.
+    property bool dragCancelling: false
+    // The pointer is still GRABBED when a gesture is cancelled - the mode ended,
+    // the user did not let go - so a release is still coming, and a release
+    // commits. It has to commit nothing: what it would write is wherever the
+    // restore animation happened to be at that moment, which is a position the
+    // widget is not at and the user never chose.
+    property bool dragCancelled: false
+    function cancelDrag() {
+        if (!root.dragActive) return
+        root.dragCancelling = true
+        root.dragCancelled = true
+        root.dragActive = false
+        const canvas = findCanvas(root.parent)
+        if (canvas && canvas.widgetDragCancelled) canvas.widgetDragCancelled(root)
+        if (root.restoreXYBinding) root.restoreXYBinding()
+        else {
+            root.x = root.dragStartX
+            root.y = root.dragStartY
+        }
+        root.dragCancelling = false
     }
 
     function center() {
@@ -161,6 +226,97 @@ MouseArea {
     function snapX(value) { return root.snap(value - root.snapOffsetX) + root.snapOffsetX }
     function snapY(value) { return root.snap(value - root.snapOffsetY) + root.snapOffsetY }
 
+    // ---- widget-to-widget edge snap (spec §6) -----------------------------
+    // The arithmetic is edge_snap.js; this widget owns only the state a drag
+    // needs. Neighbour rects are captured once at the press - nothing else on
+    // the canvas moves during this widget's drag (group-drag followers, which
+    // do, are excluded) - while the candidates are regenerated per event,
+    // because the perpendicular relevance filter reads the DRAGGED widget's
+    // live position across the axis.
+    //
+    // It rides `background.showSnapLines`, not a switch of its own. That key
+    // already gates the alignment visuals (the release flash), and the guide
+    // and the hold have to travel together: a detent with no line is a drag
+    // that sticks for no visible reason, and a line with no detent is a
+    // suggestion the widget ignores. The lattice snap stays ungated beside it,
+    // exactly as today.
+    property var edgeSnapNeighbours: []
+    property var edgeSnapHeldX: null
+    property var edgeSnapHeldY: null
+
+    function edgeSnapEnabled() {
+        return root.snapEnabled && Config.options.background.showSnapLines
+    }
+
+    function collectEdgeSnapNeighbours() {
+        if (!root.edgeSnapEnabled()) return []
+        const canvas = root.findCanvas(root.parent)
+        if (!canvas) return []
+        const rects = []
+        for (const widget of canvas.widgetsUnder(canvas, [])) {
+            // A follower travels with this drag, so an edge captured from it
+            // would chase its own cluster. A hidden or unsized widget (a
+            // FadeLoader mid-exit) has no edge on screen to align to.
+            if (widget === root || widget.groupDragging) continue
+            if (!widget.visible || widget.width <= 0 || widget.height <= 0) continue
+            // Into THIS widget's parent frame, because that is the frame the
+            // drag Binding writes x/y in. Mapping through the parents rather
+            // than reading x/y raw keeps a widget under a differently-placed
+            // loader honest.
+            const pos = widget.parent.mapToItem(root.parent, widget.x, widget.y)
+            rects.push({ x: pos.x, y: pos.y, width: widget.width, height: widget.height })
+        }
+        return rects
+    }
+
+    // Runs from the drag proxy's change handlers - the same home as
+    // updateCenterHighlight, and for the same reason: the resolve is stateful
+    // (this event's hold depends on last event's), so it belongs in a handler,
+    // not inside the drag Binding's own evaluation. The Binding reads the held
+    // target through a property and re-evaluates when it changes.
+    //
+    // Both axes update on any move: the X candidates depend on where the
+    // widget is in Y (the perpendicular filter) and vice versa.
+    function updateEdgeSnap() {
+        if (root.edgeSnapNeighbours.length === 0) return
+        // The gap two adjacent widgets keep is the design system's grid gap,
+        // scaled the way every widget's own span is - so a widget snapped
+        // beside another sits exactly one cell-gap away, as if the two were
+        // cells of one wider widget.
+        const gap = Appearance.sizes.widgetGridGap * Appearance.effectiveScale
+        root.edgeSnapHeldX = EdgeSnap.resolveSnap(dragProxy.x,
+            EdgeSnap.candidatesForAxis(root.edgeSnapNeighbours, "x",
+                root.width, dragProxy.y, root.height, gap),
+            root.edgeSnapHeldX)
+        root.edgeSnapHeldY = EdgeSnap.resolveSnap(dragProxy.y,
+            EdgeSnap.candidatesForAxis(root.edgeSnapNeighbours, "y",
+                root.height, dragProxy.x, root.width, gap),
+            root.edgeSnapHeldY)
+        root.publishEdgeGuides()
+    }
+
+    // The guide is drawn at the OTHER widget's edge, by the canvas, in the
+    // canvas's frame - mapped point by point rather than assumed equal to the
+    // parent's, for the same reason the neighbour rects are mapped in.
+    function publishEdgeGuides() {
+        const canvas = root.findCanvas(root.parent)
+        if (!canvas || !canvas.setEdgeGuides) return
+        const heldX = root.edgeSnapHeldX
+        const heldY = root.edgeSnapHeldY
+        canvas.setEdgeGuides(
+            heldX !== null,
+            heldX !== null ? root.parent.mapToItem(canvas, heldX.guide, 0).x : 0,
+            heldY !== null,
+            heldY !== null ? root.parent.mapToItem(canvas, 0, heldY.guide).y : 0)
+    }
+
+    function clearEdgeSnap() {
+        root.edgeSnapNeighbours = []
+        root.edgeSnapHeldX = null
+        root.edgeSnapHeldY = null
+        root.publishEdgeGuides()
+    }
+
     function findCanvas(item) {
         var p = item
         while (p) {
@@ -189,18 +345,28 @@ MouseArea {
         id: dragProxy
         parent: root.parent
 
-        onXChanged: if (root.dragging) root.updateCenterHighlight()
-        onYChanged: if (root.dragging) root.updateCenterHighlight()
+        onXChanged: if (root.dragging) { root.updateCenterHighlight(); root.updateEdgeSnap() }
+        onYChanged: if (root.dragging) { root.updateCenterHighlight(); root.updateEdgeSnap() }
     }
 
     // Snap first, clamp second: clamp-then-snap could round the leader back
     // off the group bound by up to half a grid cell, deforming the cluster at
     // the screen edge by exactly the amount the lattice is meant to guarantee.
+    //
+    // A held edge alignment takes the place of the lattice snap rather than
+    // stacking on it: the neighbour's edge is wherever the neighbour is, and
+    // rounding an exact alignment to the nearest lattice stop would miss the
+    // edge by up to half a cell - a guide drawn at a line the widget is not
+    // on. The clamp still runs last, unchanged. A group drag's followers ride
+    // the leader by delta (WidgetCanvas.syncGroupFollowers), so the leader
+    // snapping an edge moves the cluster whole and every follower keeps its
+    // offset - the existing semantics, not new ones.
     Binding {
         target: root
         property: "x"
         value: Math.max(root.groupDragMinX, Math.min(root.groupDragMaxX,
-            root.snapEnabled ? root.snapX(dragProxy.x) : dragProxy.x))
+            root.edgeSnapHeldX !== null ? root.edgeSnapHeldX.target
+            : root.snapEnabled ? root.snapX(dragProxy.x) : dragProxy.x))
         when: root.dragging
         restoreMode: Binding.RestoreNone
     }
@@ -208,7 +374,8 @@ MouseArea {
         target: root
         property: "y"
         value: Math.max(root.groupDragMinY, Math.min(root.groupDragMaxY,
-            root.snapEnabled ? root.snapY(dragProxy.y) : dragProxy.y))
+            root.edgeSnapHeldY !== null ? root.edgeSnapHeldY.target
+            : root.snapEnabled ? root.snapY(dragProxy.y) : dragProxy.y))
         when: root.dragging
         restoreMode: Binding.RestoreNone
     }
@@ -232,12 +399,22 @@ MouseArea {
             if (Math.abs(widgetCenterY - canvas.height / 2) < root.gridSize / 2)
                 horizontalLines.push(canvas.height / 2)
 
-            if (Config.options.background.showSnapLines)
+            // A cancelled drag flashes nothing: the lines say "this is where it
+            // landed", and it did not land anywhere.
+            if (Config.options.background.showSnapLines && !root.dragCancelling)
                 canvas.flashLines(verticalLines, horizontalLines)
         }
 
         dragProxy.x = root.x
         dragProxy.y = root.y
+        // Deferred, because this handler runs while the drag Binding may not
+        // have deactivated yet - the `when` and this handler both observe
+        // `dragging`, and nothing orders them. Nulling the hold under a
+        // still-live Binding re-evaluates it to the lattice branch and rounds
+        // an edge-snapped landing off the edge it was released on: measured,
+        // a widget released holding 465 committed 468. One turn later the
+        // Binding is inert and the clear touches nothing but the guides.
+        if (!dragging) Qt.callLater(root.clearEdgeSnap)
     }
 
     Behavior on x {

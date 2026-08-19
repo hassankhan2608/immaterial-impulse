@@ -38,6 +38,25 @@ Scope {
 
             screen: modelData
             color: "transparent"
+            // Mapped only while it has something to show. This is a
+            // SCREEN-SIZED surface on the Overlay layer, so leaving it mapped
+            // puts a 5120x1440 transparent sheet over every fullscreen window
+            // for the whole session - the compositor composites it each frame
+            // and the window under it can never be the only thing on the
+            // output. Measured with FFXIV's own counter on a static scene:
+            // 98 fps with this mapped and idle, 105 with it unmapped.
+            //
+            // The predicate outlasts the exit deliberately. Unmapping destroys
+            // the QQuickWindow, and a popup's content tree is REPARENTED into
+            // this window while it shows - so the window may only go once
+            // `finishExit()` has released both trees and collapsed the card,
+            // which is exactly the state this reads.
+            visible: overlayWindow.current !== null
+                || overlayWindow.outgoing !== null
+                || overlayWindow.exiting
+                || card.opacity > 0
+                || card.width > 0
+                || card.height > 0
             exclusionMode: ExclusionMode.Ignore
             exclusiveZone: 0
 
@@ -359,12 +378,40 @@ Scope {
 
             // Whatever is on the card can change size while it is shown - the
             // clock ticking a row in, NetworkSpeed's rows changing.
+            //
+            // Those are one-off changes, and deferring them by a tick lets a
+            // burst of them settle into a single retarget. A popup ANIMATING
+            // its own size is the opposite case: the size changes every frame,
+            // so a timer that is restarted every frame never fires until the
+            // animation ends, and the card would sit at its old size for the
+            // whole transition while the content grew past its clip. Those
+            // popups are retargeted on the spot.
             Connections {
                 target: overlayWindow.current?.contentItem ?? null
                 ignoreUnknownSignals: true
-                function onImplicitWidthChanged() { retargetTimer.restart() }
-                function onImplicitHeightChanged() { retargetTimer.restart() }
+                function onImplicitWidthChanged() { overlayWindow.retargetNow() }
+                function onImplicitHeightChanged() { overlayWindow.retargetNow() }
             }
+
+            function retargetNow() {
+                if (overlayWindow.current?.contentDrivesSize) overlayWindow.retarget();
+                else retargetTimer.restart();
+            }
+
+            // The window is unmapped while it has nothing to show (a mapped
+            // screen-sized Overlay surface holds the compositor's fullscreen
+            // fast path shut), and a WlrLayershell window that has just gone
+            // visible does not have its size yet: measured on the live
+            // compositor, it reports 500x500 for the same tick AND through
+            // Qt.callLater, and the real 5120x1330 arrives with the configure
+            // ~50ms later. retarget()'s clamp reads overlayWindow.width and
+            // height, so a retarget on the zero-interval timer ran against
+            // 500x500, `min(base, 500 - cardWidth - margin - 10)` went
+            // negative, and `max(margin, ...)` pinned the card to the
+            // top-left - the calendar card at x=margin under a clock at
+            // screen-centre. Re-run when the geometry actually lands.
+            onWidthChanged: if (overlayWindow.current) overlayWindow.retarget()
+            onHeightChanged: if (overlayWindow.current) overlayWindow.retarget()
 
             // There is no sensible interpolation between "below the top edge"
             // and "right of the left edge", so an orientation change idles the
@@ -456,7 +503,11 @@ Scope {
                 border.color: Appearance.colors.colLayer0Border
 
                 Behavior on x {
-                    enabled: card.animate
+                    // Position too, for the same reason as width and height: a
+                    // right-anchored card's x is derived from its width, so
+                    // easing one while the other tracks the content puts the
+                    // card's edge where its content is not.
+                    enabled: card.animate && !(overlayWindow.current?.contentDrivesSize ?? false)
                     NumberAnimation {
                         id: xAnim
                         duration: card.motionDuration
@@ -465,7 +516,7 @@ Scope {
                     }
                 }
                 Behavior on y {
-                    enabled: card.animate
+                    enabled: card.animate && !(overlayWindow.current?.contentDrivesSize ?? false)
                     NumberAnimation {
                         id: yAnim
                         duration: card.motionDuration
@@ -474,7 +525,9 @@ Scope {
                     }
                 }
                 Behavior on width {
-                    enabled: card.animate
+                    // See StyledPopup.contentDrivesSize: a popup animating its
+                    // own size must not be chased by the card.
+                    enabled: card.animate && !(overlayWindow.current?.contentDrivesSize ?? false)
                     NumberAnimation {
                         id: widthAnim
                         duration: card.motionDuration
@@ -483,7 +536,7 @@ Scope {
                     }
                 }
                 Behavior on height {
-                    enabled: card.animate
+                    enabled: card.animate && !(overlayWindow.current?.contentDrivesSize ?? false)
                     NumberAnimation {
                         id: heightAnim
                         duration: card.motionDuration

@@ -5,7 +5,9 @@ import qs.modules.common
 import qs.modules.imi.background
 import qs.modules.imi.cheatsheet
 import qs.modules.imi.bar
+import qs.modules.imi.clockDepthSelect
 import qs.modules.imi.dock
+import qs.modules.imi.editMode
 import qs.modules.imi.lock
 import qs.modules.imi.mediaControls
 import qs.modules.imi.notificationPopup
@@ -26,6 +28,7 @@ import qs.modules.imi.verticalBar
 import qs.modules.imi.wallpaperSelector
 import qs.modules.imi.desktopMenu
 import qs.modules.imi.dropShelf
+import qs.modules.imi.recordingRegion
 import qs.modules.imi.screenshotResult
 
 Scope {
@@ -35,6 +38,8 @@ Scope {
     PanelLoader { component: BarPopupOverlay {} }
     PanelLoader { component: Background {} }
     PanelLoader { component: Cheatsheet {} }
+    PanelLoader { component: ClockDepthSelect {} }
+    PanelLoader { component: EditModeChrome {} }
     PanelLoader { extraCondition: Config.options.dock.enable; component: Dock {} }
     PanelLoader { component: Lock {} }
     PanelLoader { component: MediaControls {} }
@@ -57,4 +62,5 @@ Scope {
     PanelLoader { component: DesktopMenu {} }
     PanelLoader { component: DropShelfPanel {} }
     PanelLoader { component: ScreenshotResultPanel {} }
+    PanelLoader { component: RecordingRegionPanel {} }
 }

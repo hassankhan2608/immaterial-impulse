@@ -15,19 +15,50 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cfg() { jq -r "$1 // empty" "$CONFIG_FILE" 2>/dev/null; }
 
+# Writes the whole record.* block: the flag and the region it applies to.
+#
+# One writer, deliberately. The shell also owns this file, and it rewrites it
+# wholesale from its own in-memory copy - so a region written from QML right
+# after launching this script lands on top of the `enable = true` written here
+# milliseconds earlier, and the recording indicator never comes on. The region
+# is known here anyway; it has no business making the round trip.
 set_recording_state() {
-    local state=$1 tmp
+    local state=$1 region=${2-} tmp
     mkdir -p "$(dirname "$STATE_FILE")"
     [[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"
     tmp=$(mktemp)
-    jq ".record.enable = $state" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+    jq --arg region "$region" ".record.enable = $state | .record.region = \$region" \
+        "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
 }
 
 # Toggle: a recording we started is running -> stop it gracefully and exit.
 # The pidfile scopes the toggle to OUR recording, never the replay daemon
 # (both are gpu-screen-recorder processes - killing by process name would hit both).
+#
+# INT first, because that is gsr's "finish and save". Then an ESCALATION,
+# because INT is not always enough: gsr installs its own INT handler only once
+# it is capturing, and a recording that never got that far - the portal picker
+# never resolved, the compositor refused the stream - sits in poll() with INT
+# still ignored (a `&` job in non-interactive bash starts with INT and QUIT
+# ignored, and gsr had not yet undone it) and TERM caught but never acted on.
+# That is the recording the maintainer could not stop from the privacy card or
+# the overlay: every stop path funnels here, this sent one signal, and the
+# process was born deaf to it. There is no file to lose in that state, so the
+# ladder ends in KILL rather than leaving an unstoppable process behind an
+# indicator that says "recording".
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    kill -INT "$(cat "$PIDFILE")"
+    gsr_pid="$(cat "$PIDFILE")"
+    kill -INT "$gsr_pid"
+    for _ in $(seq 1 30); do   # 3s: gsr flushes a real capture well inside this
+        kill -0 "$gsr_pid" 2>/dev/null || exit 0
+        sleep 0.1
+    done
+    kill -TERM "$gsr_pid" 2>/dev/null
+    for _ in $(seq 1 20); do   # 2s
+        kill -0 "$gsr_pid" 2>/dev/null || exit 0
+        sleep 0.1
+    done
+    kill -KILL "$gsr_pid" 2>/dev/null
     exit 0
 fi
 rm -f "$PIDFILE"
@@ -171,15 +202,48 @@ else
     ARGS+=(-w region -region "$GEOMETRY")
 fi
 
+# Job control ON for the launch, so gsr is not born with INT and QUIT ignored:
+# a `&` job in a non-interactive shell inherits SIG_IGN for both, and the stop
+# path above leads with INT. gsr normally installs its own handler and undoes
+# that once capturing, but "normally" is the case that already worked; this is
+# for the one that did not. Turned back off after, so the script's own
+# job-control noise does not change anything else about how it runs.
+set -m
 "${ARGS[@]}" &
 GSR_PID=$!
+set +m
 echo "$GSR_PID" > "$PIDFILE"
-set_recording_state true
+set_recording_state true "$REGION"
 notify-send "Recording started" "$(basename "$OUT")" -a 'Recorder' & disown
+
+# A recording that never starts must not sit behind an indicator that says
+# it did. The portal path can wedge before the first frame - measured: a
+# hard-hung xdg-desktop-portal-hyprland left gsr at CreateSession for minutes,
+# single-threaded, no output file, while the bar showed "recording" - and the
+# user's only signal was that Stop did nothing. So watch for the OUTPUT FILE
+# to appear: gsr opens it the moment capture begins, and a screen capture
+# begins well inside this window. Past it, tear gsr down through the same
+# ladder the stop uses and say why, then fall through to the cleanup below.
+# The picker (a first-ever portal recording, or a token the portal refused)
+# needs the user's click, so the window is generous rather than tight.
+START_WINDOW_S="${IMI_RECORD_START_WINDOW_S:-25}"   # env override is for the test
+for _ in $(seq 1 $((START_WINDOW_S * 10))); do
+    kill -0 "$GSR_PID" 2>/dev/null || break            # exited on its own: fall through
+    [[ -e "$OUT" ]] && break                            # capturing
+    sleep 0.1
+done
+if kill -0 "$GSR_PID" 2>/dev/null && [[ ! -e "$OUT" ]]; then
+    notify-send "Recording did not start" \
+        "No frames after ${START_WINDOW_S}s - the screen-capture portal is not answering. Try again; if it keeps happening, restart xdg-desktop-portal-hyprland." \
+        -a 'Recorder' -u critical & disown
+    kill -INT "$GSR_PID" 2>/dev/null; sleep 1
+    kill -0 "$GSR_PID" 2>/dev/null && { kill -TERM "$GSR_PID" 2>/dev/null; sleep 1; }
+    kill -0 "$GSR_PID" 2>/dev/null && kill -KILL "$GSR_PID" 2>/dev/null
+fi
 
 # Block until gsr exits (stop toggle, crash, or logout) so the pidfile and the
 # shell's recording indicator are always cleaned up. The saved-file
 # notification comes from the -sc hook with the real path.
 wait "$GSR_PID"
 rm -f "$PIDFILE"
-set_recording_state false
+set_recording_state false ""

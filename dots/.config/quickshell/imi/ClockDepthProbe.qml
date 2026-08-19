@@ -1,0 +1,278 @@
+import QtQuick
+import Quickshell
+import qs.modules.imi.background
+import "modules/common/functions/clockDepth.js" as ClockDepthLogic
+
+/*
+ * Does the depth layer actually put the wallpaper's subject over the clock, and
+ * does it follow the pan rather than the pan's destination?
+ *
+ * Both are invisible from the source and unreachable from qmltestrunner - the
+ * software scene graph draws no layer effect, and Quickshell's own types cannot
+ * be constructed there at all. So this renders the four-sibling stack with a
+ * SYNTHETIC mask: a known rectangle over a flat field, with a bar standing in
+ * for the clock underneath it. No model is ever run; what is being scored is the
+ * compositing contract, not any mask's quality.
+ *
+ * The layer is re-declared here rather than reached into, because
+ * Background.qml's is inside a wlr-layer-shell PanelWindow and weston implements
+ * no layer shell. tests/lint_clock_depth_geometry.py is the other half of that
+ * split: it pins the real layer's geometry, gates and image request to the shape
+ * this probe scores.
+ *
+ *   ./tests/run_clock_depth_probe.sh
+ */
+ShellRoot {
+    id: harness
+
+    property int checksRun: 0
+    property int failures: 0
+    function check(label, ok, detail) {
+        harness.checksRun++;
+        console.log(`[ClockDepth] ${label}: ${ok ? "ok" : "FAIL"}${detail ? " " + detail : ""}`);
+        if (!ok) harness.failures++;
+    }
+
+    readonly property string wallpaperFile: Quickshell.env("CLOCK_DEPTH_WALLPAPER") || ""
+    readonly property string maskFile: Quickshell.env("CLOCK_DEPTH_MASK") || ""
+    readonly property string restShot: Quickshell.env("CLOCK_DEPTH_REST_SHOT") || ""
+    readonly property string panShot: Quickshell.env("CLOCK_DEPTH_PAN_SHOT") || ""
+    readonly property string flatShot: Quickshell.env("CLOCK_DEPTH_FLAT_SHOT") || ""
+    readonly property string brokenShot: Quickshell.env("CLOCK_DEPTH_BROKEN_SHOT") || ""
+
+    // Driven by the probe, and the only thing that moves.
+    property real panTarget: 0
+    readonly property real panDistance: -200
+    // Repointed for the last two shots, to score both degradations: a wallpaper
+    // with no mask at all, and an accepted mask whose file has gone.
+    property string activeMask: harness.maskFile
+
+    FloatingWindow {
+        id: window
+        implicitWidth: 800
+        implicitHeight: 400
+        color: "black"
+
+        Item {
+            id: field
+            anchors.fill: parent
+            // The grab takes THIS item, so it carries its own ground: grabbing
+            // over the window's colour yields a transparent PNG whose pixels
+            // read as black to any analyser.
+            Rectangle { anchors.fill: parent; color: "black" }
+
+            // The wallpaper's viewport. Oversized and positioned by its x, with
+            // the same 600ms Behavior Background.qml gives the pan.
+            Item {
+                id: parallaxViewport
+                width: 1000
+                height: 500
+                x: harness.panTarget
+                y: 0
+                Behavior on x {
+                    NumberAnimation { duration: 600; easing.type: Easing.OutCubic }
+                }
+
+                Image {
+                    id: wallpaper
+                    anchors.fill: parent
+                    fillMode: Image.PreserveAspectCrop
+                    cache: true
+                    smooth: true
+                    asynchronous: false
+                    source: harness.wallpaperFile === "" ? "" : `file://${harness.wallpaperFile}`
+                }
+            }
+
+            // The desktop widgets: a screen-sized sibling that does not pan, so
+            // the bar stays put while the wallpaper travels under it.
+            Item {
+                id: widgetCanvas
+                anchors.fill: parent
+                z: 2
+                Rectangle {
+                    id: clockBar
+                    y: 160
+                    width: parent.width
+                    height: 80
+                    color: "#ff2020"
+                }
+            }
+
+            // The depth layer. Every binding here is the one the lint pins in
+            // Background.qml.
+            Item {
+                id: clockDepthLayer
+                x: parallaxViewport.x
+                y: parallaxViewport.y
+                width: parallaxViewport.width
+                height: parallaxViewport.height
+                z: 3
+                visible: clockDepthLayer.opacity > 0
+                enabled: false
+                opacity: ClockDepthLogic.eligible({
+                    enable: true,
+                    maskPath: harness.activeMask,
+                    optedOut: false,
+                    weActive: false,
+                    wallpaperIsVideo: false,
+                    centeredWallpaper: false,
+                    screenLocked: false,
+                    transitionInFlight: false
+                }) ? 1 : 0
+
+                // The shipping component, not a copy of it. The LAYER is
+                // re-declared here because Background.qml's lives inside a
+                // wlr-layer-shell PanelWindow and weston implements none; the
+                // registration inside it is the real one, so a probe that
+                // rebuilt it would be scoring its own arithmetic.
+                ClockDepthCutout {
+                    id: clockDepthCutout
+                    anchors.fill: parent
+                    wallpaperSource: wallpaper.source
+                    maskPath: harness.activeMask
+                }
+            }
+        }
+    }
+
+    // Sampled 120ms into the pan. A settled sample passes identically on a layer
+    // bound to the pan's DESTINATION and on one bound to the viewport, which is
+    // the whole bug this probe exists for.
+    Timer {
+        id: midPanSample
+        interval: 120
+        onTriggered: {
+            const travelled = parallaxViewport.x;
+            harness.check("the pan is in flight when it is sampled",
+                travelled < -1 && travelled > harness.panDistance + 1,
+                `viewport.x=${travelled.toFixed(1)} target=${harness.panDistance}`);
+            harness.check("the layer is exactly where the viewport is, mid-pan",
+                Math.abs(clockDepthLayer.x - parallaxViewport.x) < 0.001,
+                `layer.x=${clockDepthLayer.x.toFixed(1)} viewport.x=${travelled.toFixed(1)}`);
+            harness.check("the layer has NOT jumped to the pan's destination",
+                Math.abs(clockDepthLayer.x - harness.panDistance) > 1,
+                `layer.x=${clockDepthLayer.x.toFixed(1)} destination=${harness.panDistance}`);
+            if (harness.panShot !== "")
+                field.grabToImage(result => {
+                    result.saveToFile(harness.panShot);
+                    brokenStep.start();
+                });
+            else
+                brokenStep.start();
+        }
+    }
+
+    // A mask the cache still names but whose file has gone. The predicate cannot
+    // see this - status said "accepted", so the layer is eligible and fully
+    // opaque - and it is the one failure whose direction is not obvious: an
+    // Image.Error maskSource must mask EVERYTHING away, leaving today's flat
+    // clock, rather than mask nothing and paste the wallpaper over it.
+    Timer {
+        id: brokenStep
+        interval: 900
+        onTriggered: {
+            harness.activeMask = "/nonexistent/clock-depth/mask.png";
+            settleBroken.start();
+        }
+    }
+
+    Timer {
+        id: settleBroken
+        interval: 300
+        onTriggered: {
+            harness.check("a mask file that has gone still leaves the layer eligible",
+                clockDepthLayer.opacity === 1 && clockDepthCutout.maskStatus === Image.Error,
+                `opacity=${clockDepthLayer.opacity} maskStatus=${clockDepthCutout.maskStatus}`);
+            if (harness.brokenShot !== "")
+                field.grabToImage(result => {
+                    result.saveToFile(harness.brokenShot);
+                    flatStep.start();
+                });
+            else
+                flatStep.start();
+        }
+    }
+
+    Timer {
+        id: flatStep
+        interval: 300
+        onTriggered: {
+            harness.activeMask = "";
+            harness.check("a wallpaper with no mask hides the layer entirely",
+                clockDepthLayer.opacity === 0 && !clockDepthLayer.visible,
+                `opacity=${clockDepthLayer.opacity} visible=${clockDepthLayer.visible}`);
+            settleFlat.start();
+        }
+    }
+
+    Timer {
+        id: settleFlat
+        interval: 200
+        onTriggered: {
+            if (harness.flatShot !== "")
+                field.grabToImage(result => {
+                    result.saveToFile(harness.flatShot);
+                    harness.finish();
+                });
+            else
+                harness.finish();
+        }
+    }
+
+    function finish(): void {
+        console.log(`[ClockDepth] checks: ${harness.checksRun} failures: ${harness.failures}`);
+        Qt.quit();
+    }
+
+    Timer {
+        running: true
+        interval: 900
+        onTriggered: {
+            harness.check("both fixtures are on disk",
+                harness.wallpaperFile !== "" && harness.maskFile !== "");
+            harness.check("the wallpaper decoded",
+                wallpaper.status === Image.Ready, `status=${wallpaper.status}`);
+            harness.check("the mask decoded",
+                clockDepthCutout.maskStatus === Image.Ready, `status=${clockDepthCutout.maskStatus}`);
+            harness.check("the layer sits above the widget canvas",
+                clockDepthLayer.z > widgetCanvas.z,
+                `layer.z=${clockDepthLayer.z} canvas.z=${widgetCanvas.z}`);
+            harness.check("the layer takes no input",
+                clockDepthLayer.enabled === false);
+            harness.check("a mask is present, so the layer is showing",
+                clockDepthLayer.opacity === 1 && clockDepthLayer.visible);
+            // Stated as the invariant rather than as this fixture's numbers, so
+            // the probe answers the same question when it is hand-fed a real
+            // wallpaper: the mask covers the box on both axes (or a band of
+            // wallpaper would be drawn unmasked over the widgets) and carries
+            // the wallpaper's aspect rather than the box's, which is the whole
+            // of the un-squash.
+            const maskRect = clockDepthCutout.maskRect;
+            const sourceSize = clockDepthCutout.wallpaperSourceSize;
+            const wallpaperAspect = sourceSize.width / sourceSize.height;
+            harness.check("the mask covers the box on both axes",
+                maskRect.width >= parallaxViewport.width - 0.001
+                    && maskRect.height >= parallaxViewport.height - 0.001,
+                `mask=${maskRect.width.toFixed(1)}x${maskRect.height.toFixed(1)} `
+                    + `box=${parallaxViewport.width}x${parallaxViewport.height}`);
+            harness.check("the mask is un-squashed to the wallpaper's aspect",
+                Math.abs(maskRect.width / maskRect.height - wallpaperAspect) < 0.001,
+                `mask=${(maskRect.width / maskRect.height).toFixed(3)} `
+                    + `wallpaper=${wallpaperAspect.toFixed(3)}`);
+            harness.check("the layer starts level with the viewport",
+                clockDepthLayer.x === parallaxViewport.x && clockDepthLayer.y === parallaxViewport.y);
+
+            if (harness.restShot === "") {
+                harness.check("CLOCK_DEPTH_REST_SHOT is set", false);
+                harness.finish();
+                return;
+            }
+            field.grabToImage(result => {
+                result.saveToFile(harness.restShot);
+                harness.panTarget = harness.panDistance;
+                midPanSample.start();
+            });
+        }
+    }
+}

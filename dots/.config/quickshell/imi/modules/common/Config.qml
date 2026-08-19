@@ -5,6 +5,11 @@ import Quickshell
 import Quickshell.Io
 import qs.modules.common
 import qs.modules.common.functions
+// A `.pragma library` module of pure functions that happens to live beside its
+// other consumer, not the MprisController service - there is no cycle to have,
+// and the normalization below must apply the same rule the selection code
+// does, or the two disagree about what the setting means.
+import "../../services/MprisSelection.js" as MprisSelection
 
 Singleton {
     id: root
@@ -79,6 +84,27 @@ Singleton {
     // keycap. Nobody chose that value - there is no setting for it in the UI,
     // so the only way to have set it deliberately is by hand, and this runs
     // once either way.
+    // bar.media.preferredPlayer was free text matched as a substring of a
+    // player's identity; it is now the stable half of an MPRIS bus name, which
+    // is what the settings picker writes. Converting the stored value keeps the
+    // config and the picker talking about the same thing.
+    //
+    // Unconditional and unmarked, on the reasoning AGENT.md gives for
+    // clearStaleKbOptions: a marker records that the pass ran, not that it saw
+    // the user's config, and the two come apart exactly when the config
+    // directory migration declines and the installer default loads first.
+    // There is nothing to protect with one either way - normalization is
+    // idempotent, so a value the picker wrote is already its own normal form
+    // and running this every load cannot change it. A value it cannot parse
+    // into an id still resolves through MprisSelection.matchesPreference's
+    // legacy substring branch, so nothing is lost by converting it either.
+    function migratePreferredPlayerToBusId() {
+        const stored = root.options.bar.media.preferredPlayer;
+        const normalized = MprisSelection.normalizePreferredPlayer(stored);
+        if (normalized !== stored)
+            root.options.bar.media.preferredPlayer = normalized;
+    }
+
     function migrateSplitCheatsheetButtons() {
         if (root.options.cheatsheet.migratedSplitButtons)
             return;
@@ -437,6 +463,7 @@ Singleton {
             root.migrateUpstreamKeys(text());
             root.ready = true;
             root.clearStaleKbOptions();
+            root.migratePreferredPlayerToBusId();
             root.migrateDeadParallaxSwitches();
             root.migrateSplitCheatsheetButtons();
             root.migrateDesktopWidgetsToPlugins();
@@ -562,6 +589,15 @@ Singleton {
                     property string monospace: "JetBrains Mono NF"
                     property string reading: "Readex Pro"
                     property string expressive: "Space Grotesk"
+                }
+                // How fast the shell moves. `multiplier` is a speed preference
+                // and is clamped to motion_policy.js's sanctioned range;
+                // `reduceMotion` is an accessibility state and is deliberately
+                // a separate key, because a floor a slider can land on is a
+                // floor a user can leave by accident.
+                property JsonObject motion: JsonObject {
+                    property real multiplier: 1.0
+                    property bool reduceMotion: false
                 }
                 property JsonObject transparency: JsonObject {
                     property bool enable: false
@@ -944,6 +980,19 @@ Singleton {
                     // Set once by migrateDeadParallaxSwitches; see there.
                     property bool migratedFromDeadCode: false
                 }
+                // iOS-style depth: the wallpaper's subject drawn back over the
+                // desktop widgets, so the clock sits behind the person in the
+                // photo. Off by default and deliberately so - a feature that
+                // puts pixels over the clock ships off, and the per-wallpaper
+                // mask the user accepts is what turns it on for that wallpaper.
+                //
+                // There is no per-wallpaper key here: masks and their opt-out
+                // markers are files beside each other in the cache, keyed by
+                // the wallpaper's path/mtime/size, so they invalidate together
+                // and none of it can go stale inside a saved preset.
+                property JsonObject clockDepth: JsonObject {
+                    property bool enable: false
+                }
             }
 
             property JsonObject bar: JsonObject {
@@ -1047,6 +1096,11 @@ Singleton {
                     // dot once a second. While it runs, only casts that hold
                     // their state longer than a capture pulse are shown.
                     property bool ignoreAmbientCapture: true
+                    // Off by default: destroying an app's capture node takes a
+                    // stream the app never offered to give up, and an app that
+                    // does not expect that can misbehave or crash. Muting, and
+                    // stopping the shell's own recording, need no such licence.
+                    property bool allowForceStop: false
                 }
                 property JsonObject indicators: JsonObject {
                     property JsonObject notifications: JsonObject {
@@ -1101,6 +1155,16 @@ Singleton {
                 property bool showMedia: true
                 property bool monochromeIcons: true
                 property real height: 60
+                // Which screen edge the dock lives on. A string rather than
+                // the bar's `bottom` + `vertical` pair: presets are never
+                // rewritten, so a new key needs no migration where renaming
+                // an existing one would lose every stored value.
+                //
+                // `height` and `hoverRegionHeight` keep their names at every
+                // edge - they are the dock's THICKNESS, and renaming them
+                // would mean migrating the presets this key was designed to
+                // avoid touching.
+                property string edge: "bottom"
                 property real hoverRegionHeight: 2
                 property bool pinnedOnStartup: false
                 property bool hoverToReveal: true // When false, only reveals on empty workspace
@@ -1177,6 +1241,20 @@ Singleton {
                     property bool requirePasswordToPower: false
                 }
                 property bool materialShapeChars: true
+                // The lock islands' item order (spec §14, answered "reorder"):
+                // declared lists, never a dynamic map - a JsonAdapter cannot
+                // hold one. The defaults are the hand-placed order the surface
+                // has always drawn, so a config that never stored these keys
+                // renders exactly what it rendered before they existed - which
+                // is also why no migration is needed: a missing key takes the
+                // QML default. The same lists are spelled in lock_islands.js
+                // (the resolver cannot read this file); the two are pinned
+                // equal by tests/test_lock_islands_contract.py.
+                property JsonObject islands: JsonObject {
+                    property list<string> main: ["fingerprint", "password", "confirm"]
+                    property list<string> left: ["username", "media", "keyboardLayout", "fcitx"]
+                    property list<string> right: ["battery", "sleep", "power", "reboot"]
+                }
             }
 
             property JsonObject media: JsonObject {
@@ -1277,6 +1355,11 @@ Singleton {
                     property real opacity: 0.3
                     property real contentRegionOpacity: 0.8
                     property int selectionPadding: 5
+                }
+                // The loupe shown at the cursor while a region is framed.
+                property JsonObject magnifier: JsonObject {
+                    property bool enable: true
+                    property real zoom: 6
                 }
                 property JsonObject rect: JsonObject {
                     property bool showAimLines: true

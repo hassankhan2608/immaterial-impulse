@@ -24,7 +24,19 @@ Item {
     property bool wheelEnabled: true
     property bool dragEnabled: true
 
+    // The mask nests inside the host's rounded container: a child inset by N
+    // from a parent of radius R must round at R - N or its corners cut the
+    // parent's. `10` is DesktopContextMenu's own `anchors.margins`.
     property real clipRadius: Appearance.rounding.extraLarge - (10 * Appearance.effectiveScale)
+    // A radius that is NaN is not a radius that renders 0. Arithmetic on an
+    // absent token yields NaN, which is a legal double, so nothing rejects it
+    // at the assignment boundary the way `undefined` is rejected - measured,
+    // the undefined form costs one `Unable to assign [undefined] to double` and
+    // stores 0, while this form logs nothing at all and stores NaN. It then
+    // survives every arithmetic downstream of it, and `Math.max(0, NaN)` is
+    // NaN, so the obvious clamp does not repair it either. Resolve it to a
+    // number here, where the comparison is written the one way that works.
+    readonly property real effectiveClipRadius: root.clipRadius > 0 ? root.clipRadius : 0
     property bool showFooter: false
     property bool isOpen: true
 
@@ -70,7 +82,7 @@ Item {
             id: _listMask
             width: listView.width
             height: listView.height
-            radius: root.clipRadius
+            radius: root.effectiveClipRadius
             visible: false
         }
 
@@ -128,7 +140,20 @@ Item {
 
                 Behavior on opacity {
                     SequentialAnimation {
-                        PauseAnimation { duration: root.isOpen ? Math.min(itemRoot.index, 10) * 50 : 0 }
+                        // The one stagger policy, not a second hand-written one. This
+                        // file already had the clamp that ExpandablePanel lacked and
+                        // a step that ExpandablePanel spelled differently, which is
+                        // the shape the extraction exists to stop: two cascades in one
+                        // shell that disagree about how long a wave is allowed to run.
+                        // A delegate cannot see its siblings, so the rank here is the
+                        // model index rather than a visible rank - the clamp and the
+                        // scaled step still come from the policy.
+                        PauseAnimation {
+                            duration: root.isOpen
+                                ? Appearance.animation.staggerDelay(itemRoot.index,
+                                    Appearance.animation.scale(Appearance.animation.staggerStep), 0)
+                                : 0
+                        }
                         NumberAnimation {
                             duration: root.isOpen ? Appearance.animation.elementMoveEnter.duration : Appearance.animation.elementMoveExit.duration
                             easing.bezierCurve: root.isOpen ? Appearance.animationCurves.expressiveDefaultSpatial : Appearance.animationCurves.emphasizedAccel
@@ -138,7 +163,20 @@ Item {
 
                 Behavior on scale {
                     SequentialAnimation {
-                        PauseAnimation { duration: root.isOpen ? Math.min(itemRoot.index, 10) * 50 : 0 }
+                        // The one stagger policy, not a second hand-written one. This
+                        // file already had the clamp that ExpandablePanel lacked and
+                        // a step that ExpandablePanel spelled differently, which is
+                        // the shape the extraction exists to stop: two cascades in one
+                        // shell that disagree about how long a wave is allowed to run.
+                        // A delegate cannot see its siblings, so the rank here is the
+                        // model index rather than a visible rank - the clamp and the
+                        // scaled step still come from the policy.
+                        PauseAnimation {
+                            duration: root.isOpen
+                                ? Appearance.animation.staggerDelay(itemRoot.index,
+                                    Appearance.animation.scale(Appearance.animation.staggerStep), 0)
+                                : 0
+                        }
                         NumberAnimation {
                             duration: root.isOpen ? Appearance.animation.elementMoveEnter.duration : Appearance.animation.elementMoveExit.duration
                             easing.bezierCurve: root.isOpen ? Appearance.animationCurves.emphasizedDecel : Appearance.animationCurves.emphasizedAccel

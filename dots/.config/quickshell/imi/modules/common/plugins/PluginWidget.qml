@@ -9,6 +9,8 @@ import qs.modules.common.widgets
 import qs.modules.imi.background.widgets
 import "../functions/parallax.js" as ParallaxMath
 import "gridSizes.js" as GridSizes
+import "resize-tension.js" as Tension
+import "gridResize.js" as GridResize
 
 AbstractBackgroundWidget {
     id: rootWidget
@@ -136,7 +138,7 @@ AbstractBackgroundWidget {
     readonly property bool gridResizable: rootWidget.offeredGridSizes.length > 1
     // Stored -> manifest default -> null, which is the content-sized path.
     readonly property var storedGridSize: GridSizes.resolveSize(rootWidget.gridSpec,
-        manifest ? PluginState.option(manifest.id, "__gridSize") : undefined)
+        manifest ? PluginState.gridSize(manifest.id, screenName) : undefined)
     // The span the grip's drag is currently previewing, null when no resize is
     // in flight. The widget resizes as the pointer moves, so the size on screen
     // is the size a release commits - and Escape cancels by clearing this, with
@@ -144,42 +146,288 @@ AbstractBackgroundWidget {
     property var previewGridSize: null
     readonly property bool resizingGrid: previewGridSize !== null
     readonly property var gridSize: previewGridSize ?? storedGridSize
+    readonly property bool gridSized: rootWidget.gridSize !== null && rootWidget.gridSize !== undefined
     readonly property int gridCols: gridSize ? gridSize.cols : 0
     readonly property int gridRows: gridSize ? gridSize.rows : 0
     readonly property real gridSpanWidth: gridSize ? Appearance.sizes.widgetGridSpanX(gridCols) : 0
     readonly property real gridSpanHeight: gridSize ? Appearance.sizes.widgetGridSpanY(gridRows) : 0
 
+    // The span change is a spatial move, so it is drawn as one rather than
+    // snapped. Two things make a Behavior the right mechanism here and the
+    // wrong one on this widget's x/y (see `animatePosition` below): the target
+    // is discrete - it moves when the resolved span moves and at no other time
+    // - and Qt does not restart a running Behavior for a write of the value it
+    // is already animating to. That matters because the grip re-previews on
+    // every mouse move and hands `previewGridSize` a fresh object each time, so
+    // the width binding re-evaluates per frame while the *value* it produces
+    // changes only at a span boundary.
+    //
+    // Only while the size is a span: a content-sized widget's width follows its
+    // content, which may well move every frame, and that is the shape a
+    // Behavior freezes solid.
+    //
+    // ...and only once the store has answered. A widget whose stored span is
+    // not its manifest default resolves it the moment plugin-state.json lands,
+    // and animating that would have every resized widget on the desktop grow or
+    // shrink on login for a size nobody just chose.
+    readonly property bool gridResizeAnimated: rootWidget.gridSized && PluginState.ready
+    readonly property int gridResizeDuration: GridResize.resizeDurationMs(
+        rootWidget.resizingGrid,
+        Appearance.animation.elementMoveSmall.duration,
+        Appearance.animation.elementMove.duration)
+    readonly property var gridResizeCurve: rootWidget.resizingGrid
+        ? Appearance.animationCurves.expressiveFastSpatial
+        : Appearance.animationCurves.expressiveDefaultSpatial
+
+    // In flight whenever the drawn box differs from the span's settled box, or
+    // while the grip is bowing it. Published so a widget can drop the work that
+    // is not worth doing mid-motion - the shadow's blurred copy of its own
+    // body, which otherwise re-renders into a reallocating FBO every frame of
+    // every resize.
+    readonly property bool boxInMotion: rootWidget.resizingGrid
+        || Math.abs(rootWidget.width - rootWidget.settledWidth) > 0.5
+        || Math.abs(rootWidget.height - rootWidget.settledHeight) > 0.5
+
+    Behavior on width {
+        enabled: rootWidget.gridResizeAnimated
+        NumberAnimation {
+            duration: rootWidget.gridResizeDuration
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: rootWidget.gridResizeCurve
+        }
+    }
+    Behavior on height {
+        enabled: rootWidget.gridResizeAnimated
+        NumberAnimation {
+            duration: rootWidget.gridResizeDuration
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: rootWidget.gridResizeCurve
+        }
+    }
+
+    // The span the CONTENT is currently drawn as, which is not always the span
+    // the widget IS.
+    //
+    // A manifest only offers several spans when it has a design per span
+    // (docs/widget-grid.md): media loads a different layout file per span,
+    // weather and currency switch branches inside one file. So the content has
+    // to change identity somewhere during the move, and both ends are a pop -
+    // hand the new name down at the start and the incoming layout is drawn
+    // inside the outgoing box for the whole animation; hand it down at the end
+    // and the outgoing one is. It changes at the midpoint instead, under a fade
+    // out and back in, which is the one moment the swap is not visible.
+    //
+    // The host cannot know which of those two kinds of widget it is holding,
+    // and it does not need to: a swap it did not have to make costs a fade
+    // nobody can distinguish from the resize it sits inside.
+    readonly property string targetGridSpan: GridSizes.formatSize(rootWidget.gridSize)
+    property string shownGridSpan: ""
+
+    onTargetGridSpanChanged: {
+        // A widget that repositions its own elements gets the new span
+        // immediately and no dissolve: the fade exists to hide a destroy, and
+        // a one-tree widget has nothing to hide - its shared elements follow
+        // the animating box instead (spec 2026-08-11, §5).
+        if (pluginNode.wantsOwnSpanTransition) {
+            spanSwap.stop();
+            pluginNode.opacity = 1;
+            rootWidget.shownGridSpan = rootWidget.targetGridSpan;
+            return;
+        }
+        if (!rootWidget.gridResizeAnimated
+                || !GridResize.animatesSpanSwap(rootWidget.shownGridSpan, rootWidget.targetGridSpan)) {
+            spanSwap.stop();
+            pluginNode.opacity = 1;
+            rootWidget.shownGridSpan = rootWidget.targetGridSpan;
+            return;
+        }
+        spanSwap.restart();
+    }
+
+    SequentialAnimation {
+        id: spanSwap
+        // The span the widget loads with is adopted rather than animated into,
+        // and `onTargetGridSpanChanged` only ever sees changes. Declared on the
+        // animation that owns every later value of `shownGridSpan` rather than
+        // in the host's own `Component.onCompleted`, which stays the single
+        // call `tests/test_presets.py` pins.
+        Component.onCompleted: rootWidget.shownGridSpan = rootWidget.targetGridSpan
+        NumberAnimation {
+            target: pluginNode
+            property: "opacity"
+            to: 0
+            duration: GridResize.contentSwapHalfMs(rootWidget.gridResizeDuration)
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: Appearance.animationCurves.expressiveEffects
+        }
+        ScriptAction { script: rootWidget.shownGridSpan = rootWidget.targetGridSpan }
+        NumberAnimation {
+            target: pluginNode
+            property: "opacity"
+            to: 1
+            duration: GridResize.contentSwapHalfMs(rootWidget.gridResizeDuration)
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: Appearance.animationCurves.expressiveEffects
+        }
+    }
+
+    // The size the widget is resizing *to*. Everything that has to agree with
+    // where the widget ends up - the position clamp, and the grip's own press
+    // measurement - reads this rather than `width`, which is a frame of an
+    // animation for half a second after every span change.
+    readonly property real settledWidth: rootWidget.gridSized ? rootWidget.gridSpanWidth : rootWidget.width
+    readonly property real settledHeight: rootWidget.gridSized ? rootWidget.gridSpanHeight : rootWidget.height
+    clampWidth: rootWidget.settledWidth
+    clampHeight: rootWidget.settledHeight
+
     function commitGridSize(size) {
         if (!manifest || !size) return;
-        PluginState.setOption(manifest.id, "__gridSize", GridSizes.formatSize(size));
+        // A span commit is one of spec §7.3's five committed mutations. The
+        // undo closure captures plain data and the PluginState singleton,
+        // never `rootWidget` - the stack outlives any widget the mode can
+        // destroy - and an unchanged span pushes nothing, so a commit of the
+        // span the widget already has does not spend an entry.
+        const id = manifest.id;
+        const screen = rootWidget.screenName;
+        // The surface, captured now - see commitPosition for why the closure
+        // must not resolve it at pop time.
+        const surface = PluginState.currentSurface;
+        const next = GridSizes.formatSize(size);
+        const before = PluginState.gridSize(id, screen, surface) ?? null;
+        if (before !== next)
+            GlobalStates.editUndoPush(() => PluginState.setGridSize(id, screen, before, surface));
+        PluginState.setGridSize(id, screen, next, surface);
     }
 
     function beginGridResize() {
         rootWidget.previewGridSize = rootWidget.storedGridSize;
     }
 
-    // The offered spans measured in pixels, which is where Appearance's
-    // effectiveScale enters: the snap compares the dragged rectangle against
-    // what each span would actually be on this screen, not against cell counts.
+    // ---- elastic resize (spec 3d) ---------------------------------------
+    //
+    // The grip no longer picks the nearest span - it accumulates PULL. The
+    // widget holds its span while tension builds; each whole breakaway steps
+    // one span in the pulled direction and the remainder carries, so a long
+    // drag walks several spans in one gesture. At a wall (no offered span
+    // further out) the leftover pull is held, clamped to one breakaway, so
+    // the bow rubber-bands against the limit instead of winding up unbounded.
+    //
+    // `resizeBow` is what the widget's cards render: the edge distortion in
+    // pixels, derived from the *unconsumed* pull. Zero the instant the drag
+    // ends - the settle back to the committed span is the box animation's job.
+    property real resizePullX: 0
+    property real resizePullY: 0
+    readonly property point resizeBow: Qt.point(
+        rootWidget.resizingGrid ? Tension.bow(rootWidget.resizePullX) : 0,
+        rootWidget.resizingGrid ? Tension.bow(rootWidget.resizePullY) : 0)
+
+    // The gesture is ABSOLUTE: the size follows where the cursor IS.
+    //
+    // Two relative-pull models shipped before this and both failed the same
+    // review: accumulated pull works anywhere, so the cursor could sit at
+    // the monitor's edge and a 60px twitch there still resized the widget.
+    // What the hand expects is positional - the widget's edge chases the
+    // cursor, gives happen where the widget is, and far away there is no
+    // boundary left to cross, so movement out there does nothing.
+    //
+    // Growing: the cursor pulls past the CURRENT edge by the breakaway.
+    // Shrinking: the cursor comes back INSIDE the smaller span's edge - into
+    // the widget's own space. The two conditions are disjoint (grow needs
+    // target > edge + BREAK, shrink needs target <= the smaller edge), so
+    // the walk cannot oscillate within one event. (resizePullX/Y and
+    // resizeBow are declared with the elastic block above.)
     function previewGridResize(targetWidth, targetHeight) {
         if (!rootWidget.resizingGrid) return;
-        const nearest = GridSizes.nearestSize(rootWidget.offeredGridSizes.map(size => ({
-            cols: size.cols,
-            rows: size.rows,
-            width: Appearance.sizes.widgetGridSpanX(size.cols),
-            height: Appearance.sizes.widgetGridSpanY(size.rows)
-        })), targetWidth, targetHeight);
-        if (nearest) rootWidget.previewGridSize = nearest;
+        let current = rootWidget.previewGridSize;
+        for (;;) {
+            const edge = Appearance.sizes.widgetGridSpanX(current.cols);
+            if (targetWidth > edge + Tension.BREAK_PX) {
+                const up = Tension.stepSize(rootWidget.offeredGridSizes, current, 1, 0);
+                if (up === current) break;
+                current = up;
+                continue;
+            }
+            const down = Tension.stepSize(rootWidget.offeredGridSizes, current, -1, 0);
+            // STRICTLY inside: at exactly the smaller edge the size stays. An
+            // x-only grow can raise the row count (2x1 -> 3x2 is diagonal in
+            // span space), leaving the untouched y target sitting exactly ON
+            // the old row edge - with <=, the y loop immediately stepped the
+            // rows back down and the whole grow netted to nothing.
+            if (down !== current
+                    && targetWidth < Appearance.sizes.widgetGridSpanX(down.cols)) {
+                current = down;
+                continue;
+            }
+            break;
+        }
+        for (;;) {
+            const edge = Appearance.sizes.widgetGridSpanY(current.rows);
+            if (targetHeight > edge + Tension.BREAK_PX) {
+                const up = Tension.stepSize(rootWidget.offeredGridSizes, current, 0, 1);
+                if (up === current) break;
+                current = up;
+                continue;
+            }
+            const down = Tension.stepSize(rootWidget.offeredGridSizes, current, 0, -1);
+            if (down !== current
+                    && targetHeight < Appearance.sizes.widgetGridSpanY(down.rows)) {
+                current = down;
+                continue;
+            }
+            break;
+        }
+        rootWidget.previewGridSize = current;
+        // The bow is the live tension toward the next boundary, clamped to
+        // one breakaway - at a wall the cursor may be far out, and the bow
+        // holds at full rather than winding up.
+        rootWidget.resizePullX = Math.max(-Tension.BREAK_PX, Math.min(Tension.BREAK_PX,
+            targetWidth - Appearance.sizes.widgetGridSpanX(current.cols)));
+        rootWidget.resizePullY = Math.max(-Tension.BREAK_PX, Math.min(Tension.BREAK_PX,
+            targetHeight - Appearance.sizes.widgetGridSpanY(current.rows)));
     }
 
     function endGridResize() {
         const chosen = rootWidget.previewGridSize;
         rootWidget.previewGridSize = null;
+        rootWidget.resizePullX = 0;
+        rootWidget.resizePullY = 0;
         rootWidget.commitGridSize(chosen);
     }
 
     function cancelGridResize() {
         rootWidget.previewGridSize = null;
+        rootWidget.resizePullX = 0;
+        rootWidget.resizePullY = 0;
+    }
+
+    // The mode's right-click (AbstractWidget raises it only while the canvas
+    // is editing). The point is mapped to the SCENE - which on the full-screen
+    // background surface is the screen - through Qt's own transform chain, so
+    // the mode's scale, the drawer's shift and the press scale are all
+    // composed by the same arithmetic that draws the widget. Multiplying a
+    // viewport scale in by hand here is the compensation the contract forbids,
+    // and it would be wrong at every scale but 1.
+    onContextMenuRequested: (atX, atY) => {
+        if (!manifest) return;
+        const point = rootWidget.mapToItem(null, atX, atY);
+        GlobalStates.editWidgetMenuPluginId = manifest.id;
+        GlobalStates.editWidgetMenuScreenName = rootWidget.screenName;
+        GlobalStates.editWidgetMenuX = point.x;
+        GlobalStates.editWidgetMenuY = point.y;
+        GlobalStates.editWidgetMenuOpen = true;
+    }
+
+    // A widget destroyed while its menu is open must not strand the menu - the
+    // BarContent.filterLayout shape: disabling a plugin (the menu's own Remove
+    // included) tears this instance down while the menu still points at it, so
+    // the declaring object vacates on its way out. Keyed on the screen as well
+    // as the id, because every monitor holds an instance of this plugin and
+    // only the one the menu was opened on may close it.
+    Component.onDestruction: {
+        if (manifest && GlobalStates.editWidgetMenuOpen
+                && GlobalStates.editWidgetMenuPluginId === manifest.id
+                && GlobalStates.editWidgetMenuScreenName === rootWidget.screenName)
+            GlobalStates.editWidgetMenuOpen = false;
     }
 
     configEntryName: manifest ? "plugin_" + manifest.id : "plugin_unknown"
@@ -226,6 +474,36 @@ AbstractBackgroundWidget {
     onCurrentConfigChanged: applyPersistedPosition()
     Component.onCompleted: applyPersistedPosition()
 
+    // A widget resized near a screen edge no longer fits where it is stored,
+    // and the two halves of that go wrong in different directions. Where the
+    // widget is *drawn* is already handled: committing a span writes plugin
+    // state, which re-evaluates `currentConfig` and re-runs the clamp above -
+    // now against the span being animated to rather than the frame's width, so
+    // the widget slides in while it grows instead of settling outside the
+    // screen. The *store* keeps the old number, which is 705e9006d's
+    // disagreement reached from the other side, so the same repair the settle
+    // timer runs is run again here.
+    //
+    // Keyed on the span as a string, not on `storedGridSize`: that binding
+    // hands out a fresh object on every plugin-state write, so a widget being
+    // dragged somewhere else on the desktop would re-run every other widget's
+    // repair. Both the grip and the Size row land here, because both write the
+    // same stored span.
+    //
+    // Deferred by one turn of the event loop, because the repair *writes*
+    // plugin state and this handler runs inside the evaluation of a binding
+    // that reads it - Qt reports that as a binding loop on `storedGridSize`
+    // and drops the re-evaluation. Nothing is lost by the delay: what the
+    // widget is drawn at is already clamped by the line above.
+    readonly property string storedGridSpan: GridSizes.formatSize(rootWidget.storedGridSize)
+    onStoredGridSpanChanged: storedSpanRepair.restart()
+
+    Timer {
+        id: storedSpanRepair
+        interval: 0
+        onTriggered: rootWidget.repairUnreachableStoredPosition()
+    }
+
     // A stored position the screen will never honour, written back so it stops
     // being a lie.
     //
@@ -250,6 +528,10 @@ AbstractBackgroundWidget {
     // the guard against it here is that `width` has to have arrived first.
     function repairUnreachableStoredPosition() {
         if (!manifest || !PluginState.ready) return;
+        // The settle timer below waits for a real size before calling; the
+        // resize path calls straight from a span change, where a screen that
+        // has not arrived yet would clamp every widget to 0,0 and store it.
+        if (rootWidget.settledWidth <= 0 || rootWidget.scaledScreenWidth <= 0) return;
         const stored = rootWidget.currentConfig;
         const nextX = rootWidget.clampX(stored.x);
         const nextY = rootWidget.clampY(stored.y);
@@ -342,17 +624,42 @@ AbstractBackgroundWidget {
         // pan's worth every time it was dragged. It is clamped here as well as
         // on the way back in, so the store can never hold a position the
         // widget is not drawn at.
+        const beforeX = rootWidget.targetX;
+        const beforeY = rootWidget.targetY;
         rootWidget.targetX = rootWidget.clampX(ParallaxMath.placementFromDrawn(
             rootWidget.x, rootWidget.parallaxCancelX));
         rootWidget.targetY = rootWidget.clampY(ParallaxMath.placementFromDrawn(
             rootWidget.y, rootWidget.parallaxCancelY));
         rootWidget.restoreXYBinding();
         if (!manifest) return;
-        PluginState.setPosition(manifest.id, screenName, {
+        // A drag's release is a committed mutation (spec §7.3), and this is
+        // its one commit path - the leader's release and every group-drag
+        // follower both land here. The closure captures plain values and the
+        // PluginState singleton only; a commit that moved nothing (every
+        // click on a draggable widget releases through here) pushes nothing,
+        // or the stack would fill with entries that undo to where the widget
+        // already is. A group drag therefore records one entry per member -
+        // one entry per committed mutation is the spec's grain.
+        const id = manifest.id;
+        const screen = rootWidget.screenName;
+        // The surface this drag happened on, captured NOW: the undo closure
+        // runs later, from whichever tab the user is on then, and a closure
+        // that resolved the surface at pop time would write a lock position
+        // into the desktop store (or the reverse).
+        const surface = PluginState.currentSurface;
+        if (beforeX !== rootWidget.targetX || beforeY !== rootWidget.targetY) {
+            const before = {
+                x: beforeX,
+                y: beforeY,
+                placementStrategy: rootWidget.placementStrategy
+            };
+            GlobalStates.editUndoPush(() => PluginState.setPosition(id, screen, before, surface));
+        }
+        PluginState.setPosition(id, screenName, {
             x: rootWidget.targetX,
             y: rootWidget.targetY,
             placementStrategy: rootWidget.placementStrategy
-        });
+        }, surface);
     }
 
     // A declared grid span drives the pixel size directly; otherwise the widget
@@ -365,16 +672,28 @@ AbstractBackgroundWidget {
     // In-shell frost: sample + blur the wallpaper region behind each blur region.
     // The sample tracks rootWidget.x/y live so it stays aligned while dragging.
     //
-    // While the screen is locked AND the lock blurs the wallpaper
-    // (Background.qml's blurLoader shows a blurred + zoomed wallpaper), skip our
-    // own blur surface - the widget's translucent panel then shows that lock
-    // background through it, keeping the frost consistent with the lock screen.
-    // If the lock does NOT blur the wallpaper, keep blurring per widget so a
+    // Two states stand the per-widget frost down, and naming the condition
+    // rather than either cause is what let the second one join without a second
+    // gate.
+    //
+    // The lock, while it blurs the wallpaper (Background.qml's blurLoader shows
+    // a blurred + zoomed wallpaper): the widget's translucent panel then shows
+    // that lock background through it, so the frost stays consistent with the
+    // lock screen. If the lock does NOT blur, keep blurring per widget so a
     // blur-enabled widget stays frosted against the sharp wallpaper.
-    readonly property bool lockCoversFrost: GlobalStates.screenLocked
-        && Config.options.lock.blur.enable
+    //
+    // Edit Mode, unconditionally: the whole desktop is drawn under a scale
+    // transform there, and a frost is a ShaderEffectSource sampling the
+    // wallpaper at a rect computed from three frames that the transform does
+    // not move together. Measured on a live desktop with a Wallpaper Engine
+    // scene, cards that are visibly frosted at rest render as flat tinted
+    // panels under the transform - so this is not a frost the mode is choosing
+    // to give up, it is one it would only appear to have.
+    readonly property bool frostSuspended: (GlobalStates.screenLocked
+            && Config.options.lock.blur.enable)
+        || GlobalStates.editMode
     Repeater {
-        model: rootWidget.frostBlur && rootWidget.blurEnabled && !rootWidget.lockCoversFrost
+        model: rootWidget.frostBlur && rootWidget.blurEnabled && !rootWidget.frostSuspended
             && rootWidget.hasBlurSurface
             && (Config.options.appearance.transparency.enable || rootWidget.keepTranslucent)
             ? (pluginNode.hasCustomBlurRegions
@@ -394,6 +713,9 @@ AbstractBackgroundWidget {
             liveWallpaperActive: rootWidget.liveWallpaperActive
             weSurfaceItem: rootWidget.weSurfaceItem
             cornerRadius: Number(modelData.radius ?? rootWidget.widgetRounding)
+            // A region may carry its own mask item (a non-rounded-rect card's
+            // outline); absent, the surface builds its radius Rectangle.
+            maskItem: modelData.mask ?? null
             wallpaperWidth: rootWidget.wallpaperRect.width
             wallpaperHeight: rootWidget.wallpaperRect.height
             surfaceX: rootWidget.frostSampleOrigin.x + x
@@ -401,14 +723,27 @@ AbstractBackgroundWidget {
         }
     }
 
-    PluginNode {
-        id: pluginNode
+    // The layer lives on this wrapper rather than on the node so its texture
+    // is a ring larger than the widget: a layer clips at its item's bounds,
+    // and the resize bow deliberately draws up to 2*BOW_PX outside the card -
+    // on the node's own layer the bulge came back with its edge sliced flat.
+    // The node keeps its exact geometry (centred both ways cancels out), so
+    // every coordinate that references it - blur regions included - is
+    // untouched.
+    Item {
+        id: nodeLayerFrame
         z: 1
+        anchors.centerIn: parent
+        width: pluginNode.width + Tension.BOW_PX * 4
+        height: pluginNode.height + Tension.BOW_PX * 4
         // Render package widgets on a bounded texture above the blur backdrop.
         // This avoids the background layer swallowing package content on some
         // Wayland scene-graph paths while keeping the texture widget-sized.
-        layer.enabled: width > 0 && height > 0
+        layer.enabled: pluginNode.width > 0 && pluginNode.height > 0
         layer.smooth: true
+
+    PluginNode {
+        id: pluginNode
         manifestNode: rootWidget.manifest ? rootWidget.manifest.desktopWidget : null
         pluginId: rootWidget.manifest?.id ?? ""
         optionDefinitions: rootWidget.manifest?.options ?? []
@@ -421,12 +756,26 @@ AbstractBackgroundWidget {
         hostInteractionLocked: rootWidget.interactionLocked
         // When the manifest declares a grid span, drive the node (and its loaded
         // Widget.qml) to the span size instead of the content's implicit size.
-        gridWidth: rootWidget.gridSpanWidth
-        gridHeight: rootWidget.gridSpanHeight
+        //
+        // The host's animating size rather than the span it is heading for, so
+        // the content is the box on every frame of a resize: handed the target
+        // instead, it would paint outside the widget while the box grows into
+        // it and leave a gap inside it while the box shrinks. This is not the
+        // circular sizing PluginNode's Loader comment warns about - the branch
+        // that reads this widget's `width` is the one where `width` comes from
+        // the span and not from the node.
+        gridWidth: rootWidget.gridSized ? rootWidget.width : 0
+        gridHeight: rootWidget.gridSized ? rootWidget.height : 0
         // ...and hand the span down by name too, for a widget that has a
-        // different layout per size rather than one that stretches.
-        gridSize: GridSizes.formatSize(rootWidget.gridSize)
+        // different layout per size rather than one that stretches. The span
+        // the content is *showing*, which lags the widget's own by half a
+        // resize - see shownGridSpan.
+        gridSize: rootWidget.shownGridSpan
+        resizeBow: rootWidget.resizeBow
+        hostDragging: rootWidget.dragging
+        hostBoxInMotion: rootWidget.boxInMotion
         anchors.centerIn: parent
+    }
     }
 
     // Resize grip, for a widget whose manifest offers more than one span. It
@@ -450,12 +799,24 @@ AbstractBackgroundWidget {
             bottom: parent.bottom
             margins: Appearance.spacing.space100
         }
-        opacity: (rootWidget.containsMouse || resizeArea.containsMouse || rootWidget.resizingGrid)
+        // Hover-revealed normally; up for the whole of Edit Mode, which is the
+        // mode's point - a widget whose only sign that it can be resized is a
+        // corner that appears when the pointer is already on it is not a
+        // discoverable one.
+        opacity: (GlobalStates.editMode || rootWidget.containsMouse
+                || resizeArea.containsMouse || rootWidget.resizingGrid)
             ? 0.5 : 0
         visible: opacity > 0 && rootWidget.gridResizable && !rootWidget.interactionLocked
 
+        // The whole tier, not just its duration. Taking the number and leaving
+        // the curve hands the animation Qt's default, which is Easing.Linear -
+        // a generic curve, which docs/M3_GUIDELINES.md §2 forbids outright - so
+        // every grip in this shell has faded linearly beside neighbours easing
+        // on expressiveEffects. Entering Edit Mode reveals every resizable
+        // widget's grip at once, which is where one linear fade stops being one
+        // control's private detail.
         Behavior on opacity {
-            NumberAnimation { duration: Appearance.animation.elementMoveFaster.duration }
+            animation: Appearance.animation.elementMoveFaster.numberAnimation.createObject(this)
         }
 
         Keys.onEscapePressed: event => {
@@ -481,30 +842,41 @@ AbstractBackgroundWidget {
             // being untrue again.
             preventStealing: true
 
-            // The pointer is tracked in scene coordinates against its position
-            // at the press, because the grip is anchored to a widget that
-            // resizes underneath it: a delta read from this moving item would
-            // fold the resize back into the gesture.
-            property real pressSceneX: 0
-            property real pressSceneY: 0
+            // The pointer is tracked in the widget's PARENT frame against its
+            // position at the press. Two things decide that frame. It must not
+            // be this item or the widget, which resize underneath the gesture -
+            // a delta read from a moving item folds the resize back into it.
+            // And it must not be the scene either, once Edit Mode draws the
+            // canvas under a scale transform: a scene delta is in screen
+            // pixels, so the same gesture would resize by 1/scale as much as
+            // the pointer travelled over the widget. The parent is static in
+            // both senses, and it is the frame AbstractWidget's drag already
+            // computes in.
+            property real pressFrameX: 0
+            property real pressFrameY: 0
             property real pressWidth: 0
             property real pressHeight: 0
 
             onPressed: mouse => {
-                const scenePoint = resizeArea.mapToItem(null, mouse.x, mouse.y);
-                resizeArea.pressSceneX = scenePoint.x;
-                resizeArea.pressSceneY = scenePoint.y;
-                resizeArea.pressWidth = rootWidget.width;
-                resizeArea.pressHeight = rootWidget.height;
+                const pressPoint = resizeArea.mapToItem(rootWidget.parent, mouse.x, mouse.y);
+                resizeArea.pressFrameX = pressPoint.x;
+                resizeArea.pressFrameY = pressPoint.y;
+                // The span being animated to, not the frame's width: pressing
+                // the grip again while the last resize is still travelling
+                // would otherwise measure the gesture from a size the widget
+                // is in the middle of leaving, and every span the drag
+                // previewed would be off by whatever the animation had left.
+                resizeArea.pressWidth = rootWidget.settledWidth;
+                resizeArea.pressHeight = rootWidget.settledHeight;
                 rootWidget.beginGridResize();
                 resizeHandle.forceActiveFocus();
             }
             onPositionChanged: mouse => {
                 if (!rootWidget.resizingGrid) return;
-                const scenePoint = resizeArea.mapToItem(null, mouse.x, mouse.y);
+                const point = resizeArea.mapToItem(rootWidget.parent, mouse.x, mouse.y);
                 rootWidget.previewGridResize(
-                    resizeArea.pressWidth + scenePoint.x - resizeArea.pressSceneX,
-                    resizeArea.pressHeight + scenePoint.y - resizeArea.pressSceneY);
+                    resizeArea.pressWidth + point.x - resizeArea.pressFrameX,
+                    resizeArea.pressHeight + point.y - resizeArea.pressFrameY);
             }
             // A release after Escape commits nothing: the cancel already
             // cleared the preview, and endGridResize has nothing to store.

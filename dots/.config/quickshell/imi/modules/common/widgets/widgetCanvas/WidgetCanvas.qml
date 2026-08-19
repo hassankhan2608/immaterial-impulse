@@ -1,13 +1,63 @@
 import QtQuick
 import qs
 import qs.modules.common
+import "../../functions/edit_mode.js" as EditMode
 
 MouseArea {
     id: root
-    property int gridSize: 24
+    // The drawn lattice is the one the drag snaps to (AbstractWidget's 12px),
+    // with every second line emphasised so the 24px rhythm this used to draw is
+    // still readable. Drawing 24 while snapping 12 puts a widget between two
+    // lines at every second stop, which reads as broken snapping - and it reads
+    // that way exactly when the grid is up, i.e. during the drag that is doing
+    // the snapping. Edit Mode made it impossible to miss rather than made it
+    // true.
+    property int gridSize: 12
     property bool showGrid: false
     readonly property bool isWidgetCanvas: true
-    readonly property bool gridVisible: showGrid && Config.options.background.showGrid
+    // Handed in by the surface that owns this canvas - the desktop's, and only
+    // the desktop's. The overlay reuses this component and has its own store
+    // and its own dismissal, so it must not follow the mode.
+    property bool editMode: false
+    // The lattice belongs to the GESTURE, in the mode as well as out of it.
+    // Edit Mode used to force it on for the whole mode, on the spec's
+    // discoverability argument (§4.1: the grid was "the one thing that reliably
+    // says this is editable" and only appeared once you were already dragging).
+    // That argument was written before the mode had any chrome of its own; the
+    // toolbar and the tab bar say it now, and a mode that greets you with a
+    // screen of graph paper hides the desktop you came to look at. So what the
+    // mode overrides is the config SWITCH - whose meaning is "draw the grid
+    // while I drag" - and not the gesture: while editing, a drag always draws
+    // the lattice it is landing on.
+    //
+    // `showGrid` is set from AbstractWidget's onDraggingChanged, so it follows
+    // `dragActive` - which is raised only once the pointer has moved past
+    // `drag.threshold`, never on the press. That is the distinction that
+    // matters: a widget's own controls (the resize grip, a right-click, a click
+    // that selects) all press without dragging, and a lattice flashing up under
+    // every one of them would be worse than one that is always on.
+    readonly property bool gridVisible: root.showGrid
+        && (root.editMode || Config.options.background.showGrid)
+    // ...and it arrives and leaves rather than appearing. The lattice used to be
+    // a Repeater model going straight from 0 to a screen's worth of lines, so it
+    // popped on while the desktop eased into the mode beside it - the reading of
+    // "not M3E-compliant" that costs nothing to fix.
+    //
+    // The FASTER of the two effects tiers, which is a change from when this
+    // fade arrived with the mode: there it eased in beside a 500ms shrink, and
+    // 200ms against 500 is already brisk. Its reference now is the pointer. The
+    // widget is already `drag.threshold` (10px) from where it was pressed when
+    // the lattice is asked for, and it keeps travelling while the lattice
+    // arrives - at an unhurried 1000px/s that is 200px, sixteen 12px cells,
+    // under elementMoveFast against twelve under elementMoveFaster. Neither is
+    // instant and no effects tier below 150ms exists, so the choice is the
+    // faster tier or a literal, and docs/M3_GUIDELINES.md §2 forbids the
+    // literal. Taken whole through the tier's own factory rather than as a
+    // duration, or the curve silently falls back to Easing.Linear.
+    property real gridStrength: root.gridVisible ? 1 : 0
+    Behavior on gridStrength {
+        animation: Appearance.animation.elementMoveFaster.numberAnimation.createObject(this)
+    }
 
     // Desktop widgets sit on the background layer surface, which only accepts
     // keyboard input while GlobalStates.desktopWidgetKeyboardFocus flips it to
@@ -37,13 +87,72 @@ MouseArea {
     property real marqueeAnchorX: 0
     property real marqueeAnchorY: 0
 
-    // Escape is the keyboard way out of a selection. The desktop's layer
-    // surface only takes keys while it is OnDemand, so a live selection also
-    // registers as a keyboard-focus requester alongside the widgets above.
+    // Escape is the keyboard way out of a selection, and Edit Mode may not take
+    // it from that or from a grip resize (PluginWidget handles its own, which
+    // gets the key first because the grip has focus during the gesture). The
+    // ladder resolves in order and the first match wins; the module owns the
+    // precedence so it is checkable without a canvas.
+    //
+    // The desktop's layer surface only takes keys while it is OnDemand, so a
+    // live selection - and the mode - register as keyboard-focus requesters
+    // alongside the widgets above. Whether the compositor then delivers the key
+    // to a Bottom-layer surface is not established, which is why the mode has a
+    // pointer way out as well and no feature depends on this alone.
     focus: root.selectionEnabled
-    Keys.onEscapePressed: root.clearSelection()
+    // Ctrl+Z, on this surface and no other, because this is the surface the
+    // probe says the keyboard actually works on: measured in a nested
+    // Hyprland, a Bottom-layer surface with keyboardFocus: OnDemand receives
+    // real compositor key events while it holds that focus - which is the
+    // state the mode arms (keyboardFocusHeld below includes editMode). The
+    // chrome surface stays WlrKeyboardFocus.None, exactly as its contract
+    // pins. The Escape ladder below is untouched: undo reverses the last
+    // COMMITTED mutation, Escape cancels the gesture still in flight, and
+    // the two never answer the same moment.
+    Keys.onPressed: (event) => {
+        if (!root.editMode) return
+        // Exactly Control, not "Control among others": Ctrl+Shift+Z is
+        // convention's redo, and a redo stack is deliberately not built -
+        // answering it with an undo would be worse than ignoring it.
+        if (event.key === Qt.Key_Z && event.modifiers === Qt.ControlModifier) {
+            GlobalStates.editUndo()
+            event.accepted = true
+        }
+    }
+    Keys.onEscapePressed: {
+        const action = EditMode.resolveEscape({
+            menuOpen: GlobalStates.editWidgetMenuOpen,
+            // A bar-widget reorder is a gesture in flight too - it just holds
+            // its pointer grab on a different layer surface than the one this
+            // key arrives on, which is why it is composed in here rather than
+            // becoming a new rung of the pure function: the ladder's
+            // precedence does not care WHICH gesture is in flight, only that
+            // one is.
+            gestureInFlight: root.draggingWidget() !== null
+                || GlobalStates.editBarDragActive
+                || GlobalStates.editLockDragActive,
+            selectionCount: root.selectedWidgets.length,
+            // The tab that is actually showing. A hardcoded DESKTOP_TAB was
+            // correct while only one tab existed, and would silently disarm
+            // the ladder's desktopTab rung now that a second one does.
+            tab: GlobalStates.editTab
+        })
+        if (action === "closeMenu") GlobalStates.editWidgetMenuOpen = false
+        else if (action === "cancelGesture") {
+            root.cancelActiveDrag()
+            if (GlobalStates.editBarDragActive || GlobalStates.editLockDragActive)
+                GlobalStates.editReorderCancel()
+        }
+        else if (action === "clearSelection") root.clearSelection()
+        else if (action === "desktopTab") GlobalStates.editTab = EditMode.DESKTOP_TAB
+        else if (root.editMode) GlobalStates.editMode = false
+    }
+    readonly property bool keyboardFocusHeld: root.selectedWidgets.length > 0 || root.editMode
+    onKeyboardFocusHeldChanged: {
+        root.setKeyboardFocusRequest(root, root.keyboardFocusHeld)
+        if (root.keyboardFocusHeld) root.forceActiveFocus()
+    }
     onSelectedWidgetsChanged: {
-        root.setKeyboardFocusRequest(root, root.selectedWidgets.length > 0)
+        root.setKeyboardFocusRequest(root, root.keyboardFocusHeld)
         if (root.selectedWidgets.length > 0) root.forceActiveFocus()
     }
 
@@ -54,7 +163,11 @@ MouseArea {
     // - a zero-size band over nothing draggable - is the click-away deselect.
     onPressed: (mouse) => {
         if (!root.selectionEnabled || mouse.button !== Qt.LeftButton) return
-        if (Config.options.background.widgetsLocked) return
+        // The mode subtracts the global lock rather than writing it: the stored
+        // preference is untouched and the desktop is locked again on the way
+        // out. AbstractBackgroundWidget's `interactionLocked` does the same for
+        // the widgets themselves.
+        if (!root.editMode && Config.options.background.widgetsLocked) return
         root.marqueeAnchorX = mouse.x
         root.marqueeAnchorY = mouse.y
         root.marqueeActive = true
@@ -111,6 +224,11 @@ MouseArea {
     }
 
     function widgetRemoved(widget) {
+        // A widget destroyed mid-drag never reaches onDraggingChanged, so
+        // nothing else takes the lattice down again: a FadeLoader dropping the
+        // widget under the pointer (disabling a plugin from Settings while it
+        // is being dragged) would leave the grid up for the rest of the mode.
+        if (widget.dragging) root.setDragging(false)
         const idx = root.selectedWidgets.indexOf(widget)
         if (idx !== -1) {
             const next = root.selectedWidgets.slice()
@@ -128,7 +246,9 @@ MouseArea {
     Connections {
         target: Config.options.background
         function onWidgetsLockedChanged() {
-            if (Config.options.background.widgetsLocked) root.clearSelection()
+            // Not while editing: the mode suppresses that lock, so the widgets
+            // are still live and a cleared selection would be a lie about them.
+            if (Config.options.background.widgetsLocked && !root.editMode) root.clearSelection()
         }
     }
 
@@ -193,11 +313,67 @@ MouseArea {
         widget.groupDragMinY = -Infinity
         widget.groupDragMaxY = Infinity
         if (!group || group.leader !== widget) return
+        // One gesture, one undo entry: every follower's commit below and the
+        // leader's own - which runs AFTER this function, later in the same
+        // release chain - collect into one batch, closed a turn later so the
+        // leader's push cannot miss it. Without this the leader's entry sits
+        // on top and the first Ctrl+Z moves the leader alone, deforming the
+        // cluster the user moved as a unit.
+        GlobalStates.editUndoBeginBatch()
+        Qt.callLater(GlobalStates.editUndoEndBatch)
         for (const entry of group.followers) {
             entry.widget.groupDragging = false
             if (entry.widget.commitPosition) entry.widget.commitPosition()
         }
     }
+
+    // The cancel half of the drag, which nothing needed until the mode could
+    // end in the middle of one. A release COMMITS - clamped and written to the
+    // store - and the drag is deliberately unclamped until then, so committing
+    // a gesture the user never finished stores an overshoot: exactly the defect
+    // 705e9006d ("fix(plugins): stop a widget's stored position disagreeing
+    // with where it is drawn") fixed, where a real store held a widget at
+    // x: -852 on a 5120px screen.
+    function widgetDragCancelled(widget) {
+        const group = root.groupDrag
+        if (group && group.leader === widget) root.groupDrag = null
+        widget.groupDragMinX = -Infinity
+        widget.groupDragMaxX = Infinity
+        widget.groupDragMinY = -Infinity
+        widget.groupDragMaxY = Infinity
+        if (!group || group.leader !== widget) return
+        for (const entry of group.followers) {
+            entry.widget.groupDragging = false
+            // Put the follower back and rebind, rather than committing it the
+            // way widgetDragEnded does: a follower never gets a release event,
+            // so this is the only path that can undo its imperative move.
+            entry.widget.x = entry.startX
+            entry.widget.y = entry.startY
+            if (entry.widget.restoreXYBinding) entry.widget.restoreXYBinding()
+        }
+    }
+
+    function draggingWidget() {
+        for (const widget of root.widgetsUnder(root, []))
+            if (widget.dragging) return widget
+        return null
+    }
+
+    function cancelActiveDrag() {
+        const widget = root.draggingWidget()
+        if (widget && widget.cancelDrag) widget.cancelDrag()
+    }
+
+    // Leaving the mode mid-drag cancels the gesture. It cannot commit: a widget
+    // is only clamped on release, and the mode ending is not the user letting
+    // go of anything.
+    //
+    // The selection goes with it, because Done means "stop" (spec §8.2) and a
+    // selection halo surviving the mode is a marquee the user has no visible
+    // way to clear. Escape never reaches this branch holding one - the ladder
+    // clears the selection before it will exit - so this is the exit that Done
+    // and the screen being taken away both take.
+    onEditModeChanged: if (!root.editMode) { root.cancelActiveDrag(); root.clearSelection() }
 
     Connections {
         target: root.groupDrag ? root.groupDrag.leader : null
@@ -208,11 +384,30 @@ MouseArea {
     property bool centerXActive: false
     property bool centerYActive: false
 
+    // The edge-snap guides (spec §6): one vertical and one horizontal line,
+    // published by whichever widget is dragging (AbstractWidget resolves the
+    // hold; the canvas only draws it). The position keeps its last value while
+    // inactive so the fade-out fades the line where it was, rather than a
+    // line sliding to 0 as it leaves.
+    property bool edgeGuideXActive: false
+    property real edgeGuideXPos: 0
+    property bool edgeGuideYActive: false
+    property real edgeGuideYPos: 0
+
+    function setEdgeGuides(xActive, xPos, yActive, yPos) {
+        if (xActive) root.edgeGuideXPos = xPos
+        if (yActive) root.edgeGuideYPos = yPos
+        root.edgeGuideXActive = xActive
+        root.edgeGuideYActive = yActive
+    }
+
     function setDragging(active) {
         root.showGrid = active
         if (!active) {
             root.centerXActive = false
             root.centerYActive = false
+            root.edgeGuideXActive = false
+            root.edgeGuideYActive = false
         }
     }
 
@@ -221,65 +416,196 @@ MouseArea {
         root.centerYActive = yActive
     }
 
-    Repeater {
-        model: root.gridVisible ? Math.ceil(root.width / root.gridSize) : 0
-        delegate: Rectangle {
-            required property int index
-            x: index * root.gridSize
-            width: 1
+    // Every second line at full strength, the ones between it fainter: the fine
+    // lattice is what the drag actually lands on, and the emphasis is what
+    // keeps a screen's worth of 12px lines readable rather than grey.
+    readonly property real fineGridOpacity: 0.4
+
+    // The lattice dissolves toward the canvas edges rather than being sliced off
+    // at them. Two halves, and both are needed: a gradient ALONG each line so it
+    // fades at its own two ends, and a per-line opacity ACROSS the lattice so
+    // the lines nearest an edge are the faintest. Either one alone leaves the
+    // other axis running full strength into the boundary, which is what read as
+    // the grid ending abruptly - a texture pasted onto the desktop rather than
+    // something the surface has.
+    readonly property real gridFadeFraction: 0.07
+    function edgeFade(position, extent) {
+        const band = extent * root.gridFadeFraction
+        if (band <= 0) return 1
+        const distance = Math.min(position, extent - position)
+        return distance >= band ? 1 : Math.max(0, distance / band)
+    }
+
+    // One gradient object shared by every line on that axis rather than one
+    // declared inside each delegate: a screen's worth of 12px lines is several
+    // hundred delegates, and four GradientStops apiece is a few thousand objects
+    // built at the moment the mode is entered.
+    //
+    // The far ends are the line's own colour at zero alpha, not "transparent" -
+    // a stop interpolating toward #00000000 walks the colour through black on
+    // the way, which draws a dark smudge at exactly the edge this exists to
+    // make quiet.
+    readonly property color gridLineColor: Appearance.colors.colLayer0Border
+    readonly property color gridLineFadeColor: Qt.rgba(root.gridLineColor.r,
+        root.gridLineColor.g, root.gridLineColor.b, 0)
+    readonly property Gradient gridFadeAlongY: Gradient {
+        GradientStop { position: 0; color: root.gridLineFadeColor }
+        GradientStop { position: root.gridFadeFraction; color: root.gridLineColor }
+        GradientStop { position: 1 - root.gridFadeFraction; color: root.gridLineColor }
+        GradientStop { position: 1; color: root.gridLineFadeColor }
+    }
+    readonly property Gradient gridFadeAlongX: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0; color: root.gridLineFadeColor }
+        GradientStop { position: root.gridFadeFraction; color: root.gridLineColor }
+        GradientStop { position: 1 - root.gridFadeFraction; color: root.gridLineColor }
+        GradientStop { position: 1; color: root.gridLineFadeColor }
+    }
+
+    // The lattice is a SUBSTRATE: widgets sit on it. That order is declared here
+    // rather than left to the order the children happen to be built in, because
+    // nothing in this file decides it - the desktop widgets arrive as EXTERNAL
+    // children of this canvas (Background.qml's Repeater over the plugin
+    // manifests), so which of the two ends up on top is a consequence of when a
+    // Repeater's model filled rather than of anything anybody chose. A widget
+    // whose panel is translucent - which every desktop widget is, and which the
+    // mode makes more so by standing the frost down - then has a crisp full
+    // strength line running across it, and reads as being under the grid.
+    Item {
+        id: lattice
+        anchors.fill: parent
+        z: -1
+        // The delegates outlive the flag so the fade-out has something to fade.
+        opacity: root.gridStrength
+        visible: root.gridStrength > 0
+        // Cannot take input, ever. The canvas's own press is what anchors the
+        // marquee and what a widget's drag is measured against.
+        enabled: false
+
+        Repeater {
+            model: root.gridStrength > 0 ? Math.ceil(root.width / root.gridSize) : 0
+            delegate: Rectangle {
+                required property int index
+                x: index * root.gridSize
+                width: 1
+                height: root.height
+                opacity: (index % 2 === 0 ? 1 : root.fineGridOpacity)
+                    * root.edgeFade(x, root.width)
+                gradient: root.gridFadeAlongY
+            }
+        }
+
+        Repeater {
+            model: root.gridStrength > 0 ? Math.ceil(root.height / root.gridSize) : 0
+            delegate: Rectangle {
+                required property int index
+                y: index * root.gridSize
+                width: root.width
+                height: 1
+                opacity: (index % 2 === 0 ? 1 : root.fineGridOpacity)
+                    * root.edgeFade(y, root.height)
+                gradient: root.gridFadeAlongX
+            }
+        }
+
+        Rectangle {
+            id: centerLineV
+            x: root.width / 2 - width / 2
+            width: root.centerXActive ? 2 : 1
             height: root.height
-            color: Appearance.colors.colLayer0Border
-        }
-    }
+            color: root.centerXActive ? Appearance.colors.colPrimary : Appearance.colors.colLayer0Border
+            opacity: root.centerXActive ? 1 : 0.6
 
-    Repeater {
-        model: root.gridVisible ? Math.ceil(root.height / root.gridSize) : 0
-        delegate: Rectangle {
-            required property int index
-            y: index * root.gridSize
+            Behavior on color {
+                animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
+            }
+            Behavior on width {
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
+            Behavior on opacity {
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
+        }
+
+        Rectangle {
+            id: centerLineH
+            y: root.height / 2 - height / 2
             width: root.width
-            height: 1
-            color: Appearance.colors.colLayer0Border
+            height: root.centerYActive ? 2 : 1
+            color: root.centerYActive ? Appearance.colors.colPrimary : Appearance.colors.colLayer0Border
+            opacity: root.centerYActive ? 1 : 0.6
+
+            Behavior on color {
+                animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
+            }
+            Behavior on height {
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
+            Behavior on opacity {
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
         }
     }
 
-    Rectangle {
-        id: centerLineV
-        visible: root.gridVisible
-        x: root.width / 2 - width / 2
-        width: root.centerXActive ? 2 : 1
-        height: root.height
-        color: root.centerXActive ? Appearance.colors.colPrimary : Appearance.colors.colLayer0Border
-        opacity: root.centerXActive ? 1 : 0.6
+    // The edge-snap guides join the centre-line family - the same tier's
+    // Behaviors, taken whole through the tier's own factory - rather than
+    // starting a second idiom. Unlike the centre lines they live ABOVE the
+    // widgets, not in the lattice substrate: the line belongs to the OTHER
+    // widget's edge, and an alignment cue drawn under a translucent panel is
+    // an alignment cue the panel dims. They are also not gated on the grid's
+    // visibility, because the hold they announce rides
+    // `background.showSnapLines` (gated where it is resolved, in
+    // AbstractWidget) while the lattice rides `background.showGrid` - two
+    // switches, and a guide the user asked for must not disappear with a grid
+    // they turned off.
+    Item {
+        id: edgeGuides
+        anchors.fill: parent
+        z: 9
+        // Cannot take input, ever - same rule as the lattice.
+        enabled: false
 
-        Behavior on color {
-            animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
-        }
-        Behavior on width {
-            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
-        }
-        Behavior on opacity {
-            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
-        }
-    }
+        Rectangle {
+            id: edgeGuideV
+            visible: opacity > 0
+            x: root.edgeGuideXPos - width / 2
+            width: 2
+            height: root.height
+            color: Appearance.colors.colPrimary
+            opacity: root.edgeGuideXActive ? 1 : 0
 
-    Rectangle {
-        id: centerLineH
-        visible: root.gridVisible
-        y: root.height / 2 - height / 2
-        width: root.width
-        height: root.centerYActive ? 2 : 1
-        color: root.centerYActive ? Appearance.colors.colPrimary : Appearance.colors.colLayer0Border
-        opacity: root.centerYActive ? 1 : 0.6
+            Behavior on x {
+                // Instant while invisible, so the first hold of a drag places
+                // the line at its guide instead of sweeping it in from
+                // wherever the previous one faded out. While visible, a hold
+                // moving between neighbours travels: the reference
+                // implementation's guides are two plain Rectangles that pop
+                // and teleport between guides (spec §6.2), which is exactly
+                // what joining the animated family is for.
+                enabled: edgeGuideV.opacity > 0
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
+            Behavior on opacity {
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
+        }
 
-        Behavior on color {
-            animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
-        }
-        Behavior on height {
-            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
-        }
-        Behavior on opacity {
-            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+        Rectangle {
+            id: edgeGuideH
+            visible: opacity > 0
+            y: root.edgeGuideYPos - height / 2
+            width: root.width
+            height: 2
+            color: Appearance.colors.colPrimary
+            opacity: root.edgeGuideYActive ? 1 : 0
+
+            Behavior on y {
+                enabled: edgeGuideH.opacity > 0
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
+            Behavior on opacity {
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
         }
     }
 

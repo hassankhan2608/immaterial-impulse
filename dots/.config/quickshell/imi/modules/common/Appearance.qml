@@ -2,6 +2,8 @@ import QtQuick
 import Quickshell
 import qs
 import qs.modules.common.functions
+import "interaction_motion.js" as InteractionMotion
+import "motion_policy.js" as MotionPolicy
 pragma Singleton
 pragma ComponentBehavior: Bound
 
@@ -13,6 +15,7 @@ Singleton {
     property QtObject m3colors
     property QtObject animation
     property QtObject animationCurves
+    property QtObject interaction
     property QtObject colors
     property QtObject rounding
     property QtObject spacing
@@ -25,7 +28,7 @@ Singleton {
     // Transparency. The quadratic functions were derived from analysis of hand-picked transparency values.
     ColorQuantizer {
         id: wallColorQuant
-        property string wallpaperPath: (GlobalStates.screenLocked && Config.options.background.lockWall !== "")
+        property string wallpaperPath: (GlobalStates.lockLookActive && Config.options.background.lockWall !== "")
             ? Config.options.background.lockWall
             : Config.options.background.wallpaperPath
         property bool wallpaperIsVideo: wallpaperPath.endsWith(".mp4") || wallpaperPath.endsWith(".webm") || wallpaperPath.endsWith(".mkv") || wallpaperPath.endsWith(".avi") || wallpaperPath.endsWith(".mov")
@@ -210,6 +213,31 @@ Singleton {
         property color colOnTooltip: m3colors.m3inverseOnSurface
         property color colScrim: ColorUtils.transparentize(m3colors.m3scrim, 0.5)
         property color colShadow: ColorUtils.transparentize(m3colors.m3shadow, 0.7)
+        // The tone a glass edge is drawn in, and the one colour in this file
+        // deliberately NOT derived from the wallpaper. Everything above is
+        // generated from the picture on screen, so an edge drawn in one of those
+        // roles is guaranteed to be a colour that picture already contains -
+        // which is precisely the edge that disappears against it. Measured on
+        // this library's darkest wallpaper: Edit Mode's card reached 27/255 on
+        // its colLayer0Border outline over a backdrop at 12, ten levels of
+        // contrast for the whole boundary. Same reasoning as the depth picker's
+        // hardcoded contour (refactor(background): one cutout for the layer and
+        // the picker to draw).
+        //
+        // Opaque here - a call site picks its own weight with Qt.alpha, so one
+        // tone appears at several strengths along the same edge without a token
+        // per strength, which is what lets an edge be a catch along the top and
+        // almost nothing along the flanks.
+        //
+        // It shipped as a PAIR, with a `colGlassShade` black beside it, on the
+        // reasoning that a specular reads against a dark picture and a shade
+        // band against a bright one. The shade band went with the thick border
+        // it was half of: what darkens outside Edit Mode's card is `colShadow`
+        // two lines up, already drawn there, from the same lamp, and softly
+        // rather than as a hard 4px lip - so the shade band was a hard copy of
+        // the soft darkening underneath it. Nothing else had ever read the
+        // token. (fix(editMode): the card's edge becomes a catch, not a rim.)
+        property color colGlassSpecular: "#ffffff"
         property color colOutline: m3colors.m3outline
         property color colOutlineVariant: m3colors.m3outlineVariant
         property color colError: m3colors.m3error
@@ -234,6 +262,37 @@ Singleton {
         property int full: 9999
         property int screenRounding: large
         property int windowRounding: 18
+
+        // Material 3's own names for three tiers this ladder already has. The
+        // vendored design system (modules/common/plugins/designsystem, whose
+        // ExpressiveTokens exposes `Appearance.rounding` as `shape`) speaks the
+        // M3 shape-scale dialect, so its call sites ask for `button`, `card` and
+        // `extraLarge`; none of the three was ever ported with them. They are
+        // aliases rather than new numbers on purpose - a tier with two values
+        // is the drift AGENT.md's one-source rule exists to stop, while a tier
+        // with two names cannot disagree with itself. `screenRounding: large`
+        // is the same pattern.
+        //
+        // Which tier each one is, per docs/M3_GUIDELINES.md's ladder:
+        //   button     -> small (12), "small chips, standard buttons". This is
+        //                 also the default the *mainline* RippleButton already
+        //                 carries (`Appearance?.rounding?.small ?? 4`), and the
+        //                 design system's RippleButton is a fork of it; two
+        //                 copies of one control must not disagree about the
+        //                 shape they hand an un-overridden call site.
+        //   card       -> normal (17), "standard cards, list items, menus".
+        //                 ResourceCard and GroupedList.bigRadius - the shell's
+        //                 own card primitives - are already this value.
+        //   extraLarge -> verylarge (30), "prominent dialogs, major distinct UI
+        //                 blocks". M3 calls its top non-`full` tier "extra
+        //                 large"; this ladder calls that tier `verylarge`. The
+        //                 surface reading it is a floating wallpaper carousel
+        //                 container, and all three in-house hosts of that same
+        //                 block (DesktopMenu, BackgroundConfig) round at
+        //                 `verylarge` already.
+        property int button: small
+        property int card: normal
+        property int extraLarge: verylarge
     }
 
     spacing: QtObject {
@@ -328,12 +387,129 @@ Singleton {
         readonly property real expressiveEffectsDuration: 200
     }
 
+    // The motion vocabulary every interactive element passes through, in one
+    // place, so five controls do not each invent their own hover. The states
+    // and the transition between any two of them are decided by
+    // interaction_motion.js (pure, and therefore tested); this object holds
+    // the numbers and maps the tiers onto the shell's existing curves.
+    //
+    // Adopters read `state`, `targets` and `transition` - they do not hardcode
+    // a duration. `InteractionMotion.qml` wires all three to a control.
+    interaction: QtObject {
+        id: interactionModel
+
+        // Multipliers on whatever geometry the control already has.
+        readonly property real hoverScale: 1.02
+        readonly property real pressScale: 0.97
+        readonly property real pressRadiusScale: 0.85
+        readonly property real disabledOpacity: 0.4
+
+        readonly property var tokens: ({
+            hoverScale: interactionModel.hoverScale,
+            pressScale: interactionModel.pressScale,
+            pressRadiusScale: interactionModel.pressRadiusScale,
+            disabledOpacity: interactionModel.disabledOpacity
+        })
+
+        // The tiers, on the shell's existing curves. The press tier is the
+        // fastest one there is because a press must be acknowledged before
+        // anything else; the release is longer AND lands on the spatial curve
+        // whose control points leave the unit box, so it springs back rather
+        // than deflating.
+        //
+        // These go through the same scale as the catalogued tiers, so the
+        // speed slider and reduce motion reach hover and press feedback too. A
+        // multiplier that slowed every panel but left every button's press
+        // acknowledging at a fixed 150ms would be half a multiplier, and
+        // reduce motion would leave the one class of motion that fires on
+        // every single interaction untouched.
+        readonly property var tiers: ({
+            hoverIn: { duration: motion.scale(root.animationCurves.expressiveEffectsDuration),
+                       curve: root.animationCurves.expressiveEffects },
+            hoverOut: { duration: motion.scale(Math.round(root.animationCurves.expressiveEffectsDuration * 1.25)),
+                        curve: root.animationCurves.expressiveEffects },
+            press: { duration: motion.scale(150), curve: root.animationCurves.expressiveEffects },
+            release: { duration: motion.scale(root.animationCurves.expressiveFastSpatialDuration),
+                       curve: root.animationCurves.expressiveFastSpatial },
+            instant: { duration: 0, curve: root.animationCurves.standard },
+            hold: { duration: 0, curve: root.animationCurves.standard }
+        })
+
+        function state(flags) { return InteractionMotion.stateOf(flags); }
+        function targets(state) { return InteractionMotion.targetsFor(state, interactionModel.tokens); }
+        function transition(fromState, toState) {
+            return InteractionMotion.transitionFor(fromState, toState, interactionModel.tiers);
+        }
+    }
+
+    // The desktop card's elevation. Numbers picked on the real wallpaper with
+    // ShadowTuningPlayground rather than argued about, the same way the
+    // resize-tension constants were:
+    //   blur 0.51 opacity 0.50 offset 4.0 scale 1.00 hover 1.94 drag 2.65
+    //
+    // hover/drag are multipliers on blur and offset, not separate shadows: a
+    // card lifts further off the wallpaper the more directly it is being
+    // handled, and one animated lift factor drives both.
+    property QtObject elevation: QtObject {
+        readonly property real blur: 0.51
+        readonly property real shadowOpacity: 0.50
+        readonly property real offsetY: 4.0
+        readonly property real shadowScale: 1.00
+        readonly property real hoverLift: 1.94
+        readonly property real dragLift: 2.65
+        readonly property color shadowColor: root.m3colors.m3shadow
+    }
+
     animation: QtObject {
+        id: motion
+
+        // How fast this shell moves, and where the bottom of that scale is.
+        //
+        // The multiplier is worth having HERE and not in the fork this was
+        // taken from, and the difference is not taste: roughly half of their
+        // motion is a hardcoded millisecond literal, so their slider silently
+        // does nothing for half the shell. Ours routes ~700 call sites through
+        // the tiers below, so scaling the tiers is the whole job.
+        //
+        // `reduceMotion` is a SEPARATE declared state, never a value of the
+        // multiplier. `multiplier` cannot reach `reduceMotionFloor` from
+        // anywhere - the clamp holds for a hand-edited config.json too - which
+        // is what keeps an accessibility choice from being something a user
+        // can arrive at by dragging a speed slider one notch too far, or lose
+        // by dragging it back.
+        readonly property real multiplier: MotionPolicy.clampMultiplier(
+            Config.options?.appearance?.motion?.multiplier ?? MotionPolicy.MULTIPLIER_DEFAULT)
+        readonly property bool reduceMotion: Config.options?.appearance?.motion?.reduceMotion ?? false
+        readonly property int reduceMotionFloor: MotionPolicy.REDUCE_MOTION_DURATION
+
+        function scale(base: int): int {
+            return MotionPolicy.scaleDuration(base, motion.multiplier, motion.reduceMotion);
+        }
+        function scaleVelocity(base: int): int {
+            return MotionPolicy.scaleVelocity(base, motion.multiplier, motion.reduceMotion);
+        }
+        // One spelling of "these N things arrive in sequence". A cascade asks
+        // for a step as a fraction of a catalogued duration, ranks its members
+        // by VISIBLE position, and gets a clamped delay back - see
+        // motion_policy.js for why each of the three is not the obvious
+        // `index * literal`.
+        // The shell's stagger step, in BASE milliseconds - a fraction of the
+        // effects tier rather than a literal, so it moves with any retiming of
+        // the catalogue. Unscaled on purpose: whatever consumes it scales it
+        // once, and scaling here too would apply the multiplier twice.
+        readonly property int staggerStep: MotionPolicy.staggerStep(animationCurves.expressiveEffectsDuration)
+        function staggerRanks(included: var): var {
+            return MotionPolicy.staggerRanks(included);
+        }
+        function staggerDelay(rank: int, step: int, leadIn: int): int {
+            return MotionPolicy.staggerDelay(rank, step, leadIn);
+        }
+
         property QtObject elementMove: QtObject {
-            property int duration: animationCurves.expressiveDefaultSpatialDuration
+            property int duration: motion.scale(animationCurves.expressiveDefaultSpatialDuration)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.expressiveDefaultSpatial
-            property int velocity: 650
+            property int velocity: motion.scaleVelocity(650)
             property Component numberAnimation: Component {
                 NumberAnimation {
                     duration: root.animation.elementMove.duration
@@ -344,10 +520,10 @@ Singleton {
         }
 
         property QtObject elementMoveSmall: QtObject {
-            property int duration: animationCurves.expressiveFastSpatialDuration
+            property int duration: motion.scale(animationCurves.expressiveFastSpatialDuration)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.expressiveFastSpatial
-            property int velocity: 650
+            property int velocity: motion.scaleVelocity(650)
             property Component numberAnimation: Component {
                 NumberAnimation {
                     duration: root.animation.elementMoveSmall.duration
@@ -358,10 +534,10 @@ Singleton {
         }
 
         property QtObject elementMoveEnter: QtObject {
-            property int duration: 400
+            property int duration: motion.scale(400)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.emphasizedDecel
-            property int velocity: 650
+            property int velocity: motion.scaleVelocity(650)
             property Component numberAnimation: Component {
                 NumberAnimation {
                     alwaysRunToEnd: true
@@ -373,10 +549,10 @@ Singleton {
         }
 
         property QtObject elementMoveExit: QtObject {
-            property int duration: 200
+            property int duration: motion.scale(200)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.emphasizedAccel
-            property int velocity: 650
+            property int velocity: motion.scaleVelocity(650)
             property Component numberAnimation: Component {
                 NumberAnimation {
                     alwaysRunToEnd: true
@@ -388,10 +564,10 @@ Singleton {
         }
 
         property QtObject elementMoveFast: QtObject {
-            property int duration: animationCurves.expressiveEffectsDuration
+            property int duration: motion.scale(animationCurves.expressiveEffectsDuration)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.expressiveEffects
-            property int velocity: 850
+            property int velocity: motion.scaleVelocity(850)
             property Component colorAnimation: Component { ColorAnimation {
                 duration: root.animation.elementMoveFast.duration
                 easing.type: root.animation.elementMoveFast.type
@@ -406,10 +582,10 @@ Singleton {
         }
 
         property QtObject elementMoveFaster: QtObject {
-            property int duration: 150
+            property int duration: motion.scale(150)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.expressiveEffects
-            property int velocity: 850
+            property int velocity: motion.scaleVelocity(850)
             property Component colorAnimation: Component { ColorAnimation {
                 duration: root.animation.elementMoveFaster.duration
                 easing.type: root.animation.elementMoveFaster.type
@@ -424,10 +600,10 @@ Singleton {
         }
 
         property QtObject elementResize: QtObject {
-            property int duration: 300
+            property int duration: motion.scale(300)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.emphasized
-            property int velocity: 650
+            property int velocity: motion.scaleVelocity(650)
             property Component numberAnimation: Component {
                 NumberAnimation {
                     alwaysRunToEnd: true
@@ -439,10 +615,10 @@ Singleton {
         }
 
         property QtObject clickBounce: QtObject {
-            property int duration: 400
+            property int duration: motion.scale(400)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.expressiveDefaultSpatial
-            property int velocity: 850
+            property int velocity: motion.scaleVelocity(850)
             property Component numberAnimation: Component { NumberAnimation {
                 alwaysRunToEnd: true
                 duration: root.animation.clickBounce.duration
@@ -452,21 +628,21 @@ Singleton {
         }
         
         property QtObject scroll: QtObject {
-            property int duration: 200
+            property int duration: motion.scale(200)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: root.animationCurves.standardDecel
         }
 
         property QtObject menuDecel: QtObject {
-            property int duration: 350
+            property int duration: motion.scale(350)
             property int type: Easing.OutExpo
         }
 
         property QtObject sidebarSlideEnter: QtObject {
-            property int duration: 300
+            property int duration: motion.scale(300)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.standardDecel
-            property int velocity: 650
+            property int velocity: motion.scaleVelocity(650)
             property Component numberAnimation: Component {
                 NumberAnimation {
                     alwaysRunToEnd: true
@@ -478,10 +654,10 @@ Singleton {
         }
 
         property QtObject sidebarSlideExit: QtObject {
-            property int duration: 250
+            property int duration: motion.scale(250)
             property int type: Easing.BezierSpline
             property list<real> bezierCurve: animationCurves.standardAccel
-            property int velocity: 650
+            property int velocity: motion.scaleVelocity(650)
             property Component numberAnimation: Component {
                 NumberAnimation {
                     alwaysRunToEnd: true
@@ -584,6 +760,28 @@ Singleton {
         property real barBottomMargin: (Config?.options.bar.bottom && root.sizes.barDeadPixelOverhang !== 0)
             ? root.sizes.barDeadPixelOverhang
             : root.sizes.barDetachMargin
+        // The bar's layer SURFACE, as opposed to the body it paints: what
+        // Bar.qml asks the compositor for, and how far that lands from the
+        // screen edge. One expression each, because anything that has to keep
+        // clear of the bar without editing it - Edit Mode's chrome is the first
+        // - would otherwise carry its own copy of a four-term sum, and a copy
+        // of that is a copy that drifts. Checked against the live compositor at
+        // cornerStyle 3 with auto-hide off: `hyprctl layers` reports
+        // `quickshell:bar` at y=5 h=63, which is these two.
+        property real barSurfaceHeight: root.sizes.barHeight
+            + root.rounding.screenRounding + root.sizes.barDetachInset
+        property real barSurfaceMargin: Config?.options.bar.bottom
+            ? root.sizes.barBottomMargin : root.sizes.barDetachMargin
+        // A negative margin is the dead-pixel overhang, which pulls the surface
+        // PAST the screen edge - it takes no room from anything inside.
+        property real barSurfaceThickness: root.sizes.barSurfaceHeight
+            + Math.max(0, root.sizes.barSurfaceMargin)
+        // ...and the same for the vertical bar, which anchors flush to its edge
+        // and so has no margin term.
+        property real verticalBarSurfaceWidth: root.sizes.verticalBarWidth
+            + root.rounding.screenRounding
+            + (Config?.options.bar.cornerStyle === 3
+                ? (Config?.options.hyprland.general.gapsOut || 5) : 0)
         property real barCenterSideModuleWidth: Config.options?.bar.verbose ? 360 : 140
         property real barCenterSideModuleWidthShortened: 280
         property real barCenterSideModuleWidthHellaShortened: 190
@@ -601,6 +799,23 @@ Singleton {
         property real searchWidth: 360
         property real sidebarWidth: 460
         property real sidebarWidthExtended: 750
+        // Edit Mode's viewport is inset by exactly what the drawer will need,
+        // so the drawer opens into space that already exists rather than
+        // covering the desktop or resizing it (spec §1.2). This is the one
+        // number the inset, the drawer's own panel and its reveal all read -
+        // a width restated in any of them would be two fields that must
+        // agree.
+        property real editModeDrawerWidth: 380
+        // The gap outside the shrunk desktop on its three free sides, and
+        // between it and the drawer's slot on the fourth.
+        property real editModeMargin: root.spacing.space300
+        // M3's toolbar height (m3.material.io/components/toolbars). It is a
+        // token rather than a literal inside Toolbar.qml because Edit Mode's
+        // viewport reserves a band for the toolbar on the BACKGROUND surface,
+        // where no toolbar exists to measure - so the reservation and the thing
+        // reserved for have to read the same number or the chrome lands in a
+        // band that is not its size.
+        property real toolbarHeight: 56
         property real baseVerticalBarWidth: 46
         property real verticalBarWidth: Config.options.bar.cornerStyle === 1 ? 
             (baseVerticalBarWidth + root.sizes.hyprlandGapsOut * 2) : baseVerticalBarWidth

@@ -44,15 +44,20 @@ Item {
     property real cardSpacing: 12 * Appearance.effectiveScale
     property real cardHeight: isVertical ? (108 * Appearance.effectiveScale) : (108 * Appearance.effectiveScale)
     property real cardWidth: isVertical ? (132 * Appearance.effectiveScale) : ((420 * Appearance.effectiveScale - cardSpacing * 2) / 3)
+    // The grip sits at the widget's bottom-right, so the tension lands on the
+    // card under it - thirdCard. All three bowing identically would read as
+    // jelly, not as a pull.
+    property point resizeBow: Qt.point(0, 0)
+    // Handled state, for the cards' elevation.
+    property bool dragging: false
+    // The host's box is animating; the cards drop their shadow for it.
+    property bool boxInMotion: false
     readonly property var blurRegions: [
-        { x: cpuCard.x, y: cpuCard.y, width: cpuCard.width, height: cpuCard.height, radius: cpuCard.radius },
-        { x: ramCard.x, y: ramCard.y, width: ramCard.width, height: ramCard.height, radius: ramCard.radius },
-        { x: thirdCard.x, y: thirdCard.y, width: thirdCard.width, height: thirdCard.height, radius: thirdCard.radius }
+        cpuCard.blurRegion,
+        ramCard.blurRegion,
+        thirdCard.blurRegion
     ]
 
-    function cardColor(color) {
-        return useBlurBackground ? Functions.ColorUtils.applyAlpha(color, backgroundOpacity) : color;
-    }
 
     Grid {
         id: gridLayout
@@ -60,12 +65,16 @@ Item {
         spacing: root.cardSpacing
 
         // CARD 1: CPU (Split-Level Centered Layout)
-        Rectangle {
+        WidgetCard {
             id: cpuCard
             implicitWidth: root.cardWidth
             implicitHeight: root.cardHeight
+            dragging: root.dragging
+            hostMotionActive: root.boxInMotion
             radius: Appearance.rounding.large
-            color: root.cardColor(Appearance.colors.colPrimaryContainer)
+            tint: Appearance.colors.colPrimaryContainer
+            useBlurBackground: root.useBlurBackground
+            backgroundOpacity: root.backgroundOpacity
 
             // Sisi Atas: Liquid Gem (Centered Top)
             Item {
@@ -149,12 +158,16 @@ Item {
         }
 
         // CARD 2: RAM (Split-Level Centered Layout)
-        Rectangle {
+        WidgetCard {
             id: ramCard
             implicitWidth: root.cardWidth
             implicitHeight: root.cardHeight
+            dragging: root.dragging
+            hostMotionActive: root.boxInMotion
             radius: Appearance.rounding.large
-            color: root.cardColor(Appearance.colors.colSecondaryContainer)
+            tint: Appearance.colors.colSecondaryContainer
+            useBlurBackground: root.useBlurBackground
+            backgroundOpacity: root.backgroundOpacity
 
             // Sisi Atas: Liquid Cookie4Sided (Centered Top)
             Item {
@@ -238,12 +251,18 @@ Item {
         }
 
         // CARD 3: DISK or BATTERY (Split-Level Centered Layout)
-        Rectangle {
+        WidgetCard {
             id: thirdCard
             implicitWidth: root.cardWidth
             implicitHeight: root.cardHeight
             radius: Appearance.rounding.large
-            color: root.cardColor(Appearance.colors.colTertiaryContainer)
+            tint: Appearance.colors.colTertiaryContainer
+            useBlurBackground: root.useBlurBackground
+            backgroundOpacity: root.backgroundOpacity
+            tensionX: root.resizeBow.x
+            tensionY: root.resizeBow.y
+            dragging: root.dragging
+            hostMotionActive: root.boxInMotion
 
             // Sisi Atas: Liquid Cookie12Sided (Centered Top)
             Item {

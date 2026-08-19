@@ -243,5 +243,106 @@ class PresetTests(unittest.TestCase):
         )
 
 
+    def _sandbox(self, home, state):
+        """A HOME with a plugin state, stub helpers and a copy of presets.sh."""
+        config_dir = home / ".config/immaterial-impulse"
+        script_dir = home / ".config/quickshell/imi/scripts"
+        wallpaper_dir = script_dir / "wallpapers"
+        colors_dir = script_dir / "colors"
+        for d in (config_dir, wallpaper_dir, colors_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.json").write_text(json.dumps({
+            "background": {"wallpaperPath": "/tmp/wallpaper.jpg"},
+            "wallpaperSelector": {"wallpaperEngine": {"activePath": ""}},
+        }))
+        state_file = config_dir / "plugin-state.json"
+        state_file.write_text(json.dumps(state))
+        for helper in (wallpaper_dir / "wallpaper-engine.sh", colors_dir / "switchwall.sh"):
+            helper.write_text("#!/usr/bin/env bash\nexit 0\n")
+            helper.chmod(0o755)
+        presets = script_dir / "presets.sh"
+        shutil.copy(PRESETS, presets)
+        presets.chmod(0o755)
+        return config_dir, state_file, presets, dict(os.environ, HOME=str(home))
+
+    def test_the_lock_layout_round_trips_and_an_old_preset_keeps_the_fork(self):
+        """Two layouts, one store (spec §4.3 as amended 2026-08-18).
+
+        A preset saved by this shell carries `lockPositions`; applying it
+        restores the fork exactly. A preset from an OLDER shell has no such
+        key, and applying it must leave the user's fork alone rather than
+        wipe it - the same `has()` rule the desktop map already follows.
+        """
+        forked = {
+            "version": 2,
+            "desktopPositions": {"DP-1": {"clock": {"x": 100, "y": 200, "placementStrategy": "free"}}},
+            "lockPositions": {"DP-1": {"clock": {"x": 900, "y": 900, "placementStrategy": "free"}}},
+            "pluginOptions": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, state_file, presets, env = self._sandbox(Path(directory), forked)
+
+            subprocess.run(["bash", str(presets), "--save", "forked"], env=env, check=True)
+            preset = json.loads((config_dir / "presets/forked.json").read_text())
+            self.assertEqual(preset["_pluginState"]["lockPositions"]["DP-1"]["clock"]["x"], 900,
+                             "a saved preset must carry the lock layout")
+
+            # Scribble on the fork, then apply the preset: the fork comes back.
+            state_file.write_text(json.dumps({
+                "version": 2,
+                "desktopPositions": {"DP-1": {"clock": {"x": 1, "y": 1}}},
+                "lockPositions": {"DP-1": {"clock": {"x": 2, "y": 2}}},
+                "pluginOptions": {},
+            }))
+            subprocess.run(["bash", str(presets), "--apply", "forked"], env=env, check=True)
+            restored = json.loads(state_file.read_text())
+            self.assertEqual(restored["desktopPositions"]["DP-1"]["clock"]["x"], 100)
+            self.assertEqual(restored["lockPositions"]["DP-1"]["clock"]["x"], 900)
+
+            # An OLDER preset: same document with the lock key removed, as a
+            # pre-fork shell would have written it.
+            old = json.loads((config_dir / "presets/forked.json").read_text())
+            del old["_pluginState"]["lockPositions"]
+            (config_dir / "presets/older.json").write_text(json.dumps(old))
+            state_file.write_text(json.dumps(forked))
+            subprocess.run(["bash", str(presets), "--apply", "older"], env=env, check=True)
+            after_old = json.loads(state_file.read_text())
+            self.assertEqual(after_old["desktopPositions"]["DP-1"]["clock"]["x"], 100)
+            self.assertEqual(after_old["lockPositions"]["DP-1"]["clock"]["x"], 900,
+                             "a preset without lockPositions must not wipe the user's fork")
+
+    def test_saving_a_preset_does_not_publish_the_users_weather_key(self):
+        """A preset is a document people share; config.json holds their key.
+
+        Saved verbatim, posting a preset published the author's OpenWeatherMap
+        key with it. Stripped on SAVE rather than on apply, because apply
+        merges the preset over the recipient's config - a key left in the file
+        would overwrite theirs too.
+        """
+        source = PRESETS.read_text()
+        self.assertIn(".bar.weather.apiKey", source)
+        save = source[source.index("del(._presetMeta, ._pluginState)"):]
+        save = save[:save.index("$PRESETS_DIR")]
+        self.assertIn('.bar.weather.apiKey = ""', save,
+                      "the save filter must blank the key")
+
+    def test_the_save_filter_survives_a_config_without_the_key(self):
+        """`?` on the path, so a config that has never had a weather key is
+        passed through rather than failing the save."""
+        source = PRESETS.read_text()
+        self.assertIn("if .bar.weather.apiKey? then", source)
+        for document in ('{"bar":{"weather":{"apiKey":"SECRET"}}}',
+                         '{"dock":{"edge":"left"}}'):
+            result = subprocess.run(
+                ["jq", 'if .bar.weather.apiKey? then .bar.weather.apiKey = "" else . end'],
+                input=document, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # The VALUE, not a substring of the output - "apiKey" itself
+            # contains a K, which is how the first version of this assertion
+            # failed against a filter that was working correctly.
+            saved = json.loads(result.stdout)
+            self.assertEqual(saved.get("bar", {}).get("weather", {}).get("apiKey", ""), "")
+
+
 if __name__ == "__main__":
     unittest.main()

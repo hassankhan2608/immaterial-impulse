@@ -17,7 +17,8 @@ import "MprisSelection.js" as MprisSelection
  */
 Singleton {
 	id: root;
-	property list<MprisPlayer> players: Mpris.players.values.filter(player => isRealPlayer(player));
+	property list<MprisPlayer> players: MprisSelection.candidatePlayers(
+		Mpris.players.values, Config.options.media.filterDuplicatePlayers);
 	property MprisPlayer trackedPlayer: null;
 	property MprisPlayer activePlayer: null;
 	readonly property string trackTitle: activePlayer?.trackTitle ?? "";
@@ -30,21 +31,13 @@ Singleton {
 
 	property var activeTrack;
 
-	readonly property bool hasActivePlasmaIntegration: Mpris.players.values.some(
-		p => p.dbusName?.startsWith('org.mpris.MediaPlayer2.plasma-browser-integration')
-	)
-	function isRealPlayer(player) {
-        if (!Config.options.media.filterDuplicatePlayers) {
-            return true;
-        }
-        return (
-            // Remove native browser buses only if plasma-browser-integration is actually active on D-Bus
-            !(hasActivePlasmaIntegration && player.dbusName.startsWith('org.mpris.MediaPlayer2.firefox')) && !(hasActivePlasmaIntegration && player.dbusName.startsWith('org.mpris.MediaPlayer2.chromium')) &&
-            // playerctld just copies other buses and we don't need duplicates
-            !player.dbusName?.startsWith('org.mpris.MediaPlayer2.playerctld') &&
-            // Non-instance mpd bus
-            !(player.dbusName?.endsWith('.mpd') && !player.dbusName.endsWith('MediaPlayer2.mpd')));
-    }
+	// The one place the preferred-player setting is resolved. Four widgets used
+	// to carry their own copy of this block and had already drifted apart.
+	readonly property string preferredPlayerId: MprisSelection.normalizePreferredPlayer(
+		Config.options.bar.media.preferredPlayer);
+	readonly property bool preferenceApplies: MprisSelection.preferenceMatches(players, preferredPlayerId).length > 0;
+	readonly property var meaningfulPlayers: MprisSelection.meaningfulPlayers(players, preferredPlayerId);
+	readonly property var playerOptions: MprisSelection.playerOptions(players, preferredPlayerId);
 
 	function hasUsableMetadata(player) {
 		return MprisSelection.hasUsableMetadata(player);
@@ -54,25 +47,36 @@ Singleton {
 		return MprisSelection.preferredPlayer(candidates);
 	}
 
+	function honoursPreference(player) {
+		return !preferenceApplies || MprisSelection.matchesPreference(player, preferredPlayerId);
+	}
+
 	function reconcileTrackedPlayer(preferred) {
-		if (preferred && players.includes(preferred) && preferred.isPlaying) {
+		if (!honoursPreference(trackedPlayer)) {
+			trackedPlayer = MprisSelection.selectPlayer(players, preferredPlayerId);
+			syncActivePlayer();
+			return;
+		}
+		if (preferred && players.includes(preferred) && preferred.isPlaying && honoursPreference(preferred)) {
 			trackedPlayer = preferred;
 			syncActivePlayer();
 			return;
 		}
 		if (!trackedPlayer || !players.includes(trackedPlayer)
 				|| (!trackedPlayer.isPlaying && players.some(player => player.isPlaying))) {
-			trackedPlayer = MprisSelection.preferredPlayer(players);
+			trackedPlayer = MprisSelection.selectPlayer(players, preferredPlayerId);
 		}
 		syncActivePlayer();
 	}
 
 	function syncActivePlayer() {
-		const nextPlayer = trackedPlayer && players.includes(trackedPlayer)
-			? trackedPlayer : MprisSelection.preferredPlayer(players);
+		const nextPlayer = trackedPlayer && players.includes(trackedPlayer) && honoursPreference(trackedPlayer)
+			? trackedPlayer : MprisSelection.selectPlayer(players, preferredPlayerId);
 		if (activePlayer !== nextPlayer)
 			activePlayer = nextPlayer;
 	}
+
+	onPreferredPlayerIdChanged: reconcileTrackedPlayer(null)
 
 	onPlayersChanged: reconcileTrackedPlayer(null)
 	onTrackedPlayerChanged: syncActivePlayer()

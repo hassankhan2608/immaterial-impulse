@@ -7,6 +7,7 @@ import qs.modules.common.widgets
 import qs.modules.common.plugins
 import Quickshell.Hyprland
 import "../../../common/functions/screenSelection.js" as ScreenSelection
+import "../../dock/dock_geometry.js" as DockGeometry
 
 ContentPage {
     id: page
@@ -37,54 +38,21 @@ ContentPage {
         }
     }
 
-    readonly property var pluginWidgets: PluginManager.availablePlugins
-        .filter(plugin => plugin.barWidget !== undefined)
-        .map(plugin => ({
-            id: "plugin:" + plugin.id,
-            name: plugin.name,
-            icon: plugin.icon || "extension"
-        }))
-
-    property var allWidgets: [
-        { id: "leftSidebarButton", name: Translation.tr("Left Sidebar Button"),  icon: "left_panel_open" },
-        { id: "workspaces",        name: Translation.tr("Workspaces"),           icon: "steppers" },
-        { id: "weatherBar",        name: Translation.tr("Weather"),              icon: "flare" },
-        { id: "media",             name: Translation.tr("Media"),                icon: "music_note" },
-        { id: "resources",         name: Translation.tr("Resources"),            icon: "empty_dashboard" },
-        { id: "systemIcons",       name: Translation.tr("System Icons"),         icon: "info" },
-        { id: "networkSpeed",      name: Translation.tr("Network Speed"),        icon: "network_check" },
-        { id: "timerPill",         name: Translation.tr("Timer"),                icon: "timer" },
-        { id: "privacyIndicator",  name: Translation.tr("Privacy"),              icon: "privacy_tip" },
-        { id: "submapIndicator",   name: Translation.tr("Submap"),               icon: "keyboard" },
-        { id: "clockWidget",       name: Translation.tr("Clock"),                icon: "schedule" },
-        { id: "utilButtons",       name: Translation.tr("Util Buttons"),         icon: "toggle_on" },
-        { id: "sysTray",           name: Translation.tr("Tray"),                 icon: "inbox" },
-        { id: "batteryIndicator",  name: Translation.tr("Battery"),              icon: "battery_android_frame_full" },
-        { id: "activeWindow",      name: Translation.tr("Active Window"),        icon: "subtitles" },
-        { id: "powerButton",       name: Translation.tr("Power Button"),         icon: "power_settings_new" },
-        { id: "updatesCount",      name: Translation.tr("Updates"),              icon: "deployed_code_update" },
-        { id: "docktoPanel",       name: Translation.tr("Dock to Panel"),        icon: "apps" },
-        { id: "visualizer",        name: Translation.tr("Visualizer"),           icon: "graphic_eq" },
-        { id: "hyprlandXkbIndicator",   name: Translation.tr("Keyboard Layout"), icon: "keyboard" },
-        { id: "divisor",            name: Translation.tr("Divider"),             icon: "horizontal_distribute" },
-    ].concat(pluginWidgets)
-
+    // The catalogue itself is BarWidgets (a singleton beside PluginManager,
+    // Edit Mode spec §4.2). This page only decides which of it is still
+    // offerable, which is a question about this page's own layout state.
     function availableFor() {
-        let used = [
+        // The policy lives on the catalogue now, so Edit Mode's drawer and
+        // this dropdown cannot disagree about which ids may repeat.
+        return BarWidgets.offerFor([
             ...Config.options.bar.layouts.leftLayout,
             ...Config.options.bar.layouts.middleLayout,
             ...Config.options.bar.layouts.rightLayout
-        ]
-        const multipleAllowed = ["visualizer", "divisor"]
-        return allWidgets.filter(w => {
-            if (w.id === "divisor" && Config.options.bar.borderless !== "transparent") return false
-            return !used.includes(w.id) || multipleAllowed.includes(w.id)
-        })
+        ], Config.options.bar.borderless)
     }
 
     function getWidgetName(id) {
-        const w = allWidgets.find(w => w.id === id)
-        return w ? w.name : id
+        return BarWidgets.nameFor(id)
     }
 
     ColumnLayout {
@@ -307,6 +275,23 @@ ContentPage {
             }
         }
 
+
+        ContentSection {
+            shape: MaterialShape.Shape.Square
+            icon: "privacy_tip"
+            title: Translation.tr("Privacy")
+            GroupedList {
+                ConfigSwitch {
+                    buttonIcon: "block"
+                    text: Translation.tr("Allow force stopping an app's capture")
+                    // Named for what it costs, not for what it enables: the
+                    // panel takes the app's stream away without asking it, and
+                    // an app that does not expect that can misbehave.
+                    checked: Config.options.bar.privacyIndicator.allowForceStop
+                    onToggleRequested: Config.options.bar.privacyIndicator.allowForceStop = !Config.options.bar.privacyIndicator.allowForceStop
+                }
+            }
+        }
 
         ContentSection {
             shape: MaterialShape.Shape.Square
@@ -581,24 +566,42 @@ ContentPage {
             title: Translation.tr("Media")
 
             GroupedList {
-                ConfigTextArea {
-                    id: preferredPlayerField
+                ConfigComboBox {
+                    id: preferredPlayerPicker
                     Layout.fillWidth: true
                     buttonIcon: "play_circle"
+                    fieldWidth: 260
                     text: Translation.tr("Preferred Player")
-                    placeholderText: Translation.tr("e.g. spotify, firefox")
-                    value: Config.options.bar.media.preferredPlayer
-                    onValueChanged: {
-                        mediaDebounceTimer.restart();
-                    }
-
-                    Timer {
-                        id: mediaDebounceTimer
-                        interval: 600
-                        repeat: false
-                        onTriggered: {
-                            Config.options.bar.media.preferredPlayer = preferredPlayerField.value;
+                    description: Translation.tr("Automatic follows whatever is playing. A chosen player is remembered while it is closed.")
+                    // The stable half of the bus name, which is what
+                    // MprisController resolves the setting against - never the
+                    // running instance's bus name, which changes on relaunch.
+                    currentValue: MprisController.preferredPlayerId
+                    model: {
+                        const rows = [{
+                            value: "",
+                            icon: "auto_mode",
+                            displayName: Translation.tr("Automatic")
+                        }];
+                        for (const option of MprisController.playerOptions) {
+                            let label = option.name;
+                            if (!option.available)
+                                label = Translation.tr("%1 (not running)").arg(option.name);
+                            else if (option.trackTitle.length > 0)
+                                label = `${option.name} — ${option.trackTitle}`;
+                            rows.push({
+                                value: option.value,
+                                icon: !option.available ? "help" : (option.isPlaying ? "play_arrow" : "pause"),
+                                displayName: label
+                            });
                         }
+                        return rows;
+                    }
+                    // Only a real selection writes. Nothing here reacts to a
+                    // player appearing or disappearing, so closing the chosen
+                    // player cannot quietly reset the preference to Automatic.
+                    onSelected: newValue => {
+                        Config.options.bar.media.preferredPlayer = newValue;
                     }
                 }
                 ConfigSwitch {
@@ -648,6 +651,43 @@ ContentPage {
                     text: Translation.tr("Enable")
                     checked: Config.options.dock.enable
                     onToggleRequested: Config.options.dock.enable = !Config.options.dock.enable
+                }
+                ConfigSelectionArray {
+                    id: dockEdgeRow
+                    // The shell DECLINES a dock on the same edge as an
+                    // auto-hiding bar rather than arbitrating the two 2px
+                    // reveal slivers that would then share one row of pixels
+                    // (spec §3, settled as §9 Q3). Two strips fighting over
+                    // the same line is not a layout that can be tuned into
+                    // working: whichever loses, the bar becomes unrevealable
+                    // and nothing on screen says why.
+                    //
+                    // Only auto-hide collides. A bottom bar plus a pinned dock
+                    // is a legitimate arrangement the compositor lays out
+                    // cumulatively, and refusing that would forbid something
+                    // that works.
+                    readonly property string blockedEdge: Config.options.bar.autoHide.enable
+                        ? DockGeometry.barEdge(Config.options.bar.vertical,
+                                               Config.options.bar.bottom)
+                        : ""
+                    text: dockEdgeRow.blockedEdge === ""
+                        ? Translation.tr("Dock position")
+                        : Translation.tr("Dock position (not the auto-hiding bar's edge)")
+                    icon: "swap_vert"
+                    // The value IS the stored string - no bitfield to
+                    // open-code, which is the whole argument for the new key.
+                    currentValue: Config.options.dock.edge
+                    onSelected: newValue => { Config.options.dock.edge = newValue; }
+                    options: [
+                        { displayName: Translation.tr("Top"),    icon: "arrow_upward",   value: "top",
+                          disabled: dockEdgeRow.blockedEdge === "top" },
+                        { displayName: Translation.tr("Left"),   icon: "arrow_back",     value: "left",
+                          disabled: dockEdgeRow.blockedEdge === "left" },
+                        { displayName: Translation.tr("Bottom"), icon: "arrow_downward", value: "bottom",
+                          disabled: dockEdgeRow.blockedEdge === "bottom" },
+                        { displayName: Translation.tr("Right"),  icon: "arrow_forward",  value: "right",
+                          disabled: dockEdgeRow.blockedEdge === "right" }
+                    ]
                 }
                 ConfigSwitch {
                     buttonIcon: "background_dot_small"

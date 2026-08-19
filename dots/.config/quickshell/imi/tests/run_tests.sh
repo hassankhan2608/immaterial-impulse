@@ -93,9 +93,77 @@ if ! python3 "$SCRIPT_DIR/lint_spacing.py"; then
     exit 1
 fi
 
+# Static lint: an Appearance token a QML file reads must be declared. An
+# undeclared one is `undefined`, which renders 0 after a single warning - or
+# NaN, with no warning at all, where the call site does arithmetic on it.
+echo "Running Appearance token lint..."
+if ! python3 "$SCRIPT_DIR/lint_appearance_tokens.py"; then
+    echo "Appearance token lint failed."
+    exit 1
+fi
+
 echo "Running disabled-opacity lint..."
 if ! python3 "$SCRIPT_DIR/lint_disabled_opacity.py"; then
     echo "Disabled-opacity lint failed."
+    exit 1
+fi
+
+# Static lint: the same rule for the interaction model's transform. A scale
+# composites exactly the way an opacity does, and the lint above recognises a
+# doubled dim by its opacity EXPRESSION - so the doubled scale discordVoice
+# shipped was invisible to it for the whole life of the widget.
+echo "Running interaction-motion lint..."
+if ! python3 "$SCRIPT_DIR/lint_interaction_motion_double.py"; then
+    echo "Interaction-motion lint failed."
+    exit 1
+fi
+
+# Static lint: an animation that names a motion tier's duration must take that
+# tier's easing with it. Leaving the curve behind hands the animation Qt's
+# default, Easing.Linear - the generic curve M3_GUIDELINES §2 forbids - and
+# nothing about the source or the log shows it. Two fixes in two days each
+# repaired the sites someone had noticed and left more in the same file.
+echo "Running motion tier lint..."
+if ! python3 "$SCRIPT_DIR/lint_motion_tier_partial.py"; then
+    echo "Motion tier lint failed."
+    exit 1
+fi
+
+# Static lint: a duration read out of animationCurves is the tier's BASE, so
+# the speed multiplier and the reduce-motion floor never reach it. Eight sites
+# and one hand-copied tier were doing that, invisibly - the sibling lint above
+# passes them, because they name tokens and pair with the right curve.
+echo "Running motion multiplier bypass lint..."
+if ! python3 "$SCRIPT_DIR/lint_motion_multiplier_bypass.py"; then
+    echo "Motion multiplier bypass lint failed."
+    exit 1
+fi
+
+# Static lint: one desktop-widget base class. The design system arrived with a
+# dead copy that nothing imported and that still carried a drag idiom d2ebb5aeb
+# removed - unreachable, three fixes behind, and the richer-looking of the two.
+echo "Running stale widget canvas lint..."
+if ! python3 "$SCRIPT_DIR/lint_no_stale_widget_canvas.py"; then
+    echo "Stale widget canvas lint failed."
+    exit 1
+fi
+
+# Static lint: a drag that reorders a list reorders it through layout_ops.js.
+# Four surfaces had written that out for themselves and two of the four
+# exchanged the two entries instead of moving one - the same list for a step of
+# one and a different list for anything longer, which is why nobody saw it.
+echo "Running reorder-arithmetic lint..."
+if ! python3 "$SCRIPT_DIR/lint_reorder_arithmetic.py"; then
+    echo "Reorder-arithmetic lint failed."
+    exit 1
+fi
+
+# Static lint: a bar widget that answers a primary click says so with the
+# pointer. The shared button types always did; every hand-written MouseArea in
+# the bar forgot separately.
+echo "Running clickable-cursor lint..."
+if ! python3 "$SCRIPT_DIR/lint_clickable_cursor.py"; then
+    echo "Clickable-cursor lint failed."
     exit 1
 fi
 
@@ -120,15 +188,60 @@ if ! python3 "$SCRIPT_DIR/lint_duplicate_imports.py"; then
     exit 1
 fi
 
+echo "Running qmldir registration lint..."
+if ! python3 "$SCRIPT_DIR/lint_qmldir_registration.py"; then
+    echo "qmldir registration lint failed."
+    exit 1
+fi
+
+echo "Running shader path lint..."
+if ! python3 "$SCRIPT_DIR/lint_shader_paths.py"; then
+    echo "Shader path lint failed."
+    exit 1
+fi
+
+echo "Running widget card tint lint..."
+if ! python3 "$SCRIPT_DIR/lint_widget_card_tint.py"; then
+    echo "Widget card tint lint failed."
+    exit 1
+fi
+
+echo "Running cava claim lint..."
+if ! python3 "$SCRIPT_DIR/lint_cava_claims.py"; then
+    echo "cava claim lint failed."
+    exit 1
+fi
+
 echo "Running process pattern lint..."
 if ! python3 "$SCRIPT_DIR/lint_self_matching_process_patterns.py"; then
     echo "Process pattern lint failed."
     exit 1
 fi
 
+# A harness that launches qs on the inherited session bus measures the
+# developer's session as much as this tree: the lock island reorder test read
+# the maintainer's browser as an MPRIS player, which hides the two slots it
+# drags, and failed on their machine while passing everywhere else.
+echo "Running runtime bus isolation lint..."
+if ! python3 "$SCRIPT_DIR/lint_runtime_bus_isolation.py"; then
+    echo "Runtime bus isolation lint failed."
+    exit 1
+fi
+
 echo "Running doc citation lint..."
 if ! python3 "$SCRIPT_DIR/lint_doc_citations.py"; then
     echo "Doc citation lint failed."
+    exit 1
+fi
+
+# The `Changelog:` PR-body receipt, testable without pushing. CHANGELOG.md's
+# [Unreleased] section was empty at two consecutive releases, so both rebuilt
+# it from the git log; changelog_receipt.py is the rule and this drives it over
+# in-memory PR fixtures. The CI half runs the same module rather than carrying
+# a second copy of its pattern.
+echo "Running changelog receipt tests..."
+if ! python3 "$SCRIPT_DIR/test_changelog_receipt.py"; then
+    echo "Changelog receipt tests failed."
     exit 1
 fi
 
@@ -245,6 +358,271 @@ if ! python3 "$SCRIPT_DIR/test_widget_resize_grip_runtime.py"; then
     exit 1
 fi
 
+echo "Running edit mode contract tests..."
+if ! python3 "$SCRIPT_DIR/test_edit_mode_contract.py"; then
+    echo "Edit mode contract tests failed."
+    exit 1
+fi
+
+# Edit Mode may change placement, order, span and presence - nothing else.
+# Settings is one click away FROM the mode, so a settings row duplicated into
+# the editor is a second call site for a config write (spec 9); the allowlist
+# in this lint is the spec and the lint is the receipt.
+echo "Running edit mode scope lint..."
+if ! python3 "$SCRIPT_DIR/lint_edit_mode_scope.py"; then
+    echo "Edit mode scope lint failed."
+    exit 1
+fi
+
+# Stage 9 of Edit Mode: the lock screen's preview must not be able to
+# authenticate. The one contract in the mode whose failure is a security bug
+# rather than a layout bug - every sweep in it asserts it still FOUND the
+# thing it swept, because a grep that matches nothing must fail, not pass.
+echo "Running lock preview contract tests..."
+if ! python3 "$SCRIPT_DIR/test_lock_preview_contract.py"; then
+    echo "Lock preview contract tests failed."
+    exit 1
+fi
+
+# Stage 9b: the lock islands' order - the schema's defaults pinned to the
+# resolver's, the islands rendered through the one resolver, and the reorder
+# committing through the shared arithmetic at literal paths.
+echo "Running lock islands contract tests..."
+if ! python3 "$SCRIPT_DIR/test_lock_islands_contract.py"; then
+    echo "Lock islands contract tests failed."
+    exit 1
+fi
+
+# Whether a drag still lands where the pointer put it once the desktop is drawn
+# at a scale. Nothing static can see that: the drag is hand-computed and the
+# transform is only SUPPOSED to cancel itself out. Brings its own weston.
+echo "Running edit mode runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_edit_mode_runtime.py"; then
+    echo "Edit mode runtime tests failed."
+    exit 1
+fi
+
+# What the mode LOOKS like: the card's corner, the lattice sitting under the
+# widgets, and the chrome being gone once the mode is left. Every one of those
+# reads as correct in the source and is only answerable in pixels. Brings its
+# own weston.
+echo "Running edit mode chrome tests..."
+if ! python3 "$SCRIPT_DIR/test_edit_mode_chrome.py"; then
+    echo "Edit mode chrome tests failed."
+    exit 1
+fi
+
+# The drawer's column distributes its height, and a chrome row that fills eats
+# the list: stage 5 shipped with the tab row at 831px of 936 and the list at 24,
+# which no source check can see.
+echo "Running edit mode drawer layout tests..."
+if ! python3 "$SCRIPT_DIR/test_edit_mode_drawer_layout.py"; then
+    echo "Edit mode drawer layout tests failed."
+    exit 1
+fi
+
+echo "Running dock position contract tests..."
+if ! python3 "$SCRIPT_DIR/test_dock_position_contract.py"; then
+    echo "Dock position contract tests failed."
+    exit 1
+fi
+
+echo "Running settings search shortcut tests..."
+if ! python3 "$SCRIPT_DIR/test_settings_search_shortcuts.py"; then
+    echo "Settings search shortcut tests failed."
+    exit 1
+fi
+
+echo "Running launcher result input observation check..."
+if ! python3 "$SCRIPT_DIR/test_launcher_result_inputs.py"; then
+    echo "Launcher result input observation check failed."
+    exit 1
+fi
+
+echo "Running settings page id tests..."
+if ! python3 "$SCRIPT_DIR/test_settings_page_ids.py"; then
+    echo "Settings page id tests failed."
+    exit 1
+fi
+
+# Stage 8 of Edit Mode: the bar and the dock edited in place. What it pins is
+# silent on screen - a suspension that touches `visible` destroys a layer
+# surface, and an affordance wired into one bar orientation and not the other
+# is invisible on a default screen.
+echo "Running bar/dock edit-mode contract tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_dock_edit_contract.py"; then
+    echo "Bar/dock edit-mode contract tests failed."
+    exit 1
+fi
+
+# The bar's in-place edit gesture: a drag along the bar reorders, a drag
+# across it does not, at both orientations - the axis-inert comparison only
+# real mouse events can see. Brings its own headless weston.
+echo "Running bar edit runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_edit_runtime.py"; then
+    echo "Bar edit runtime tests failed."
+    exit 1
+fi
+
+# Stage 9b: the lock islands' reorder, driven with real mouse events on the
+# real LockSurface with the preview context - the overlay's eater, the shared
+# gesture, move semantics, the storedOrder merge, and both cancel paths.
+# Brings its own headless weston.
+# A screen-sized Overlay surface with nothing in it still sits over every
+# fullscreen window, and an infinite animation keeps the compositor repainting
+# the whole output: together they cost a fullscreen game half its frames.
+echo "Running surface stand-down contract..."
+if ! python3 "$SCRIPT_DIR/test_surface_standdown_contract.py"; then
+    echo "Surface stand-down contract failed."
+    exit 1
+fi
+
+echo "Running infinite animation visibility lint..."
+if ! python3 "$SCRIPT_DIR/lint_infinite_animation_visibility.py"; then
+    echo "Infinite animation visibility lint failed."
+    exit 1
+fi
+
+# The Lockscreen tab is a filter on the desktop viewport, and the palette is one
+# of the things it filters: stage 9 switched every layer's source and left the
+# theme keyed on the session lock, so the tab drew the lock's wallpaper under
+# the desktop's colours.
+# Two widget layouts in one store: the lock's inherits the desktop's until the
+# first Lockscreen-tab move forks it. The arithmetic is tst_layout_surfaces
+# (qmltestrunner, below); this pins the writers, the store shape and presets.
+echo "Running layout surfaces contract..."
+if ! python3 "$SCRIPT_DIR/test_layout_surfaces_contract.py"; then
+    echo "Layout surfaces contract failed."
+    exit 1
+fi
+
+echo "Running lock look palette tests..."
+if ! python3 "$SCRIPT_DIR/test_lock_look_palette.py"; then
+    echo "Lock look palette tests failed."
+    exit 1
+fi
+
+echo "Running lock island reorder runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_lock_island_reorder_runtime.py"; then
+    echo "Lock island reorder runtime tests failed."
+    exit 1
+fi
+
+# A column of dock icons can lay out perfectly and still refuse to reorder,
+# because every slot centre shares an x - only real mouse events see that.
+# Brings its own headless weston.
+echo "Running dock edge runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_dock_edge_runtime.py"; then
+    echo "Dock edge runtime tests failed."
+    exit 1
+fi
+
+# Counts the qalc processes a typed query really starts, with a counting stub
+# named `qalc` first on PATH. A unit test can check the gate's predicate; only
+# a real shell can see how often the call site fires. Brings its own weston.
+echo "Running launcher qalc spawn runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_launcher_qalc_runtime.py"; then
+    echo "Launcher qalc spawn runtime tests failed."
+    exit 1
+fi
+
+# Writes and reads a real launch-history store, and ranks the machine's own
+# desktop entries through it: whether AppSearch consults AppUsage at all is
+# invisible to a pure-logic test. Brings its own headless weston.
+echo "Running app usage store runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_app_usage_runtime.py"; then
+    echo "App usage store runtime tests failed."
+    exit 1
+fi
+
+# Renders real cards and reads the pixels under them: the shadow is not
+# reachable from a source-text check. Brings its own headless weston.
+echo "Running widget card shadow tests..."
+if ! python3 "$SCRIPT_DIR/test_card_shadow.py"; then
+    echo "Widget card shadow tests failed."
+    exit 1
+fi
+
+# The card above is rendered on its own. This renders the widget that composes
+# one: calendar is content-sized, so a card that failed to resolve leaves a
+# zero-size widget rather than an error, and a `dragging` that never arrives
+# leaves a shadow that never lifts. Brings its own headless weston.
+# Enumerated, not globbed - which is why these three could exist, pass by hand
+# and be enforced by nothing. Added when a review counted the files run_tests.sh
+# names against the files on disk.
+echo "Running harness compositor-reach lint..."
+if ! python3 "$SCRIPT_DIR/lint_harness_compositor_reach.py"; then
+    echo "Harness compositor-reach lint failed."
+    exit 1
+fi
+
+# A harness that stopped checking still reports `failures: 0`, and its driver
+# still passes. Every verdict therefore states how many checks ran, and every
+# driver asserts that number as a literal it holds itself.
+echo "Running harness check-count lint..."
+if ! python3 "$SCRIPT_DIR/lint_harness_check_counts.py"; then
+    echo "Harness check-count lint failed."
+    exit 1
+fi
+
+echo "Running settings search index tests..."
+if ! python3 "$SCRIPT_DIR/test_settings_search_index.py"; then
+    echo "Settings search index tests failed."
+    exit 1
+fi
+
+echo "Running bar hover region tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_hover_region.py"; then
+    echo "Bar hover region tests failed."
+    exit 1
+fi
+
+# The two bars draw the same layout out of the same directory, and each used to
+# resolve a widget to a file on its own. Only the horizontal one ever learned
+# `plugin:`, so every plugin bar widget was an empty stub on a vertical bar.
+echo "Running bar widget parity tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_widget_parity.py"; then
+    echo "Bar widget parity tests failed."
+    exit 1
+fi
+
+# The bar widget catalogue has one home (BarWidgets.qml) and the settings page
+# reads it; a second copy in BarConfig is the drift the promotion removed.
+echo "Running bar widget catalogue tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_widgets_catalogue.py"; then
+    echo "Bar widget catalogue tests failed."
+    exit 1
+fi
+
+echo "Running cheatsheet width budget tests..."
+if ! python3 "$SCRIPT_DIR/test_cheatsheet_width_budget.py"; then
+    echo "Cheatsheet width budget tests failed."
+    exit 1
+fi
+
+echo "Running calendar card tests..."
+if ! python3 "$SCRIPT_DIR/test_calendar_card.py"; then
+    echo "Calendar card tests failed."
+    exit 1
+fi
+
+# The same measurement for the five widgets that are not cards, each scored
+# against a twin of itself with the elevation suppressed. Also weston-bound.
+echo "Running widget elevation tests..."
+if ! python3 "$SCRIPT_DIR/test_widget_elevation.py"; then
+    echo "Widget elevation tests failed."
+    exit 1
+fi
+
+# The grip harness above reads settled sizes on purpose, so it passes whether a
+# span change is animated or instant. This one samples the size mid-change,
+# which is the only way to tell a Behavior that ticks from one that never does.
+echo "Running widget resize motion runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_widget_resize_motion_runtime.py"; then
+    echo "Widget resize motion runtime tests failed."
+    exit 1
+fi
+
 # The source half is static. The runtime half pans a real WidgetCanvas under
 # real PluginWidgets and brings its own headless weston, so it needs no display
 # of its own - but it does need weston, and skips without it.
@@ -264,6 +642,13 @@ fi
 echo "Running widget group drag runtime tests..."
 if ! python3 "$SCRIPT_DIR/test_widget_group_drag_runtime.py"; then
     echo "Widget group drag runtime tests failed."
+    exit 1
+fi
+
+# Brings its own headless weston, like the interaction runtime tests above.
+echo "Running widget edge snap runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_widget_edge_snap_runtime.py"; then
+    echo "Widget edge snap runtime tests failed."
     exit 1
 fi
 
@@ -292,6 +677,14 @@ fi
 echo "Running notes surfaces runtime tests..."
 if ! python3 "$SCRIPT_DIR/test_notes_surfaces_runtime.py"; then
     echo "Notes surfaces runtime tests failed."
+    exit 1
+fi
+
+# Also brings its own weston, plus its own D-Bus session so the harness's
+# notification server is the one notify-send reaches rather than the caller's.
+echo "Running notification card list runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_notification_cards_runtime.py"; then
+    echo "Notification card list runtime tests failed."
     exit 1
 fi
 
@@ -334,6 +727,29 @@ fi
 echo "Running parallax migration runtime tests..."
 if ! python3 "$SCRIPT_DIR/test_parallax_migration_runtime.py"; then
     echo "Parallax migration runtime tests failed."
+    exit 1
+fi
+
+# One motion policy: that every tier still routes through it, and that the
+# reduce-motion floor stays a named state rather than the far end of a slider.
+echo "Running motion policy contract tests..."
+if ! python3 "$SCRIPT_DIR/test_motion_policy_contract.py"; then
+    echo "Motion policy contract tests failed."
+    exit 1
+fi
+
+# ...and the same thing read back off a real shell against a seeded config,
+# because the QML default and the adapter's merged answer are different
+# numbers and only the second one runs.
+echo "Running motion multiplier runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_motion_multiplier_runtime.py"; then
+    echo "Motion multiplier runtime tests failed."
+    exit 1
+fi
+
+echo "Running OSD indicator swap tests..."
+if ! python3 "$SCRIPT_DIR/test_osd_indicator_swap.py"; then
+    echo "OSD indicator swap tests failed."
     exit 1
 fi
 
@@ -406,6 +822,12 @@ fi
 echo "Running cursor theme apply tests..."
 if ! python3 "$SCRIPT_DIR/test_cursor_theme_apply.py"; then
     echo "Cursor theme apply tests failed."
+    exit 1
+fi
+
+echo "Running sound theme scanner tests..."
+if ! python3 "$SCRIPT_DIR/test_sound_theme_scan.py"; then
+    echo "Sound theme scanner tests failed."
     exit 1
 fi
 
@@ -548,6 +970,15 @@ if ! python3 "$SCRIPT_DIR/test_installer_file_sync.py"; then
     exit 1
 fi
 
+# get.sh resets the update checkout onto $REF, and that checkout is a repo the
+# user can commit in. Drives throwaway origin/DEST repos inside a tempdir, so
+# it can never reach the machine's real one.
+echo "Running get.sh local-work preservation tests..."
+if ! python3 "$SCRIPT_DIR/test_get_sh_preserves_local_work.py"; then
+    echo "get.sh local-work preservation tests failed."
+    exit 1
+fi
+
 echo "Running installer legacy migration tests..."
 if ! python3 "$SCRIPT_DIR/test_installer_legacy_migration.py"; then
     echo "installer legacy migration tests failed."
@@ -665,6 +1096,15 @@ if ! python3 "$SCRIPT_DIR/test_lyrics_widget_contract.py"; then
     exit 1
 fi
 
+# Re-runs tst_weather_forecast.qml under a far-east and a far-west timezone.
+# On a UTC runner - which is CI - a local date and a UTC one are the same
+# string, so the unit test cannot tell them apart on its own.
+echo "Running weather forecast contract tests..."
+if ! python3 "$SCRIPT_DIR/test_weather_forecast_contract.py"; then
+    echo "Weather forecast contract tests failed."
+    exit 1
+fi
+
 echo "Running currency service safety tests..."
 if ! python3 "$SCRIPT_DIR/test_currency_service_contract.py"; then
     echo "Currency service safety tests failed."
@@ -707,6 +1147,48 @@ if ! python3 "$SCRIPT_DIR/test_we_still.py"; then
     exit 1
 fi
 
+echo "Running clock depth cache tests..."
+if ! python3 "$SCRIPT_DIR/test_clock_depth_cache.py"; then
+    echo "Clock depth cache tests failed."
+    exit 1
+fi
+
+echo "Running subject mask refinement tests..."
+if ! python3 "$SCRIPT_DIR/test_subject_mask_refine.py"; then
+    echo "Subject mask refinement tests failed."
+    exit 1
+fi
+
+echo "Running clock depth model list tests..."
+if ! python3 "$SCRIPT_DIR/test_clock_depth_models.py"; then
+    echo "Clock depth model list tests failed."
+    exit 1
+fi
+
+echo "Running clock depth geometry lint..."
+if ! python3 "$SCRIPT_DIR/lint_clock_depth_geometry.py"; then
+    echo "Clock depth geometry lint failed."
+    exit 1
+fi
+
+echo "Running clock depth desktop selector contract tests..."
+if ! python3 "$SCRIPT_DIR/test_clock_depth_select_contract.py"; then
+    echo "Clock depth desktop selector contract tests failed."
+    exit 1
+fi
+
+echo "Running clock depth compositing tests..."
+if ! python3 "$SCRIPT_DIR/test_clock_depth_compositing.py"; then
+    echo "Clock depth compositing tests failed."
+    exit 1
+fi
+
+echo "Running clock depth no-op tests..."
+if ! python3 "$SCRIPT_DIR/test_clock_depth_noop.py"; then
+    echo "Clock depth no-op tests failed."
+    exit 1
+fi
+
 echo "Running greeter sync tests..."
 if ! python3 "$SCRIPT_DIR/test_greeter_sync.py"; then
     echo "Greeter sync tests failed."
@@ -716,6 +1198,12 @@ fi
 echo "Running drop shelf summon tests..."
 if ! python3 "$SCRIPT_DIR/test_dropshelf_summon.py"; then
     echo "Drop shelf summon tests failed."
+    exit 1
+fi
+
+echo "Running screensaver on-demand tests..."
+if ! python3 "$SCRIPT_DIR/test_screensaver_on_demand.py"; then
+    echo "Screensaver on-demand tests failed."
     exit 1
 fi
 

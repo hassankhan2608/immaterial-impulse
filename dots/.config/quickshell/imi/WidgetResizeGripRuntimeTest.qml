@@ -33,9 +33,11 @@ ShellRoot {
     id: harness
 
     property int failures: 0
+    property int checksRun: 0
     readonly property string testScreen: "RESIZE-TEST"
 
     function check(label, ok) {
+        harness.checksRun++;
         console.log(`[WidgetResizeGrip] ${label}: ${ok ? "ok" : "FAIL"}`);
         if (!ok)
             harness.failures++;
@@ -210,9 +212,16 @@ ShellRoot {
         harness.check(`${label}: the widget stays put`,
                       after.resizableX === harness.before.resizableX
                       && after.resizableY === harness.before.resizableY);
+        // Against the span REMEMBERED at the gesture's start, not a literal:
+        // the original hardcoded span 2 and was only ever called at 2x2, so
+        // the first caller at another span failed on a correct tree.
+        const spanCols = parseInt(harness.before.resizableSize[0]);
+        const spanRows = parseInt(harness.before.resizableSize[2]);
         harness.check(`${label}: the widget is back at its stored span`,
                       Math.round(resizableWidget.width)
-                          === Math.round(Appearance.sizes.widgetGridSpanX(2)));
+                          === Math.round(Appearance.sizes.widgetGridSpanX(spanCols))
+                      && Math.round(resizableWidget.height)
+                          === Math.round(Appearance.sizes.widgetGridSpanY(spanRows)));
     }
 
     // The control. A widget offering one span has no grip, so the same gesture
@@ -257,13 +266,13 @@ ShellRoot {
         // between those two spans.
         () => harness.remember(),
         () => harness.hoverGrip(resizableWidget),
-        () => harness.dragPending(-144, 0),
+        () => harness.dragPending(-150, 0),
         () => harness.scoreResize("shrink to 2x2", "2x2"),
 
         // ...and 2x2 -> 2x1, which only moves vertically.
         () => harness.remember(),
         () => harness.hoverGrip(resizableWidget),
-        () => harness.dragPending(0, -120),
+        () => harness.dragPending(0, -126),
         () => harness.scoreResize("shrink to 2x1", "2x1"),
 
         // Back out to the largest span, so the cancel below has somewhere to go.
@@ -272,9 +281,21 @@ ShellRoot {
         () => harness.dragPending(144, 120),
         () => harness.scoreResize("grow back to 3x2", "3x2"),
 
+        // The elastic model's discriminating case, and the exact inverse of
+        // the old semantics: a pull SHORT of the breakaway (60px) must not
+        // resize. It runs at 3x2 with an inward pull because a smaller span
+        // exists in that direction - probed at a wall, both semantics hold
+        // the span and the check proves nothing (measured, not guessed).
+        // Under nearest-span mapping a 40px drag stepped; under tension it
+        // builds bow and commits nothing.
         () => harness.remember(),
         () => harness.hoverGrip(resizableWidget),
-        () => harness.dragPending(-144, 0),
+        () => harness.dragPending(-40, 0),
+        () => harness.scoreCancelled("a pull short of the breakaway"),
+
+        () => harness.remember(),
+        () => harness.hoverGrip(resizableWidget),
+        () => harness.dragPending(-150, 0),
         () => harness.scoreResize("shrink to 2x2 again", "2x2"),
 
         // Escape mid-drag: the release that follows commits nothing and the
@@ -300,7 +321,7 @@ ShellRoot {
         // harness quietly stopped delivering events partway.
         () => { harness.remember(); PluginState.setOption("resize-probe", "positionLocked", false); },
         () => harness.hoverGrip(resizableWidget),
-        () => harness.dragPending(0, -120),
+        () => harness.dragPending(0, -126),
         () => harness.scoreResize("unlocked again", "2x1")
     ]
 
@@ -331,15 +352,22 @@ ShellRoot {
     // One step per tick: the grip only becomes visible once the hover has
     // animated its opacity off zero, so the hover and the press it enables
     // cannot share a frame.
+    //
+    // The tick outlasts the resize itself (Appearance's 500ms elementMove,
+    // which a commit and an Escape both take) because these checks read the
+    // widget's *settled* width. A shorter tick scores a frame the size
+    // Behavior is still travelling through, which is a working animation
+    // reading as a failed resize. Whether that motion happens at all is
+    // `WidgetResizeMotionRuntimeTest.qml`'s question, not this one's.
     Timer {
         id: runner
-        interval: 400
+        interval: 700
         repeat: true
         running: false
         onTriggered: {
             if (harness.stepIndex >= harness.steps.length) {
                 runner.running = false;
-                console.log(`[WidgetResizeGrip] failures: ${harness.failures}`);
+                console.log(`[WidgetResizeGrip] checks: ${harness.checksRun} failures: ${harness.failures}`);
                 Qt.exit(harness.failures === 0 ? 0 : 1);
                 return;
             }

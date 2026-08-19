@@ -263,6 +263,156 @@ the GPU")):
   ffmpeg's `-encoders` list advertises build capability, not working hardware — try encoders for
   real, in a ladder with a CPU floor.
 
+**ffmpeg's `tonemap` filter assumes a signal peak of 10× reference white (2030 nits) for PQ input,
+and that assumption is the difference between a recording that looks like the desktop and one that
+does not.** A desktop capture peaks around 235 nits — roughly 1.16× — so the converter was
+normalising the curve against a peak eight times too high and squeezing the whole image into the
+bottom eighth of it: SDR white came out of `tonemap-sdr.sh` at **136/255**, contrast collapsed with
+it, and every recording the user made was a region capture, which is the path that converts. The
+10× is a constant, not something derived from the file: `peak=10.0` reproduces the old output byte
+for byte. `scripts/videos/tonemap-sdr.sh` now measures the peak off the pixels (`signalstats` over
+keyframes only, downscaled first — bounded at 0.3s on a 5s 5120x1440 clip, and the result lands on
+the content's p99.99 rather than on one stray pixel) and passes it to every chain.
+fb9556757 ("fix(record): measure the tonemap's signal peak instead of assuming 10x").
+
+Four things around that are worth not re-deriving:
+
+- **gpu-screen-recorder stamps the *monitor's* EDID luminance into every recording** as
+  mastering-display and content-light-level metadata — on a 1015-nit panel every file claims
+  `MaxCLL 1015` whatever is on screen. This is a real defect and it is **not** what caused the
+  wash-out: the CPU `tonemap` filter never reads that metadata, and two fixtures tagged 250 and
+  1015 nits tonemap identically. It reaches only libplacebo, which does read it, which is why that
+  chain gets `src_max`. Correcting the file's metadata would fix nothing on the path that runs.
+  This is the same shape as the `playerctld` misdiagnosis under
+  [State propagation is reactive](#state-propagation-is-reactive-or-it-is-a-bug-waiting): a correct
+  observation about a real bug, that was not the bug in front of anyone.
+- **A peak *below* the signal's own values blacks the frame out**, it does not stretch it — measured
+  Y'=16 on a 100-nit clip given `peak=0.49`. So the measured peak is floored at 1.0, and a test for
+  that floor needs a two-sided band; the first version asserted only "not brighter than" and passed
+  on a black frame.
+- **The compositor is the only thing that converts this correctly, and the portal is how to reach
+  it.** grim and gsr's portal capture agree to 4.0/255 against each other, so either serves as the
+  reference for "what the desktop looks like"; the best ffmpeg chain scores 15.2. That gap is
+  Hyprland's own screencopy curve, which is not a linear-light inverse and cannot be matched by
+  `npl` alone — measured, the `npl` that reproduces white (134) and the one that minimises overall
+  error (203) are different numbers. Fullscreen recordings already take the portal. **Regions
+  cannot**: `-region` is rejected outright with `-w portal` ("option -region can only be used when
+  option '-w region' is used"), so the conversion is unavoidable there and its quality is capped.
+- **Scoring a colour conversion needs a static-pixel mask, not a screenshot pair.** A desktop moves
+  between two captures, and the drift swamps the effect being measured — the first pass here
+  "measured" a reference white of 204 nits that way and 134 once only pixels identical across
+  bracketing shots were compared. Bracket the recording with screenshots, keep pixels that match in
+  both *and* whose 3×3 neighbourhood is uniform (which kills subpixel edges), and report RMSE plus
+  what code 255 became.
+
+**A sound event is one `pw-play` on a path the shell resolved, and neither half of that sentence
+was true before.** `Audio.playSystemSound()` built
+`/usr/share/sounds/<theme>/stereo/<event>.oga` and the same with `.ogg`, spawned an `ffplay` at
+each, and let the wrong one fail silently. Measured against the six themes on this machine, that
+guess is wrong in four distinguishable ways at once, and none of them reaches a log: no theme ships
+both extensions for the same event, so the second spawn is *always* wasted (~50 ms, ~38 ms CPU,
+53 MiB peak, 165 shared objects mapped, to print `No such file or directory`); `oxygen` and
+`harmony2` are `.ogg`-only while the other four are `.oga`, so which of the two is the wasted one is
+a property of the theme; `Pop` declares `Directories=stereo/alert stereo/action stereo/notification`
+and keeps every file under those, so a hardcoded `stereo/` reached 0 of its 25 sounds and that theme
+was **entirely silent**; and with no `Inherits=` walk, `oxygen` — which ships neither `complete` nor
+`suspend-error` — lost the battery-charged chime and the suspend-failure alert even with
+`freedesktop` installed beside it. `~/.local/share/sounds` was never searched at all.
+
+Three things about the replacement generalise past sound.
+
+- **Playback stays a process spawn even though QtMultimedia works here.** Probed with `qml6`: it
+  decodes and plays a `.oga` fine. It also takes a bare QtQuick process from 65 MiB / 133 mapped
+  shared objects to **113 MiB / 238** and keeps it there for the life of the shell whether or not a
+  sound is ever played, writes a three-line ffmpeg `Input #0, ogg, from '<path>'` decode banner to
+  stderr on *every* play, and floods five multi-kilobyte `spaVisitChoice: parse error` lines from
+  PipeWire when the first player is constructed — all of it into the `log.log` this document tells
+  you to tail. A spawn is 6.3 ms of CPU, freed on exit, and is a command list a test can read. Prefer
+  the mechanism you can observe.
+- **`pw-play`, not `ffplay`, and the reason is dependency declaration rather than taste.** `pw-play`
+  ships in `pipewire-audio`, a hard dependency of the `pipewire-pulse` that `sdata/deps-info.md`
+  lists; `ffplay` comes from `ffmpeg`, which this repo installs only inside the Wallpaper Engine
+  build's dependency list and names nowhere as a shell dependency. It is also 7.4x cheaper (15
+  mapped libraries against 165). Before adding a `Process` command here, check `sdata/deps-info.md`
+  for the binary rather than for whether your machine happens to have it.
+- **The engine is three pieces so that the decisions are testable.** `scripts/sounds/
+  scan-sound-themes.py` reports what is on disk and judges nothing — it does not even filter by
+  extension, because "that file is not a sound" is a judgement and `ocean` ships
+  `power-unplug.oga.license` beside its sounds to catch anyone making it loosely.
+  `services/sound_theme.js` makes every decision and touches no disk. `services/SoundTheme.qml`
+  owns only the process lifetimes. That split is what lets `tests/tst_sound_theme.qml` cover the
+  `Inherits=` walk (breadth-first with a visited set, so a cycle terminates and a diamond is visited
+  once), the implicit fallback to the default theme, the per-theme subdirectory list, and the
+  `.disabled` marker — which stops the walk rather than falling through, since inheriting past it
+  plays a *wrong* sound rather than a missing one.
+
+`SoundTheme` is also a live instance of the "a singleton is constructed on first use" trap under
+[Runtime model](#runtime-model--read-this-before-assuming-anything-about-building-or-compiling): the
+only thing that reaches it is a `play()` call, so the theme scan has not *started* when the first
+sound is asked for. Measured with a `qs -p` probe — a `play()` from `Component.onCompleted` reports
+`ready=false pending=1`, and a moment later `ready=true pending=0` with one `pw-play` carrying the
+resolved path. It holds up to four events and flushes them from the scan's `onExited` rather than
+from a successful parse, so a scan that fails outright still clears the queue.
+8b31496c3 ("feat(sounds): a testable XDG sound-theme resolver"),
+cbd8e707e ("feat(sounds): scan the sound-theme roots into one catalogue"),
+a3a8f65cf ("fix(sounds): play one resolved file instead of two guessed ones").
+
+## The suite checkout, and why the updater cannot just reset it
+
+`get.sh` keeps the whole suite in `~/.local/share/immaterial-impulse/src` (`Directories.suiteSrc`),
+clones it once and re-uses it for every update — Settings > About > **Update Dots** spawns a kitty
+running the same script. That directory is a **normal git repository the user can work in**, and
+someone hacking on their own shell does exactly that, so the update path may not simply make it
+match `$REF`: `git checkout -f` + `git reset --hard FETCH_HEAD` destroy commits made there,
+uncommitted edits, and any untracked file the incoming tree carries a path for (`-f` overwrites
+those; untracked files it does *not* name, and stashes, both survive a reset untouched).
+
+It still resets — landing on `$REF` is the updater's whole job, and aborting on a dirty tree would
+tax every user who has no local work for the sake of the one who does. What it does first is move
+whatever those two commands would eat somewhere git can name it back: the old HEAD onto
+`imi-rescue/<short-sha>` (named for the commit, so re-running does not litter the checkout with one
+ref per update), and the at-risk working-tree paths into a stash.
+
+Three non-obvious pieces:
+
+- **In a `--depth 1` checkout, ancestry cannot answer "does this HEAD belong to the remote".** Both
+  HEAD and the incoming tip are grafted, so `merge-base --is-ancestor` walks nothing and says "not
+  an ancestor" for a checkout that is merely a few commits *behind* — indistinguishable from one
+  that is ahead. The script therefore records what it installed in `refs/imi/installed` and trusts
+  a HEAD equal to that marker; the ancestry test stays as the answer for the full-clone fallback.
+  A checkout predating the marker gets rescued conservatively, once.
+- **A stash needs a git identity, and a machine being installed for the first time often has
+  none** — git then refuses to write the stash commit. `get.sh` borrows one (`git var
+  GIT_COMMITTER_IDENT` is the probe) rather than losing the work. Any other stash failure aborts
+  the update, because proceeding *is* the data loss.
+- **Printing the rescue to the terminal is not telling the user.** `setup`'s whiptail menu paints
+  over the scrollback seconds later, in a terminal the shell spawned, so the same text is appended
+  to `rescued-local-work.log` beside the checkout and — when stdin is a tty — the script waits for
+  Enter before handing off.
+
+`tests/test_get_sh_preserves_local_work.py` drives all of it against throwaway origin/DEST repos in
+a tempdir; the clean-checkout case asserts the update stays *silent*, which is the half that keeps
+the fix from becoming a nuisance for everyone who has no local work.
+d5d2f69b0 ("fix(get.sh): rescue local work before resetting the update checkout").
+
+**A Python dependency is declared in `sdata/uv/requirements.in` and installed
+from `sdata/uv/requirements.txt`, and adding it to the first does nothing.**
+`install-python-packages` runs `uv pip install -r requirements.txt`, which is a
+compiled lock; the `.in` is the input a human edits and nothing at install time
+reads. `onnxruntime` was added to the `.in` when the subject-mask producer landed
+and the lock was never recompiled, so **every venv the installer has ever built
+lacks it** — and the only symptom is a raw `ModuleNotFoundError` surfacing in the
+depth picker at the moment the user presses a button, on a machine where that
+path has never once worked. It ran on the author's machine because it had been
+installed by hand. Recompile with the existing lock as preferences
+(`uv pip compile requirements.in -o requirements.txt` in that directory, with
+`requirements.txt` already present) rather than from scratch, or the diff for one
+package moves every pin in the file — and this venv exists precisely because a
+moving `numpy` is what breaks segmentation stacks (the design doc's own §1.1
+finding). A check that reads the `.in` is checking the wrong file and stays green
+for the whole life of the bug; `tests/test_clock_depth_cache.py` reads both now.
+(fix(install): put onnxruntime in the lock the installer actually installs.)
+
 ## Directory map
 
 ```
@@ -275,6 +425,13 @@ modules/common/             Shared, feature-agnostic building blocks
   Appearance.qml              Singleton: design tokens - colors (M3 color roles), font sizes,
                               rounding, spacing, border widths, animation curves/durations, sizes.
                               Every widget reads from here rather than hardcoding values.
+  motion_policy.js           The motion policy as arithmetic, beside interaction_motion.js and for
+                              the same reason - the DECISIONS are testable and the rendering is not.
+                              How a catalogued duration is scaled by the speed multiplier, where the
+                              reduce-motion floor is and who may reach it, and how a group of things
+                              arrives in sequence (visible rank, clamped ladder, step as a fraction
+                              of a tier). Pure: every input arrives as an argument, and Appearance
+                              is its only importer - see the design-language section
   Directories.qml            Singleton: XDG paths + shell-specific cache/state paths
   Icons.qml, Images.qml       Icon/image lookup helpers
   Persistent.qml              Helper for persisting fixed-schema values outside Config's JSON
@@ -289,6 +446,16 @@ modules/common/             Shared, feature-agnostic building blocks
                               per-plugin, per-monitor layout in raw plugin-state.json.
                               bundled/ is where every desktop widget the shell ships lives -
                               there are no built-in desktop widgets (see docs/PLUGINS.md).
+                              BarWidgets.qml is the bar's widget catalogue - the built-ins
+                              plus every installed plugin's bar widget - promoted out of
+                              BarConfig.qml so Settings > Bar and Edit Mode's bar stage read
+                              one list. Layouts store ids and nameFor(id) is the only
+                              resolution to a display name; the built-in names stay spelled
+                              as Translation.tr("...") literals because the translation
+                              extractor only sees that form and its clean pass strips what
+                              it cannot see. test_bar_widgets_catalogue.py reddens on a
+                              second copy growing back in BarConfig
+                              71daefe9 ("feat(bar): promote the bar widget catalogue to a BarWidgets singleton")
   widgets/                   Shared UI components: StyledText, StyledComboBox, StyledSlider,
                               StyledToolTip(+Content), RippleButton, MaterialSymbol, ResourceCard,
                               PopupToolTip, StyledPopup, GroupedList, ConfigSwitch/ConfigSpinBox/
@@ -310,9 +477,28 @@ modules/imi/                 The "imi" (Immaterial Impulse) panel family - one d
   screenCorners/              Decorative fake screen-rounding + corner hover/click zones that open
                               the sidebars
   background/                 Desktop background + the canvas the draggable desktop widgets sit on.
+                              ClockDepthCutout.qml is the wallpaper's subject cut out by its mask -
+                              the ONE place the mask's registration is computed, drawn by the depth
+                              layer, by the picker that shows per-wallpaper state, and by the
+                              desktop selector that authors it (see the clock-depth notes below).
                               The widgets themselves are all bundled plugins now (see
                               modules/common/plugins/bundled/); background/widgets/ holds only
                               AbstractBackgroundWidget.qml, which is the plugin host's base class.
+  clockDepthSelect/           Picking that subject ON the desktop: a transparent, screen-sized
+                              Overlay surface per output that draws the candidate cutout into the
+                              box Background publishes, over the live widgets, and turns a click
+                              into a MobileSAM prompt. It redraws neither the wallpaper nor the
+                              widgets - both are already on screen, which is what makes the pixels
+                              clicked the pixels the depth layer will mask
+  editMode/                   Edit Mode's CHROME only - the toolbar above the shrunk desktop
+                              and the tab bar below it, on one full-screen Overlay surface per
+                              output (quickshell:editMode) whose mask is those two rects and
+                              nothing else, so every other pixel falls through to the desktop
+                              being edited. The desktop itself is not here: it stays on the
+                              background surface, which is what the mode transforms.
+                              EditModeInsets.qml is the one derivation of what the bar and
+                              the dock occupy - both surfaces read it, and nothing else in
+                              the mode may work out where either panel is
   overview/                   Workspace/window overview (like GNOME Activities)
   notificationPopup/          Desktop notification popups
   settings/                   The in-shell settings UI (pages/ = one file per settings category)
@@ -320,7 +506,15 @@ modules/imi/                 The "imi" (Immaterial Impulse) panel family - one d
   sessionScreen/, onScreenKeyboard/, wallpaperSelector/, verticalBar/, desktopMenu/
 
 services/                  Singletons wrapping external state/processes - one per concern:
-  Audio.qml                  PipeWire default sink/source wrapper (Quickshell.Services.Pipewire)
+  Audio.qml                  PipeWire default sink/source wrapper (Quickshell.Services.Pipewire).
+                              Devices and volume only - it does not play sounds
+  SoundTheme.qml             The shell's sound events, as an XDG sound-theme engine. Three pieces
+                              on purpose: scripts/sounds/scan-sound-themes.py reports what is on
+                              disk and decides nothing, services/sound_theme.js decides everything
+                              and touches no disk (event name -> file, the Inherits= walk, the
+                              subdirectory and extension rules, the .disabled marker), and this
+                              singleton owns the process lifetimes. Playback is a spawned
+                              `pw-play` - see "External binaries the shell drives"
   ResourceUsage.qml           Polls /proc/meminfo, /proc/stat, df, nvidia-smi on a timer
   HyprlandData.qml            Polls `hyprctl clients/monitors/layers/workspaces -j` on Hyprland IPC
                               events - the source of truth for "what does hyprctl currently see",
@@ -342,6 +536,13 @@ services/                  Singletons wrapping external state/processes - one pe
                               flatpak): without Prism the script never runs, `available` stays
                               false, and the '%' prefix plus its settings row disappear. Launches
                               by instance FOLDER name, which is not the display name
+  AppUsage.qml                 Launch history for the launcher's frecency ranking, in
+                              Directories.appUsagePath. The arithmetic is services/frecency.js
+                              (five time-window buckets over a bounded per-app timestamp list);
+                              this owns the file, the atomic write and the degradation. Keyed on
+                              the DESKTOP-ENTRY id, which is not services/DockLaunchTracker.qml's
+                              Wayland app_id - the two stores stay separate, and the dock's launch
+                              buttons record here through the desktop entry they already hold
   Notifications.qml            org.freedesktop.Notifications server + notification history
   Notes.qml                    The note store: a JSON array in Directories.notesPath. Sole owner -
                               the bundled `notes` desktop plugin (one instance per monitor) and the
@@ -366,13 +567,47 @@ services/                  Singletons wrapping external state/processes - one pe
                               builds every Material variant from it. Cached against the wallpaper
                               and the dark/light mode, so refresh() is free while those hold and
                               nothing recomputes while no picker is on screen
+  ClockDepth.qml               What the subject-mask cache holds for the wallpaper on screen, for
+                              the desktop clock's depth mode. Asks
+                              scripts/background/subject_mask.py - the shell never computes a cache
+                              key of its own - and queries nothing at all until either
+                              background.clockDepth.enable, the picker, or the desktop selector is
+                              open. `run` is reached ONLY from the wallpaper selector's picker and
+                              `select` ONLY from the desktop selector; nothing reactive can start
+                              segmentation. It also holds the prompted model's clicks for the
+                              wallpaper on screen, restored from the cache once per wallpaper
+                              rather than on every status, and `selectable` - whether the desktop
+                              is currently showing the still image it is asking about, which is
+                              the precondition both of those surfaces gate the gesture on
+  MprisController.qml         The one answer to "which player is the media UI showing". It filters
+                              the bus list (proxies always, duplicates by setting) through
+                              MprisSelection.js - a .pragma library kept pure so the rules are
+                              reachable from tests - resolves bar.media.preferredPlayer, and
+                              publishes activePlayer / meaningfulPlayers / playerOptions. The bar,
+                              the media popup, the right sidebar and the lock screen read those
+                              rather than each resolving the setting again
+                              (25329ade9 ("feat(mpris): resolve the preferred player once, against a stable bus id"))
   Brightness.qml, Battery.qml, Hyprsunset.qml, Network.qml, BluetoothStatus.qml, TrayService.qml,
-  MprisController.qml, Weather.qml, Docker.qml, ... (one per integration)
+  Weather.qml, Docker.qml, ... (one per integration)
 
 panelFamilies/              PanelLoader.qml (thin LazyLoader) + ImmaterialImpulseFamily.qml (the
                             actual list of panels for the "imi" family)
 
 scripts/                   Standalone helper scripts (Python/bash) invoked via Process/Quickshell.execDetached
+  background/subject_mask.py  Segments a wallpaper's subject through ONNX Runtime and owns the mask
+                              cache in ${Directories.cache}/clock-depth. Two kinds of model: the
+                              salient detectors (isnet-anime, isnet-general-use) answer the PICTURE
+                              and are asked with `run` (~1.3-4.5s, ~1GB RSS); mobile-sam answers a
+                              POINT and is asked with `select --point x,y[,label]` (~1.6s for the
+                              first click, ~0.3s for every one after, because the image embedding
+                              is cached at the key). It owns the CACHE KEY too - path/mtime/size -
+                              and the shell never computes one, so an in-place wallpaper edit
+                              invalidates its mask, its opt-out, its candidates and its embedding
+                              together. It also reports the model list, so the picker holds no copy
+                              of it. `status` and `sweep` are stdlib-only and load no model - a
+                              prompted mask's clicks live in a PNG text chunk it parses by hand for
+                              exactly that reason; `run` and `select` need the uv venv
+                              (subject-mask-venv.sh)
 translations/              i18n string tables (Translation.tr(...) singleton)
 assets/                    Static images/fonts bundled with the shell
 ```
@@ -498,6 +733,24 @@ Consequences for making changes:
 currently open, is the bar in autoHide-triggered-show state, etc.) - don't add ephemeral UI state to
 `Config`, and don't add persisted settings to `GlobalStates`.
 
+**Nothing addresses a settings page by its name, because every name in the catalogue is a
+`Translation.tr(...)` call.** `SettingsContent.qml`'s `pages` list gives each page a `name` (what the
+sidebar draws) *and* a stable untranslated `id` (what a link carries).
+`GlobalStates.settingsPage` — written by the desktop menu's two rows and by every settings hit in the
+launcher, in the form `"<id>"` or `"<id>:<search term>"` — is resolved against `id` alone. Resolving
+it against the display name, which is how it shipped, meant every deep link in the shell stopped
+working the moment the user changed language, and stopped **silently**: `findIndex` returns -1, the
+handler clears the request regardless, and the window opens on whichever page was last shown. The
+same trap is why an *index* is not the alternative — a hardcoded one went stale the day a page was
+inserted. Search is pinned the other way on purpose: `pageMatches()`, `navigateFirstMatch()` and the
+launcher's own filter all compare the query against the translated `name`, because that is the text
+the user is reading when they type it. `tests/test_settings_page_ids.py` fails the suite on a page
+declared without an id, on an id that goes through `Translation.tr`, on either half of the resolver
+reading `name`, and on any `GlobalStates.settingsPage` write in the tree whose value is not a
+declared id — the realistic regression is a fifteenth page or a third deep link copied from whatever
+sits beside it, not someone rewriting the resolver.
+1c674c8f5 ("fix(settings): address a settings deep link by page id, not by its label").
+
 ## Hyprland integration
 
 **Hyprland only.** `README.md`'s "Compositor support" section is policy, not aspiration: there are no
@@ -539,6 +792,24 @@ This is purely a manual-testing/CLI concern - IPC events, layer-shell behavior, 
 QML code touches are unaffected by this; only raw `hyprctl dispatch <dispatcher> <args>` calls typed
 by a human/agent need the Lua-call form on this particular machine.
 
+**`hyprctl` picks its target instance from `HYPRLAND_INSTANCE_SIGNATURE` and from nothing else — so
+a `hyprctl` inside a nested-compositor harness talks to the *user's* session.** `WAYLAND_DISPLAY` is
+irrelevant to it: measured, `WAYLAND_DISPLAY=wayland-99 hyprctl monitors` answers correctly for the
+real output, a bogus signature fails with `Couldn't connect to
+/run/user/1000/hypr/<sig>/.socket.sock`, and an unset one refuses outright with
+`HYPRLAND_INSTANCE_SIGNATURE not set!`. The signature is exported into every process in the session,
+and redirecting `XDG_*` or `WAYLAND_DISPLAY` does not shadow it.
+`tests/run_notification_blur_probe.sh` is the case that matters: it starts a nested Hyprland,
+exports four `XDG_*` vars and the new `WAYLAND_DISPLAY`, then ends with a bare
+`hyprctl dispatch exit` — which is aimed at the outer session. Nothing under `tests/` sets
+`HYPRLAND_INSTANCE_SIGNATURE` today. Anything driving a nested compositor must export the nested
+signature (or pass `hyprctl -i <sig>`) before its first `hyprctl`, and preferably give the nested
+instance its own `XDG_RUNTIME_DIR` as `tests/run_weather_probe.sh` already does for weston. This is
+the same family as the `pgrep -f` trap above — a process-targeting command that silently resolves to
+the caller's own session. See
+`docs/superpowers/specs/2026-08-14-integration-testing-design.md` §2.1.
+23b1e581f ("docs(specs): what an integration layer adds over the harnesses we have").
+
 **Rules registered at runtime through `hyprctl eval` do not survive, so don't build on them.**
 `hyprctl reload` resets the Lua state - every global and every rule registered from it is gone.
 The shell reapplies the Hyprland theme during its own startup, which reloads, so anything a QML
@@ -553,6 +824,28 @@ yourself.
 whose `minimumSize` equals its `maximumSize` is floated, sized and centred by Hyprland on its own,
 purely from the fixed size hints. Prefer that over a runtime rule. It also keeps the window title
 free to stay translated, since nothing is matching on it.
+
+**A Hyprland option the shell sets is reported back as set whether or not it did anything, and the
+complaint is on the screen rather than in the log.** `decoration:screen_shader` is the measured
+case, against 0.56.2 in a nested instance. `CHyprOpenGLImpl::applyScreenShader` calls
+`m_finalScreenShader->destroy()` **before** it checks the path, so a path naming nothing turns the
+previous shader off; it then queues `Screen shader parser: Failed to check screen shader path: No
+such file or directory` into `errorOverlay/Overlay.cpp`, which paints a red-bordered banner across
+the focused monitor with no timeout, clearing only when a later reload supplies a shader that
+loads. Nothing reaches Hyprland's log, so the `tail | grep -iE 'error|WARN scene'` loop in
+CONTRIBUTING.md sees a clean run. The compositor does not crash.
+
+Two consequences generalise past shaders. **`hyprctl getoption` answers with the value Hyprland was
+handed, not with the value that took effect** - the bogus path came back with `set: true` - so a
+service deriving its own state from `getoption` (`HyprlandConfigOption`, and every quick toggle
+built on it) will report a feature as on while it is doing nothing. And **an option written into
+`shellOverrides/main.lua` is applied on Hyprland's own reload**, i.e. after the shell has stopped
+watching, so there is no return path for a failure even in principle. Where a value the shell writes
+names a file, the file's existence is checkable statically and should be checked there:
+`tests/lint_shader_paths.py` resolves every static shader path declared in QML against disk, which
+is what would have caught the anti-flashbang weak shader that was named for the whole life of its
+service and never existed. dea752d04 ("fix(antiFlashbang): give the weak rung the shader it has
+always named"), b50018e4a ("test(lint): fail on a QML file naming a shader that is not on disk").
 
 **hyprsunset has no state query at all, so the shell owns night light's on/off state.** Checked
 against 0.4.0, not assumed: `hyprctl hyprsunset --help` lists exactly three requests -
@@ -735,6 +1028,28 @@ Two non-obvious behaviors have bitten this codebase before and are worth knowing
   publish that takes effect is the settle timer's - which is a guaranteed ~96ms of surface-up-and-
   unblurred on every open. Publish immediately *and* keep the timer. Motivated by 4a1b4f850
   ("fix(blur): stop the compositor frosting drop shadows").
+- **A blur region built from a *list* of items must observe those items, and a model count is not
+  observing them.** `WindowBlurRegion.regionItems` takes the rects a panel paints when the set is
+  not known in advance, and the notification stack is its only caller. A `Region` whose item has
+  been destroyed reports itself `empty()`, so a stale list is not a slightly-wrong blur - it is *no*
+  blur, with the region still published, nothing in any log, and QML that reads correctly.
+  `NotificationListView` refreshed its card set from `onCountChanged`, and the popup's ordinary life
+  defeats that twice over: a notification times out, the window hides, another arrives from the same
+  app, and the app-name list ends the cycle exactly where it started - so `count` reads 1 throughout
+  while the delegate is torn down and rebuilt. `count`'s signal is raised from the view's layout
+  pass as well, which does not run while the surface is down (`visible: false` destroys a layer
+  surface), so even the 1 -> 0 -> 1 in between is never announced. Measured against a real popup:
+  `countChanged` fired exactly *once* per shell session, so every notification after the first had
+  been unblurred for the whole life of the feature. Observe `contentItem`'s children, which is the
+  thing that actually changes; see
+  [State propagation is reactive](#state-propagation-is-reactive-or-it-is-a-bug-waiting) for the
+  general rule. Both halves of seeing it are worth reusing: `tests/run_notification_blur_probe.sh`
+  photographs the frost under a *nested Hyprland on its own bus* - `qmltestrunner` cannot construct
+  a `Region` and weston implements no ext-background-effect, so nothing else can - and it shoots
+  three popups because the first one is the one that works.
+  `tests/test_notification_cards_runtime.py` pins the card set itself, which headless weston can
+  reach.
+  bd69d191f ("fix(notifications): publish the cards that are on screen, not the first popup's").
 - **A window's `color` is not just a colour: an alpha of 255 permanently costs that surface its
   blur.** `QQuickWindow::setColor()` rewrites the window's *requested surface format* whenever the
   new colour's alpha crosses the 255 boundary - `fmt.setAlphaBufferSize(alpha < 255 ? 8 : -1)` then
@@ -838,6 +1153,32 @@ Two non-obvious behaviors have bitten this codebase before and are worth knowing
   `GlobalStates.settingsHeldForRegionSelector` so Settings can remain visible in screenshots without
   racing surface creation. Because clearing the grab also empties its dismissable list, Settings
   must re-register itself when selection ends even though its own `visible` property never changed.
+- **`WlrKeyboardFocus.Exclusive` is a session-wide grab, so a per-monitor surface must not take
+  it.** A fullscreen overlay covering every screen can hold the keyboard — that is what makes the
+  idle screensaver wake on any key without leaking the keystroke into whatever was focused. The
+  same surface on *one* monitor cannot: the grab is not scoped to that output, so it swallows what
+  the user types on the screen they moved to, and a saver that dismisses on a keypress therefore
+  dismisses itself on their first letter. `modules/imi/screensaver/Screensaver.qml` picks
+  `Exclusive` for the all-screens idle path and `None` for a deliberately blanked monitor. The
+  pointer half of the same rule: getting back to work means moving the pointer *off* that monitor,
+  which is motion across the surface being escaped, so a deliberate blank ignores motion and takes
+  a click. afb1c7ea5 ("feat(screensaver): blank one named monitor, not every screen").
+- **An idle inhibitor belongs to the *deliberate* half of a feature, never to the idle half.** The
+  screensaver has two ways in — hypridle's 240s listener (`ipc call screensaver show`) and a
+  keybind — and only the second holds `services/Idle.qml`'s inhibitor. Holding it on the idle path
+  would mean a user who walks away is blanked at 240s and then never reaches lock (300s), DPMS off
+  (600s) or suspend (900s): the ladder hypridle exists for, disabled by the thing that fires first
+  in it. That is why the two paths are separate state (`GlobalStates.screensaverActive` vs
+  `screensaverScreens`) rather than one flag with a mode. Two things generalise. The hold is a
+  third bit ORed into the one existing `IdleInhibitor` rather than a second one — that window's own
+  comment records a 0x0 surface mapping unreliably enough that Hyprland's ext-idle-notify ignored
+  the inhibitor, and a second copy would re-learn it while giving "is the system awake" two answers
+  to disagree about. And it is **derived** from the blanked-screen list rather than stored as a
+  flag someone sets and clears, so it has no release path to forget: every way the saver comes down
+  empties the list, and emptying the list *is* the release. If the shell dies while a screen is
+  blanked, nothing leaks — a `zwp_idle_inhibitor` is destroyed with the `wl_surface` it was created
+  on, and a client's surfaces die with its Wayland connection. 83544dedb ("feat(idle): a
+  deliberately blanked monitor holds the keep-awake").
 
 ## State propagation is reactive, or it is a bug waiting
 
@@ -942,6 +1283,43 @@ and interpolates when upsampling, and returns zeros at the requested length for 
 so a consumer's bar model keeps its shape while cava is not running.
 bcf5f9ca1 ("refactor(cava): move every band consumer onto the one service").
 
+**A side effect inside a binding runs once per re-evaluation, and a binding that reads what the
+side effect produces re-evaluates because of it.** `services/LauncherSearch.qml` spawned `qalc`
+from inside the `results` binding, which re-evaluates on every keystroke — and again when
+`mathResult` lands, because the same binding reads the property the spawned process writes. So
+every non-prefixed query started a calculator, repeatedly, to be told that an application name is
+not a number: measured with a counting stub first on `PATH`, typing "firefox" started **8**
+processes and "2+2\*10" started **7**, the extra one in each being the feedback re-fire. The file
+search next to it already knew better and says so in a comment — the scan is kicked from
+`onQueryChanged` precisely because calling it from the binding would loop. The general rule is
+that anything a results binding *starts* belongs in the handler for the input that justifies
+starting it, and the decision has to be answerable from that input alone (`services/math_query.js`,
+which inspects characters and deliberately does not `eval()` the query to find out whether it is
+arithmetic). ("feat(search): decide whether a query is arithmetic before spawning qalc").
+
+**A property that a change handler reads must not be a binding on the same source the handler
+hangs off.** Nothing orders a `onXChanged` handler against the re-evaluation of a
+`readonly property bool` derived from `x`, so the handler sees the *previous* value. A gate
+written as `readonly property bool queryIsMath: isMathQuery(query, ...)` and read from
+`onQueryChanged` was one keystroke stale: the first character of every expression was dropped and
+"2+2\*10" reached qalc as "2+", "2+2", … It reads as a debounce, not as a bug. Call the predicate
+where it is needed instead of binding it. ("feat(search): decide whether a query is arithmetic
+before spawning qalc").
+
+**Turning a binding into a `Qt.callLater` rebuild buys coalescing and costs the dependency
+tracking, so the tracking has to be written out and checked.** `LauncherSearch.results` is a plain
+property now — every row is a `createObject`, and as a binding the whole list was rebuilt once per
+input change rather than once per user action (a keystroke, the desktop-entry registry populating,
+fourteen asynchronous settings-keyword greps, an fd scan and a qalc answer were five rebuilds
+around one edit). What replaces QML's own tracking is `resultInputs`, a binding that touches every
+value the builder reads and schedules the rebuild when any of them moves; be generous with it,
+because firing is one array of references. Under-observation here is silent — the list simply
+stops refreshing when that source answers, which for the asynchronous ones is the entire reason to
+observe them — so `tests/test_launcher_result_inputs.py` fails the suite on a singleton the builder
+reads that the tracker does not name, or forces it into a reviewed exemption. Only values read
+while *building* belong there; what a row's `execute` closure reads is read when the user picks the
+row. ("perf(search): rebuild the launcher results once per turn, not per input change").
+
 ## Dynamic/data-driven QML gotchas
 
 Relevant to anything that instantiates QML components from external data (JSON manifests, config
@@ -1000,6 +1378,25 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   timer and now does for its slot watcher. This surfaced when `StyledPopup` stopped being a
   `LazyLoader`; probed with `qml6` rather than reasoned about.
   (b22a923a5 ("refactor(bar): delete the per-popup layer surface").)
+- **QtQml replaces `Date`'s locale methods with its own overloads, so ECMAScript's
+  options-object form is not an error here - it is a different, plausible answer.**
+  `toLocaleDateString`, `toLocaleTimeString` and `toLocaleString` take **(locale, format)** in
+  QML, where `locale` is a `Qt.locale()` and `format` is a `Locale.*Format` enum or a Qt format
+  string. Handed a browser's `date.toLocaleDateString(undefined, { weekday: "short" })` the
+  engine does not recognise the object, falls through to the locale's short **date** format, and
+  returns `"8/14/26"` where the call plainly asks for `"Fri"` - no warning, no exception, no log
+  line. Use `date.toLocaleDateString(Qt.locale(), "ddd")`. Two things generalise past the one
+  call. The test that should have caught it compared the function against **the same expression
+  the function ran**, so it asserted only that the function agreed with itself and passed on the
+  bug - the sibling of the UTC-runner problem pinned three functions up the same file, with the
+  tautology in the assertion rather than in the environment. Check the *shape* of a localized
+  answer (a weekday name carries no digits, three consecutive days are three different names,
+  seven days on is the same name again) rather than an expected string no locale is obliged to
+  produce. And a `.pragma library` is held free of `Qt` by
+  `tests/test_weather_forecast_contract.py`, so the locale is passed in by the caller, which has
+  an engine context. Found by rendering the widget and reading the labels; the whole of it is
+  invisible from the source. fix(weather): a forecast card is named for its weekday, not for its
+  date.
 - **`FileView` (`Quickshell.Io`) loads asynchronously - `.text()` right after calling `.reload()`
   is not guaranteed to return the new content.** The correct pattern (used throughout this codebase
   - `MaterialSymbolsSearch.qml`, `Notifications.qml`, `Emojis.qml`, `Profile.qml`) is to read
@@ -1102,6 +1499,20 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   *temporarily* inert (`enabledWhen`), which is a different thing.
   a03f1b266 ("feat(plugins): show a widget's own options above the host's"),
   008e51dc9 ("feat(plugins): offer a resizable widget's span as a settings row").
+  **The host's booleans in that section are a toggle bar, not rows — a new one is a
+  `behaviourRows` entry and nothing else.** Six `ConfigSwitch`es spent 212px of the card on six
+  bits; a `FlowButtonGroup` of `IconToolbarButton`s spends 72px, so adding a seventh host boolean
+  as a row would be both inconsistent and the expensive spelling. Two things about the bar do not
+  generalise from a row and are checked: a glyph cannot label itself, so every toggle carries a
+  `label` and the caption under the bar shows the hovered one — and, off-hover, which of them are
+  on, which is the half of a switch row's label that selected-state colour does not replace; and
+  the hovered label is cleared only by the toggle that wrote it, because a pointer crossing
+  between two toggles delivers the leave and the enter in an order nothing here controls. The
+  toggle is composed from `IconToolbarButton` precisely so the cursor, the toggled container
+  states and the *single* application of the interaction motion come from the control rather than
+  being re-earned (see the composites rules under
+  [Dynamic/data-driven QML gotchas](#dynamicdata-driven-qml-gotchas)).
+  b89908fef ("feat(plugins): draw the widget behaviour section as a toggle bar").
 - **A desktop widget opts out of the parallax pan by cancelling it, not by being offset less.**
   The widget canvas is one item whose `x`/`y` *are* the widget parallax (`Background.qml`), so
   every widget on it travels because its parent does. `followParallax: false` therefore adds
@@ -1140,6 +1551,365 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   panned by assignment, i.e. it switched off both halves of the interaction it existed to score,
   and stayed green for the entire life of the bug. b710ef731 ("fix(plugins): stop the position
   Behavior swallowing the parallax cancellation").
+- **The mirror image of that rule: a binding that re-evaluates every frame is not a target
+  that moves every frame, and a `Behavior` is fine on the second.** A desktop widget's span
+  resize animates its `width`/`height` even though the grip re-previews on every mouse move
+  and hands `previewGridSize` a fresh object each time — because the *value* the binding
+  produces changes only at a span boundary, and Qt does not restart a running Behavior for a
+  write of the value it is already animating to (`QQuickBehavior::write` returns early when
+  the target value is unchanged). So the test is what the property is written *with*, not how
+  often the binding runs, and the way to find out is to sample the property mid-change rather
+  than to reason about it. Two things follow for anything animating a size here. Nothing may
+  clamp, measure or persist against the *animating* value: the position clamp runs when the
+  span commits, while the widget is still the size it is leaving, and nothing runs again once
+  the animation lands — so `AbstractBackgroundWidget.clampWidth`/`clampHeight` exist for a
+  subclass to point at the size it is heading for (a property rather than an argument on
+  `clampX`, because a call site that forgets to pass one is silent). And a settled-size test
+  passes identically on an animation and on the snap it replaced, which is why
+  `WidgetResizeMotionRuntimeTest.qml` samples the width 80ms in and fails if it is already at
+  the destination — the sibling grip harness scores only settled sizes and stayed green under
+  every mutation of the motion. fa1e2a8b5 ("feat(plugins): animate a resizable widget's size
+  between its offered spans"), 4e33a332a ("test(widgets): score a span change as in flight, not
+  as a snap").
+- **A sweep over ordered PAIRS is not a walk, and a trail's floor is in the trail's own units.**
+  Two ways a span-motion harness reports confidently about a transition it never ran.
+  `WeatherTreeMotionProbe` drives a list of `[from, to]` pairs but only ever committed `to` — so
+  `3x2 -> 2x1`, which follows `3x2 -> 3x1` in the list, started from 3x1: the sweep measured
+  `3x1 -> 2x1`, printed a green trail for every element under the `3x2->2x1` label, filed its
+  settled shot as `3x2_settled.png`, and the one pair whose card shrinks in **both** axes was
+  never exercised at all. A pair the sweep names has to be a pair the sweep runs — reposition to
+  `from` first, on its own settle. Separately, the "did this move" floor was `0.5` for every
+  trail, which is right for a position, a size or a font and nonsense for an opacity: the weather
+  card's sun arc leaves 1x1 by fading `0.32 -> 0`, a complete disappearance and a change of
+  `0.32`, so the pixel floor filed the one trail that had to move as `static`. Note the failure
+  direction on both — neither reddens, both go *quiet*, and a probe that says nothing about an
+  element reads exactly like a probe with nothing to say about it.
+  test(weather): the probe runs the pairs it names,
+  test(weather): the probe scores the arc's fade, its travel and an unknown day.
+- **A change handler that writes the state its own binding reads is a binding loop, and Qt
+  drops the re-evaluation rather than erroring where you are looking.** `PluginWidget` repairs a
+  resized widget's stored position from `onStoredGridSpanChanged`, and that repair calls
+  `PluginState.setPosition` — which is the state `storedGridSize` is derived from, so the write
+  lands inside that binding's own evaluation and the log says `Binding loop detected for
+  property "storedGridSize"` at the *call site's* file. A zero-interval `Timer` moves the write
+  one turn of the event loop out of the evaluation and costs nothing, since what the widget is
+  drawn at was already clamped by a different path. fa1e2a8b5 ("feat(plugins): animate a
+  resizable widget's size between its offered spans").
+- **A third failure in the same family: a `Behavior` *retriggered* every frame does tick,
+  forever, and nothing on screen shows you.** Where the parallax bug was a frozen property, this one is a
+  property that never rests. `CavaService` gated cava on `MprisController.activePlayer !== null`
+  — but a *paused* player is still an active player, and cava visualises whatever is **audible**
+  rather than the tracked player's stream. So three paused players left cava decoding a
+  fullscreen game's sound, each spectrum retriggered the bar visualiser's twenty `Behavior on
+  height` animations, and those tick at the display's refresh rate. Measured on a 240 Hz output:
+  the bar's render thread ran at **237 fps behind a fullscreen game**, and `SIGSTOP`ping cava
+  took it to 33. The generalisation is about gates, not about cava: **"a thing exists" and "the
+  thing is doing something" are different predicates, and animation cost follows the second.**
+  a57cd00b2 ("fix(cava): gate the spectrum on playback, not on a player existing").
+- **A surface the compositor *covers* is not a surface QML considers hidden — `visible` stays
+  true and no guard written against it will fire.** `Bar.qml` picks `WlrLayer.Top` precisely so
+  fullscreen windows bury the bar (Overlay only while a special workspace sits on top). That is
+  occlusion, and it happens entirely below Qt: the surface stays mapped, the item tree is
+  untouched, and the bar happily animates for nobody. Contrast the desktop widgets, which *are*
+  hidden properly — everything they draw hangs off `parallaxViewport`, and `Background.qml` sets
+  `visible: false` on it, so `visible` (the effective value) is the correct guard there. Before
+  gating work on visibility, establish which of the two you have; the wrong one reads identically
+  in the source and does nothing at runtime. Diagnosing this took stack-sampling the render
+  thread, because every cheaper signal said the widget was fine.
+  53d1ff893 ("fix(bar): drop the cava claim while a fullscreen window covers the bar").
+- **A widget's card surface comes from `WidgetCard`, not a hand-rolled tint pair.** The
+  `useBlurBackground ? applyAlpha(tint, opacity) : tint` conditional was written seven times across
+  the desktop widgets — the spec's own survey counted four, and the lint that now reserves the
+  pattern to the component (`lint_widget_card_tint.py`) found the other three on its first run.
+  `WidgetCard` owns the tint, the rounding, an optional content clip, a `blurRegion` record, and a
+  `shapeName` parameter that turns the card into a stretched `MaterialShape` (which morphs on any
+  shape change, because `ShapeCanvas` does). b362d8c80 ("feat(widgets): one card component for the
+  surface every widget redrew").
+  calendar was the exempted copy and is not any more, and two things about adopting the card are
+  worth carrying to the next one. **The tint the card takes over is the card's own, not every
+  surface a widget paints**: calendar still thins its 1x1 banner, its month pill, its day grid and
+  today's highlight so the frost reads through the whole widget, and it does that with
+  `transparentize` rather than the card's `applyAlpha` because `colLayer1` already carries an alpha
+  the widget must *scale* rather than overwrite — `lint_widget_card_tint.py` leaves a content tint
+  alone, and the next entry is how it now tells one from the card's own. And **the card routes children into its own
+  content item**, so anything that anchored to the old `Rectangle` by id (calendar's two corner
+  handles did) has to anchor to `parent` instead: an anchor may only name a parent or a sibling, and
+  the card is now the grandparent. Neither of those is caught by the tint lint;
+  `test_expressive_design_system.py` pins the composition and `test_calendar_card.py` renders it,
+  because a content-sized widget whose card failed to resolve is a zero-size widget rather than an
+  error. 486272dbe ("feat(calendar): draw the widget's surface on the shared card").
+- **A widget that paints its own root surface hides the card, so it has no shadow at all — and a
+  carve-out written as a spelling stops being a rule the moment someone spells it differently.**
+  `notes` and `image-converter` were both a root `Rectangle` painting
+  `blurEnabled ? transparentize(colSecondaryContainer, ...)`: the card's own surface, written in the
+  *content* tint's dialect. `lint_widget_card_tint.py` matched only
+  `useBlurBackground ? applyAlpha(` and waved both through, so they shipped as the two widgets on a
+  twelve-widget desktop casting no shadow — and neither could have lifted on hover or drag if one
+  had been added, since neither declared `hostDragging`. Note the cost is not the redundancy the
+  card was extracted to remove: a root surface is painted *over* the card, which is why the symptom
+  is absence rather than a second slightly-different tuning. The lint now decides by **position**
+  rather than by helper name — it reads the root object of every desktop widget's entry point,
+  found from the manifests' `desktop-widget` capability (so `discordVoice`, a bar/overlay panel and
+  not a desktop card, is out of scope by the data rather than by an allowlist), follows one level of
+  `color: root.someProperty` indirection, and flags a blur-gated tint there whichever helper it
+  calls. Content tints, which are surfaces *inside* the card, stay free.
+  test(lint): the card-tint carve-out is scoped to content, not to a spelling,
+  fix(notes): draw the widget's surface on the shared card.
+- **The resize grip accumulates tension; it does not pick the nearest span.** A widget holds its
+  span while pull builds, gives one offered span per 60px breakaway with the remainder carried, and
+  rubber-bands at a wall. `resize-tension.js` owns every constant and all of the arithmetic; the
+  host exposes the live bow as `resizeBow`, injected into wrappers as `hostResizeBow` by the same
+  duck-typed pattern as `hostGridSize`, and a `WidgetCard` renders it via `tensionX`/`tensionY`.
+  Two things to know before touching it: spent pull must move the gesture's origin (the grip
+  re-bases its press point by exactly what a give consumed, or the next mouse event re-delivers the
+  pull and the resize sprints to the largest span), and a sub-breakaway regression probe is only
+  meaningful at a span with somewhere to step - probed at a wall, both semantics hold the span and
+  the check is vacuous. ccde619bf ("feat(plugins): the grip accumulates tension instead of picking
+  the nearest span").
+- **One painter owns a widget's body surface at every span - other painters ride it, never
+  replace it.** Handing the media play button's face to a second canvas at a settle blanked it
+  twice in one branch: a visualizer crossfade (the static twin masked every inward ripple, and the
+  "fixed" version left an empty face when the second canvas's first paint did not composite), then
+  a seeker-fill handoff that shipped and died within one probe run. The body canvas draws every
+  span and every transition; the visualizer's pipeline lives INSIDE it, and the seek ring strokes
+  over it. Related: hover STATE and the pointer CURSOR are different channels - two cooperative
+  HoverHandlers on stacked items both report hovered while arguing over the cursor (Arrow won),
+  which passed every hover assertion while the cursor never changed. Input areas own their
+  cursors; z order guarantees the interactive thing is topmost.
+  05bf3013f ("feat(media): the play button's body IS the visualizer").
+- **A layer clips at its item's bounds, so anything drawn outside needs the item grown first.** The
+  widget card's shadow (`Appearance.elevation`, one `MultiEffect` over a frame wrapping all three
+  body renderers) is taken from the BODY, never the card: over the card it would put a shadow under
+  every label and glyph inside it. That frame is inset NEGATIVELY by the bow's reach, because the
+  elastic-resize canvas deliberately draws up to `2*BOW_PX` outside the card and a layer would cut
+  it. The shadow is dropped while the card is moving and restored on settle, for the same reason the
+  frost is: re-rendering a blurred copy of the body every frame of a morph is the expensive path.
+  **That last sentence shipped half-true, and the correction is the lesson.** `motionActive` had
+  exactly one producer - `WidgetCard` passing its own `underTension`, the grip's elastic bow - which
+  is the one motion that does NOT resize the layer. The span animation, which reallocates the FBO
+  and re-runs the gaussian every frame, and which every Size row in Settings takes with no grip
+  involved, ran with the shadow live throughout: `resizeBow` is already zero when the settle begins.
+  Neither probe could see it, because both ASSIGN `motionActive` rather than driving motion - the
+  parallax-opt-out shape, a harness that switches off the interaction it exists to score. The host
+  publishes `boxInMotion` (drawn box vs settled box) now, forwarded by the same duck-typed path as
+  `hostGridSize`, and `test_the_shadow_is_dropped_for_the_motion_that_actually_costs` pins the chain
+  end to end. e5d243c5e ("fix(widgets): the shadow drops for the motion that actually costs").
+  Verification is pixels, not source text (`test_card_shadow.py`), and two traps live there:
+  `ItemGrabResult.image` is not scriptable from QML, so analysis belongs outside; and `grabToImage`
+  captures the ITEM, so a field relying on its WINDOW's colour grabs a transparent PNG whose "white"
+  reads as black to any analyser - a measurement that looks like a catastrophic failure when nothing
+  is wrong, and would equally hide a real one.
+  4046f1854 ("feat(widgets): the card casts a shadow, and lifts when handled").
+- **The elevation is a component of its own, and it is what a widget that is not a card reaches
+  for.** `WidgetElevation` owns the numbers, the hover/drag lift and the layer; `WidgetCard` hands
+  it the states and adds a surface. That split exists because five bundled widgets cannot be cards
+  — a cookie dial, a punched glyph grid, a shape-masked image, and a card with an avatar bubble
+  off its top edge — and each had carried its own `StyledDropShadow` at its own radius and colour
+  since long before the card. The elevation shadows **painted alpha**, so a cookie casts a cookie
+  and a `Heart`-masked photograph casts a heart; the corollary is that it goes around the BODY, and
+  a widget wrapping its whole self in one gets a shadow under every label it draws. The bleed is
+  added on the frame carrying the layer and taken straight back off the body, so children see the
+  item's own box and no call site compensates for the inset. Do not spell a second `MultiEffect`
+  shadow from `Appearance.elevation` — `test_expressive_design_system.py` fails the suite on a file
+  other than `WidgetElevation.qml` reading those numbers, and on `StyledDropShadow.qml` coming
+  back, because what this replaced was five hand-rolled shadows behind **two** components of that
+  one name in two directories, none agreeing with any other.
+  ("feat(designsystem): move the card's elevation into a component of its own").
+- **A gate on a `Config.options` key that was never declared reads as `undefined` and takes the
+  `??` fallback for ever.** The pixel clock's drop shadow was `visible:
+  Config.options.background.widgets.enableShadows ?? false`, and no `Config.qml` has ever declared
+  `enableShadows` — so that widget alone had no elevation at all, silently, for the whole life of
+  the feature, and the QML reads perfectly. Nothing warns: an undeclared key on a `JsonObject` is a
+  plain `undefined` property read, not an error. When a feature is gated on config, grep `Config.qml`
+  for the key rather than trusting the expression, and prefer a gate whose absence is loud.
+  ("feat(clock): the cookie and the pixel grid take the shared elevation").
+- **The same hole is open on `Appearance`, and there arithmetic on the missing token is *quieter*
+  than reading it.** `Appearance.rounding.button`, `.card` and `.extraLarge` were read by six
+  design-system call sites from the day that library was ported and were never declared. Measured
+  side by side against the real singleton, the two spellings fail differently and the difference is
+  the whole lesson: `radius: Appearance.rounding.card` is rejected at the assignment boundary, so it
+  costs one `Unable to assign [undefined] to double` and stores **0** — a square corner that reads as
+  a design choice — while `Appearance.rounding.extraLarge - 10` is **NaN**, which is a legal double
+  that no boundary rejects, nothing logs at all, and that survives every arithmetic downstream.
+  `Math.max(0, NaN)` is NaN, so the clamp anyone reaches for does not repair it either; the guard has
+  to be a comparison (`x > 0 ? x : 0`). Neither the QML suite nor `DesignSystemCompile.qml` can see
+  any of it — the first never builds these widgets and the second only *compiles* components, and a
+  binding is evaluated by neither. `tests/lint_appearance_tokens.py` resolves every `Appearance.`
+  chain in the tree against a parsed `Appearance.qml`; its first run found twelve more names the same
+  port left behind, which sit in that file's `QUARANTINE` register until each gets a value decision
+  rather than a plausible number. Note the general shape: a token, a config key and a service
+  property that were never declared all read as `undefined`, and `undefined` is a value.
+  ("fix(appearance): declare the three shape tokens the design system reads"),
+  ("test(lint): fail on a QML file reading an Appearance token that is not declared").
+- **A number chosen to silence that check is worse than the bug, because it renders.** The three
+  tokens above are declared as *aliases* onto tiers `Appearance.rounding` already had (`button:
+  small`, `card: normal`, `extraLarge: verylarge`), each picked against
+  [`docs/M3_GUIDELINES.md`](docs/M3_GUIDELINES.md)'s ladder and against what the in-house siblings
+  already do — the mainline `RippleButton` defaults to `small`, `ResourceCard` and
+  `GroupedList.bigRadius` are `normal`, and every in-house host of the carousel block is `verylarge`.
+  Aliases rather than fresh numbers on purpose: a tier with two values is the drift the one-source
+  rule exists to stop, while a tier with two names cannot disagree with itself, and
+  `screenRounding: large` was already the precedent. `tst_spacing_scale.qml` pins both the ladder's
+  numbers and the aliases, so giving `card` a fourth independent number reddens rather than shipping
+  two subtly different card radii.
+  ("test(appearance): pin the rounding ladder and the three tokens it aliases").
+- **Scoring a shadow on a widget that is not a rectangle wants the widget's own twin, not a band.**
+  `test_card_shadow.py` reads a strip below a card, which works because a card's bottom edge is
+  where the box says it is. It measures a different thing for a cookie (whose bottom is a valley),
+  for a glyph grid that overhangs its own box by 8%, and for a card inset 20px from the bottom of
+  its tile. `test_widget_elevation.py` renders each widget three times — at rest, handled, and with
+  `motionActive` forced on — and scores each cell against its own suppressed twin, so the shadow is
+  exactly what the cells differ BY and no per-widget geometry is involved. The probe drives all
+  three columns duck-typed (`hostDragging`, and `motionActive` on anything exposing
+  `shadowVisible`), which is why no widget carries a property that exists only for a test.
+  ("test(widgets): score the five folded widgets in pixels, not in spelling").
+- **A morphing container brings its polygons; the mechanics are shared.** `shape_morph.js` owns the
+  bounds, the endpoint short-circuit and the Morph cache for every container that morphs between
+  named shapes (media's body, weather's glyph, currency's badge); a widget passes a
+  `name -> RoundedPolygon` resolver and gets `at(from, to, t)`. Each container keeps its OWN caches,
+  because two widgets can both call a shape "panel" and mean different polygons. Bounds are MEASURED
+  mid-flight and PINNED at the endpoints - the interpolated cubics' measured extent wobbles by a
+  hair at a settle threshold, and a hair of scale reads as a flicker. Likewise `SpanTravel`/
+  `SpanFade` are the one spelling of how a shared element travels and how one with no home at the
+  next span leaves; there were twenty-three copies of that NumberAnimation before, and a tree that
+  spells its own can drift from the others by a curve without anything warning. Both extractions are
+  enforced (`test_the_trees_share_one_spelling_of_the_span_animations`,
+  `test_the_morphing_containers_share_their_mechanics`) - the point of extracting was to stop the
+  fourth copy, so the check is the deliverable, not the module.
+  e62584f17 ("refactor(designsystem): the morph mechanics become one module").
+- **A state property that says "hovered" is not evidence a pixel moved.** The media badge's hover
+  lift shipped through `transform: Scale { origin.x: width / 2 }`, whose `width` resolved against a
+  scope that has none - the model reported `hovered`, `scale` read 1.02, and the badge measured
+  60px before and 60px after on the desktop. `Item.scale` is centred by default and cannot miss it.
+  A probe that asserts only the model's value passes this happily, so the sweep now also reads the
+  scale of the item that is DRAWN (`appliedBadgeScale`), which is the check that fails. Related: at
+  2x2 and 2x1 the seek ring sits ABOVE the play button, so after a press grab ends the pointer's
+  leave goes to the ring and a `MouseArea.containsMouse` under it never clears - the button sat
+  permanently hovered, and at 2x2 that means the play glyph never leaves the artwork again. Hover
+  STATE belongs to a `HoverHandler` there; the cursor and the clicks stay with the MouseArea, which
+  is the same channels rule as 05bf3013f, applied the other way round.
+  0b9a5df1e ("feat(media): the transport controls adopt the interaction model").
+- **A Behavior whose animation reads its tier from a binding carries the PREVIOUS transition.** The
+  shared interaction model (`Appearance.interaction`, decided in `modules/common/interaction_motion.js`)
+  gives every control the same five states, and each pair of states has its own duration and curve -
+  a press is acknowledged faster than it is released, and a release animates even when the pointer
+  has already left, because press → drag off → let go is `pressed -> rest` with no hover in between
+  and treating that as a hover-out leaves the control visibly stuck. Selecting the tier through a
+  binding on the animation's `duration` hands the Behavior whichever tier was current *before* the
+  state changed; `InteractionMotion.qml` therefore writes the tier onto the animation and only then
+  writes the target, in the same handler. Interruptibility comes free from the Behavior itself - a
+  press landing mid-hover retargets from where the value actually is, which a `SequentialAnimation`
+  fired on a signal cannot do. Related: `lint_disabled_opacity.py` recognises a self-dimming control
+  by its dim EXPRESSION, so adopting the model made `RippleButton` invisible to it and would have
+  vacated the nested-dim rule for every component rooted on one - a detector that knows only one
+  idiom stops detecting the moment the idiom changes.
+  af09ed3b9 ("feat(widgets): one driver wires a control to the model").
+- **The model's motion is applied by the CONTROL, and a caller that adds its own composites with it
+  rather than replacing it.** `Item.scale` and a `Scale` transform multiply down the scene graph
+  exactly the way `opacity` does, so the mirror image of the doubled-dim rule above holds for the
+  transform: a `scale: down ? 0.88 : (hovered ? 1.08 : 1)` written on the contentItem of a
+  `RippleButton` does not override `interactionMotion.scale`, it stacks on it. discordVoice's overlay
+  shipped that on its mute and deafen glyphs — 1.02 × 1.08 on hover, 0.97 × 0.88 on press, roughly
+  five times the intended excursion, on `OutBack` instead of the model's curve, and with one duration
+  standing in for the five tiers. The same two buttons in that package's *popup* were written without
+  it, so two copies of one control disagreed about how hard it squishes. Take the control's motion;
+  where feedback is not a multiple of anything, read `hoverProgress`/`pressProgress` rather than the
+  raw flags. `tests/lint_interaction_motion_double.py` fails the suite on a scale-family property
+  written from a raw hover/press flag anywhere inside a control that applies the model — a *separate*
+  file from `lint_disabled_opacity.py` on purpose, since that one keys on a dim expression and was
+  blind to this for the whole life of the widget. It resolves which types apply the model rather than
+  naming them, reads a declaration whole (block-bodied values included), and self-checks against an
+  in-memory fixture so the machinery is proven independently of what the tree contains.
+  f62673b7f ("fix(discordVoice): let the button own the hover and press motion"),
+  1d5d196fd ("test(lint): fail on a hover/press scale inside a control that already scales").
+- **A radius composites too — through the control rather than through the scene graph — and the
+  lint above knew only the transform, so it wrote the next case up as a note instead of failing on
+  it.** That first version named `modules/imi/sessionScreen/SessionActionButton.qml` in its own
+  sweep, right here in this file and in `docs/widget-standards-audit-2026-08-16.md`, as a neighbour
+  it was not fixing: the button keyed `buttonRadius` on `button.down` while `RippleButton` was
+  already tightening. It reasoned that a `pressProgress`-driven radius "composites with nothing",
+  which is true of the scene graph and false of the control —
+  `RippleButton.buttonEffectiveRadius` is *computed from* `buttonRadius`, so a caller keying that
+  on `down` has its own value multiplied by `pressRadiusScale` on the way to the corner. The two
+  sources pulled opposite ways, so this did not read as too much squish: measured on the real
+  component, a press took the corner **30 → 51** — the button's own jump to `size / 2`, then the
+  model's 0.85 landing on the circle — where every other control tightens. It is 30 → 25.5 now.
+  Three things generalise. The `focus` half stayed, because that is the session grid's keyboard
+  cursor and the model has no state for it; a control may still own a shape the model does not
+  name. `tests/lint_interaction_motion_double.py` is per **channel** now — a file is a control in
+  the channels it actually applies the model in, so `MediaTransportButton` (which scales and does
+  not tighten) is not held to the radius rule — and the radius detector reads a *whole*
+  declaration, because both `RippleButton`s spell `buttonEffectiveRadius` across two lines with
+  `pressProgress` on the continuation, and a line-scoped version finds no radius control at all and
+  reports a clean tree. And the rule reaches only controls that apply the model:
+  `common/widgets/GroupButton.qml` drives its own `down`-keyed radius and bounce and has never
+  adopted it, so it is a non-adoption rather than a doubling and the lint leaves it alone.
+  fix(sessionScreen): let RippleButton own the session button's press,
+  test(lint): fail on a hover/press radius inside a control that already tightens.
+- **A one-tree widget's geometry reads the SETTLED span's box, never the animating one.** Three
+  trees were written with `spanW: root.implicitWidth`, and `implicitWidth` carries a Behavior: every
+  rect became a per-frame target, so the Behaviors that carry the travel never converged, and any
+  rect measured from the right edge (the media play button, the weather glyph, the currency panel
+  and its cells) crawled behind the card instead of travelling with it. The settled width is a
+  function of the span name alone. A widget's SHAPE also morphs off a t that must be reset through a
+  closed gate - writing `morphT = 0` through a live Behavior retargets it, which is a snap wearing
+  the morph's clothes. Both are checked:
+  `test_geometry_rects_come_from_the_settled_span_not_the_animating_box`.
+  189caa6ff ("fix(weather): geometry reads the settled span, not the animating box").
+  That check sweeps for the declaration rather than naming the trees, and reads the **whole**
+  declaration rather than the line carrying it - because two of the three spans are written as a
+  block (`readonly property real spanW: { if (sizeMode === "1x1") ... }`), and a line-scoped check
+  sees only the opening brace. It read `readonly property real spanW: {` for weather, the largest
+  of the three files it named, and would have passed on `return root.implicitWidth;` one line
+  below. Any source-text check over a QML property has the same question to answer: is the value a
+  line or a block?
+  test(widgets): sweep for the settled-span rule instead of naming three files.
+- **A widget the host does not size gets neither of the host's two resize services, and the
+  absence of both is silent.** `PluginWidget`'s `Behavior on width`/`height` is
+  `enabled: gridResizeAnimated`, which is `gridSized && PluginState.ready`, and `boxInMotion`
+  compares the drawn box against `settledWidth`/`settledHeight` — which for a content-sized
+  widget *are* `rootWidget.width`/`height`, so it is false forever. A widget that declares no
+  manifest `grid` because its own handles own its size (calendar, world-clock) therefore snaps
+  between sizes **and** keeps its card's shadow re-blurring a copy of the body into a
+  reallocating layer for every frame of whatever motion it does perform — the exact cost
+  e5d243c5e removed for span widgets. Both halves belong to the widget: it animates its own
+  implicit size towards the settled span, and publishes its own `boxInMotion` for the card
+  (`hostMotionActive: root.hostBoxInMotion || root.boxInMotion`, so a host that ever does report
+  it still wins).
+  feat(calendar): morph the calendar in one tree instead of rebuilding it.
+- **A one-tree widget needs `WidgetCard.clipContent`, and a per-span Loader did not.** A
+  destroyed subtree stops existing when the card shrinks; a faded one does not. Calendar's day
+  grid and five of its six rows, and the world clock's local time and date, all sit below a short
+  card's bottom edge while they fade, and unclipped they paint onto the wallpaper for the whole
+  morph. The corollary is the reason a fading block must also **stand still**: pin it to its own
+  span's box rather than anchoring it to the card, or it reflows through every intermediate size
+  on the way out, which reads as the content being squeezed rather than as it leaving.
+  feat(world-clock): morph the world clock in one tree instead of rebuilding it.
+- **A desktop widget's frost drops out for the length of any box animation, and it is not the
+  morph's fault.** Measured frame by frame on the desktop: through a span change the card body
+  goes to its bare tint over a *sharp* wallpaper and the blur comes back only once the box
+  settles. This predates the one-tree work — the same burst on `nandoroid-weather`, which has
+  animated its box since fa1e2a8b5, shows it identically — it was simply invisible while calendar
+  and world-clock snapped. The likely mechanism is that `PluginWidget`'s frost `Repeater` takes
+  `pluginNode.blurRegions` as its model, and a card's `blurRegion` is a fresh object on every
+  frame of a resize, so the `WallpaperBlurSurface` delegates are destroyed and rebuilt per frame;
+  that is a reading of the source, not something anyone has proved, and the way to settle it is a
+  `Component.onCompleted`/`onDestruction` count on the delegate during a resize.
+  feat(calendar): morph the calendar in one tree instead of rebuilding it.
+- **An element that changes its TEXT across spans is two elements, not one.** The currency base
+  code read "to USD" at 1x1 and "USD" at 2x1 from a single `StyledText`, so the content swapped in
+  one frame in the middle of an otherwise continuous morph. "to" is its own element that fades,
+  and the code slides left into the space it vacates as it goes. The same rule retires the
+  screenshot that hid it: `grabToImage` renders a LATER frame, so a probe that shoots and then
+  commits the span in one call files the transition's first frame as "settled".
+  38ad4d94b ("fix(currency): the word \"to\" becomes its own element, and rates stop colliding").
+- **A bundled package component loaded by URL has no implicit siblings - the package needs a
+  qmldir naming every component, and the qmldir then governs DIRECTORY imports of the package
+  too.** MediaTransportButton shipped bare and every media widget vanished with "is not a type";
+  the fix's first version listed only the bare-referenced files and would have broken the discord
+  popup, whose directory import had been auto-listing the whole package - the registration lint
+  caught the half-listing before deploy. lint_qmldir_registration.py holds both halves.
+  d3145342e ("fix(plugins): a URL-loaded package component has no implicit siblings").
 - **A subclass cannot read `AbstractWidget.gridSize`: `PluginWidget` shadows it.** The base's
   `gridSize` is the 12px drag lattice; `PluginWidget` declares its own `gridSize`, the
   component-grid span (`{"cols": 2, "rows": 1}`). Code *inside* the base still resolves to the
@@ -1192,7 +1962,25 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   `TestCase` sends it to the focused item of *its own* window, so a driver parented outside any
   window cannot deliver one. What no such harness can answer is the background *layer surface's*
   keyboard focus, since weston gives it no wlr-layer-shell. 2c8ccae70 ("test(widgets): drive the
-  resize grip with real mouse events").
+  resize grip with real mouse events"). `EditModeRuntimeTest.qml` is the same shape with the
+  canvas under Edit Mode's transform, and it drives every gesture in **canvas** coordinates,
+  which `TestCase` maps through that transform on the way to the window: the same drive numbers
+  at two scales must store the same position and cover a *different* amount of screen, and both
+  halves are asserted because "the widget moved" is satisfied by a drag that reads raw scene
+  deltas and lands the scale's worth short. (test(editMode): drive the desktop at the mode's own
+  scale.)
+- **A gesture has three ends now, not two: released, cancelled, and the release that follows a
+  cancel.** `AbstractWidget.cancelDrag()` exists because Edit Mode can end mid-drag, and a
+  release *commits* — clamped and written to the store — while the drag itself is deliberately
+  unclamped until then, so committing an unfinished gesture stores an overshoot (705e9006d's
+  defect). Three things about it do not generalise from the release path: the pre-press position
+  comes back by restoring the x/y **binding** rather than by assignment, since only a commit
+  writes `targetX`/`targetY`; a group drag needs its own cancel (`WidgetCanvas.widgetDragCancelled`)
+  because `widgetDragEnded` commits every follower, a follower never getting a release of its
+  own being the whole reason it does; and the pointer is still **grabbed**, so a release is still
+  coming and `dragCancelled` has to swallow exactly that one — measured, what it would otherwise
+  write is wherever the restore animation had reached. (feat(editMode): leaving mid-drag cancels
+  the gesture instead of committing it.)
 - **"The frost is gated on the toggle" is not "the surface is gated on the toggle."**
   `appearance.transparency.enable` removed every desktop widget's blur — `PluginWidget`'s blur
   `Repeater` reads the flag — while the widgets' panel alpha kept coming from
@@ -1246,6 +2034,122 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   `FadeLoader`, rather than repeating only the enabled ids. Removing a model delegate destroys it
   immediately and makes an M3 exit transition impossible; keep disabled loaders dormant until their
   fade-and-scale exit reaches zero opacity.
+- **A comparison that is correct on one axis is INERT on the other, not merely wrong — and a
+  layout that turns is where you meet that.** The dock now lives on any of the four edges
+  (`modules/imi/dock/dock_geometry.js` derives anchors, thickness, exclusive zone, margins by
+  INWARD/OUTWARD direction, reveal offsets and popup gravity from one `OPPOSITE` table; one tree
+  with a `vertical` flag rather than the bar's two modules, so an orientation change reflows the
+  icons instead of destroying and rebuilding them). Three things about that turn are worth not
+  re-deriving:
+  - **The drag reorder was `Math.abs(dragX - centre.x)` throughout.** In a column every slot
+    centre has the *same* x, so the distance is zero for all of them, the "nearest" slot is
+    whichever the loop reached first, and the swap test compares a number with itself: it fires
+    on the press and unfires on the next event, for as long as the pointer moves at all. Nothing
+    errors, the column lays out and spaces perfectly, and a screenshot is no help — the icons
+    simply refuse to move past each other. `DragApps` chooses the axis once (`alongAxis`), and
+    the check that can see it is `DockEdgeRuntimeTest.qml` (driven by
+    `tests/test_dock_edge_runtime.py`, headless weston, in `run_tests.sh`): it drags ALONG the
+    strip and requires a reorder, then ACROSS it and requires none, with the horizontal edge
+    first as the control — "nothing happened" is also what a harness that stopped delivering
+    events reports. It reaches the dock's *content* tree only; weston implements no
+    wlr-layer-shell, so anchors, the exclusive zone, the reveal push and the compositor's
+    inferred slide are all invisible to it. Its last gesture is the one that jumps two slots in
+    a single event, because every other drag in the file steps one slot at a time and a run of
+    adjacent swaps is indistinguishable from a move — see the reorder entry below.
+    40c64996b ("test(dock): drive the drag that a move and a swap answer differently").
+  - **A control sized "width from height" cannot be turned.** `DockButton` derived its width from
+    its height minus the *vertical* insets, which in a column is the axis the layout owns. Both
+    axes are now written out against a span, so there is no direction to get backwards, and the
+    insets are named `insetInward`/`insetOutward` rather than top/bottom — a widget that decides
+    which side the elevation margin lands on is correct at one edge in four, and
+    `tests/test_dock_position_contract.py` fails on a margin or inset bound to a named side while
+    naming `elevationMargin` or `hyprlandGapsOut`.
+  - **`DockSeparator` and `DockAppButton` still reach `dockRow.padding` and
+    `dockVisualBackground.margin` by dynamic scope through the dock's tree.** The ids are
+    deliberately unchanged: a failed lookup there is `undefined`, then NaN geometry, then a
+    relayout that never converges and a pegged core — see the Design-language note on the missing
+    `import qs.modules.common`. Restructure above them and nothing warns.
+  - **An item that turns must express the turn as a SIZE, never as a different set of anchors —
+    Qt punishes an axis holding two anchors in two different ways and neither is loud.** Writing
+    `left`/`right` for one orientation and `horizontalCenter` for the other reads as mutually
+    exclusive and is not: during the turn all three are live for a moment. `QQuickAnchors` then
+    **refuses the whole horizontal update and reverts the anchor it was setting**, so the item
+    keeps the anchors of *both* orientations and fills its parent in both axes — measured at
+    5120x1440 inside a 75x1440 layer surface, i.e. a full-height dark band with the icons spread
+    over a screen's width of which a side edge shows 75px. The only log line is `Cannot specify
+    left, right, and horizontalCenter anchors at the same time`, which names an item, not a
+    consequence. The *pair* is worse than the triple, because Qt honours it: `right` +
+    `horizontalCenter` is a legal way to state a width, so the anchor **writes** the item's width
+    as `2 * (right - hcenter)` — evaluated while the surface is still the size it had before the
+    compositor reconfigured it — and that write latches, because the size binding it clobbered has
+    finished changing by then and never re-evaluates to overwrite it. Nothing at all is logged for
+    that one: no binding loop, no warning, and QML that reads correctly. Which axis is ruined
+    depends on which one the turn landed on, so it presents as intermittent and as two unrelated
+    bugs. Everything in the dock now centres at every edge and takes its box from
+    `DockGeometry.contentBox()`, with the reveal push as a `horizontalCenterOffset`/
+    `verticalCenterOffset` times `DockGeometry.hideDirection()`; a centre offset is a number and
+    cannot occupy an axis. `tests/test_dock_position_contract.py` fails on any item in the dock's
+    tree binding a centre anchor together with either edge anchor of the same axis — its first run
+    found four more copies of the idiom (both sets of running dots, the window-preview card, the
+    context menu's card) that nobody had looked at. Note what this cost before it was found: the
+    dark band is also exactly what an empty layer surface looks like under the compositor's blur,
+    and two attempts went after `rules.lua` instead.
+    ("Dock: the body and the icon strip stop re-anchoring on the turn"),
+    ("Dock: the reveal becomes an offset, not an anchor that moves"),
+    ("Dock: one axis, one anchor - checked, because it was silent").
+  - **A `PopupAnchor` given a `window` and no `rect` anchors to a POINT, so all four of its
+    `edges` mean the same place.** The window-preview popup names the corner it wants
+    (`popupAnchorSides()` — the inward side plus the start of the long axis) and got the window's
+    origin every time. That is correct at exactly two edges out of four, which is what made it
+    read as a vertical-dock bug: a bottom dock asks for top-LEFT and a right dock for left-TOP,
+    and both of those *are* (0, 0), while a left dock wants `(width, 0)` and a top dock
+    `(0, height)` — so on those two the popup opened **on top of the dock**, covering the icons it
+    belongs to (measured: a 247x1440 surface placed at x=0 against a 75x1440 dock). Every other
+    popup here passes an `item` as well, which is why none of them showed it. Pass an explicit
+    `rect` whenever the anchor is a window and the edges are meant to differ. Note the second,
+    separate fault stacked on top of it: the card *inside* that popup wrote one coordinate as a
+    binding and let an anchor write the other, and which axis is which swaps with the edge — see
+    the anchor-writes-a-property note above. ("Dock: the preview popup anchors to the dock's rect,
+    not to a point"), ("Dock: the preview card's own coordinates stop being half anchor").
+
+  The same contract test carries the "one derivation" lint (the analogue of
+  `lint_bar_popup_overlay_static.py`'s rule for `barEdge`): a file may read
+  `Config.options.dock.edge`, but only straight into `normalizedEdge()`, and nothing may compare
+  the stored value to a side. `modules/imi/bar/DocktoPanel.qml` renders the same `pinnedApps`
+  inside the bar and must keep following the *bar*; that is pinned too.
+  6b082ea16 ("feat(dock): the geometry module answers for the two side edges"),
+  8e608cb61 ("feat(dock): the dock strip lays out along whichever edge it is on"),
+  c7efc6db4 ("test(dock): the vertical edges get a contract and a real drag").
+- **A drag reorders a list by MOVING the dragged item, and a swap is the same answer only for a
+  step of one.** Four surfaces reorder by dragging — the bar's chip editor
+  (`modules/common/widgets/LayoutSection.qml`), the dock strip (`DragApps.qml`), the bar's copy of
+  that strip (`modules/imi/bar/DocktoPanel.qml`) and the Android quick toggles
+  (`AndroidQuickToggleButton.qml`) — and all four had the arithmetic written out locally. The
+  duplication was not the defect; the disagreement was. Two took the item out and put it back at
+  the drop index, so everything between shifted one place along. Two exchanged the two entries, so
+  a drag past three neighbours displaced exactly one of them and sent it back to where the drag
+  began, several slots from anything the pointer touched, while the three the user had just dragged
+  past did not move. Nobody saw it because an adjacent move and an adjacent swap produce the same
+  list, and a drag that keeps up with the pointer steps one slot at a time — the difference only
+  appears when the pointer outruns the events or crosses a wider icon.
+  `modules/common/functions/layout_ops.js` is the one answer now: `move`/`moveInPlace`, `insert`,
+  `remove`, and `indexAt` for the nearest-slot scan, which takes the axis from the caller because
+  only the caller knows which way its slots run (a column compared on x is the inert-comparison
+  case one entry up) and takes a **hole** for the dragged slot, which is still laid out where the
+  drag began and would otherwise be its own nearest neighbour. Two spellings of the move, not two
+  reorders: the quick toggles mutate the live `Config` array on purpose, and re-measured against a
+  real `property list<var>`, a splice-out and a splice-in on the live property both take effect and
+  notify — 26b625905 ("Revert \"fix(sidebar): make quick toggle edits actually notify\" and
+  follow-ups"). The store stays with the call site, because where a list lives and when it is
+  written back genuinely differ between the four and only the arithmetic is shared.
+  `tests/lint_reorder_arithmetic.py` scopes itself by gesture rather than by name — a QML file
+  declaring a `DragHandler` — which is what lets `DesktopContextMenu.qml`'s Fisher-Yates wallpaper
+  shuffle keep the element-exchange idiom without an allowlist, and it fails if one of the four
+  stops reaching the module rather than sweeping an empty set.
+  a8d6aa4fc ("feat(layout): one module for the reorder four surfaces each worked out"),
+  0bc44f475 ("fix(dock): a dragged icon moves to where it was dropped, it does not swap"),
+  52da8b43e ("fix(quickToggles): a dropped toggle moves into place instead of swapping"),
+  893bfc31a ("test(lint): fail on a reorder spelled out beside a DragHandler").
 - **`MouseArea.drag` cannot accurately drag a target the MouseArea itself follows.** QQuickDrag
   rebases its press origin when the grab is established, silently swallowing the arming move's
   delta — a few threshold pixels under a real pointer, invisible behind the widget lattice's 12px
@@ -1257,6 +2161,25 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   transform, press scale included, cancels out — and set the target to pressStart + delta, as
   `widgetCanvas/AbstractWidget.qml` now does. d2ebb5aeb ("fix(widgetCanvas): compute the drag by
   hand - MouseArea.drag cannot track it").
+- **The two bars load the same widget files out of `modules/imi/bar/`, and each used to decide
+  which file for itself.** `Config.options.bar.layouts.*` is shared and Settings > Bar offers a
+  plugin's bar widget whatever the orientation, but only `BarContent.qml` ever learned the
+  `plugin:` branch 2a3801a62 ("feat(plugins): support installable QML packages") added.
+  `VerticalBarContent.qml`'s fallback capitalises a widget name into a file name, so
+  `plugin:docker_plugin` resolved to `Plugin:docker_plugin.qml` - measured with a `qml6` probe, the
+  `Loader` reaches `Loader.Error` with a null `item`, and the only evidence is one
+  `No such file or directory` line per widget. That is neither a `WARN scene:` nor an `ERROR:`, so
+  the configuration still loads and the bar simply draws the empty `BarGroup` stub around nothing.
+  `modules/imi/bar/bar_widget_source.js` is the one mapping now; it answers with a **file name**
+  and the caller prepends its own directory, because the two bars reach that directory by different
+  relative paths and a `.pragma library` has no engine context to assume for `Qt.resolvedUrl`.
+  `tests/test_bar_widget_parity.py` fails on either bar deciding for itself and on the two
+  `getWidgetUrl` bodies differing by anything except that directory literal;
+  `tests/tst_bar_widget_source.qml` pins the mapping. The orientation API a plugin gets is one
+  duck-typed `property bool vertical` on the entry point's root, which the host writes - and a
+  widget that declares none is rendered anyway rather than omitted, since omitting it is the same
+  silent disappearance this fixed. a47462fcc ("fix(verticalBar): render plugin bar widgets instead
+  of an empty stub"), 06d31aabc ("test(bar): pin the two bars to one widget-url resolution").
 - **A `Process`'s `onExited` handler that ignores its `exitCode` argument will happily act on stale
   data.** `TempScreenshotProcess` writes to a deterministic path (`image-${screen.name}`), so a failed
   `grim` run used to leave the *previous* successful capture sitting there untouched - the region
@@ -1274,6 +2197,28 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   to do nothing. This only surfaces where focus is obtained by clicking - `LockSurface.qml`'s
   password box uses the identical overlay structure but never hit this, since it
   `forceActiveFocus()`s itself programmatically instead of depending on a click.
+- **`Item.visible` reads back EFFECTIVE visibility, so a container that hides
+  itself from its child's `visible` latches.** The sibling of the `enabled`
+  trap below, and it bites the other way round: `visible` is the item's own flag
+  AND its parents', so an item whose parent is hidden reports `false` no matter
+  what its own binding says. A wrapper bound to `child.visible` therefore hides
+  the child, then reads `false`, then can never let it back. Probed with `qml6`
+  against a control row: the control followed a gate true/false/true/false while
+  the mirrored one read `false` on every sample after the first hide, with no
+  warning and no binding-loop message. `GroupedList` is where this landed —
+  it builds one plate per declared row and sizes it from the row's
+  `implicitHeight`, which never asked whether the row was drawn, so a row hidden
+  with `visible: false` kept a full-height plate painting the group's background
+  with nothing in it (the desktop menu grew one between Widgets and DropShelf
+  for the whole life of Edit Mode; Settings > Services > Weather has the same
+  hole on wttr.in). A row that comes and goes therefore declares **`rowVisible`**,
+  a property of its own; a row that never disappears declares nothing and reads
+  `undefined`, which takes the `?? true`. The group's outer corners follow the
+  rows that are DRAWN, not the declared first and last, or a hidden plate holds
+  the rounding while the row above it is square. `tst_grouped_list.qml` covers
+  all of it, and the case that earns its place is "a hidden row that comes back
+  is drawn again" — the one the plausible alternative fix fails.
+  b949bf24a ("fix(widgets): a GroupedList row that is not drawn takes no room").
 - **`enabled: false` on a `MouseArea` disables that area and nothing under it.**
   `QQuickMouseArea` declares its own `enabled` property, which shadows `Item.enabled` — so the
   usual "`enabled` cascades to the whole subtree" intuition, which is true of a plain `Item`, is
@@ -1374,6 +2319,22 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   vertex happens to be, and a twelve-lobed cookie is symmetric every 30 degrees so nothing about
   the shape reads as rotated. 8c211b3d8 ("feat(media): draw the 2x1 as three controls whose centre
   carries the seek bar").
+- **A square design copied into a non-square tile keeps its own square frame; anchoring its parts
+  to the tile's corners quietly breaks the relationship being copied.** The media widget's 2x2 is
+  the cookie clock's shape - `clock/CookieClock.qml` is a square `implicitSize: 230` and
+  `dateIndicator/DateIndicator.qml` anchors two `dateSquareSize: 64` badges to opposite corners of
+  it - with next and previous where the day and month are. What makes a badge read as *fastened*
+  to the cookie is that it bites into the edge: its centre sits on the diagonal at 1.02 outer
+  radii, so ~13% of the frame overlaps. The 2x2 span is 276x228, and anchoring the badges to the
+  tile's corners instead moves them along a shallower bearing and cuts that bite from 26px to 8px
+  - the badge grazes the cookie and the tile reads as three unrelated objects. Centre a square
+  frame in the tile and hang everything off *that*; the leftover width becomes symmetric margin.
+  The same arithmetic is why the title and artist left: a text block under the cookie is paid for
+  out of the cookie's diameter, so keeping it shrinks the frame and pushes the badges off the edge
+  anyway. `cookie_layout.js` is the whole of it, extracted because nothing else about that layout
+  is reachable from a test - and `badgeOverlap` returns the bite in pixels rather than a boolean,
+  so a changed ratio reads as a number instead of as "still positive".
+  562cdf815 ("feat(media): rebuild the 2x2 as the cookie clock with next and previous").
 
 **Wallpaper parallax is one oversized viewport, not a per-layer effect.**
 `Background.qml` draws every wallpaper layer inside `parallaxViewport`, an item sized to
@@ -1387,6 +2348,1007 @@ of the `suppressContents` fullscreen gate, which the viewport carries for its ow
 Sizing is deliberately screen-derived rather than wallpaper-derived: a live WE project reports no
 intrinsic size, and `PreserveAspectCrop` already covers a still, so one rule serves both.
 (feat(background): revive wallpaper parallax, for stills and Wallpaper Engine.)
+
+**Edit Mode shrinks that viewport, and it does it with a TRANSFORM — never with
+x/y/width/height.** `GlobalStates.editMode` scales and insets three of the
+background surface's siblings at once (`parallaxViewport`, `widgetCanvas`, the
+clock depth layer), all from one `bgRoot.editMatrix`, so the desktop becomes an
+object on the screen over its own wallpaper blurred. The transform is what makes
+the whole thing cost nothing: `scale` leaves `x`, `y`, `width` and `height`
+alone, so every clamp range, every position in `plugin-state.json` and the
+hand-computed drag are untouched — the drag maps the pointer through the moving
+widget into the canvas frame and the transform cancels itself out, which
+`EditModeRuntimeTest.qml` drives at two scales rather than assuming. Writing the
+inset into the containers' `x`/`y` instead would fold a second meaning into the
+four properties the parallax animates, the frost samples by and every clamp
+measures against, which is b710ef731's defect in a new place. Three things the
+mode is built out of are worth not re-deriving:
+- **The SIZE is derived and the POSITION is dead centre, and keeping those two
+  apart is the whole of it** (`modules/common/functions/edit_mode.js`). The
+  desktop shrinks by at least the drawer's declared width plus a margin, so the
+  drawer opens into space that already exists; it takes the drawer's WIDTH and
+  has no input for whether the drawer is open — a viewport that changed size
+  mid-edit would rescale every widget under the cursor and hand every `Behavior`
+  carrying the box a moving target. But the reservation is spent when the drawer
+  arrives, not held back from the start: a geometry that put it into the resting
+  `x` made the entry a slide as well as a shrink, symmetric on no frame
+  including the last, and no choice of pre-drawer inset repairs that because the
+  asymmetry is in the shape of the animation. A centred geometry's offset is
+  linear in `(1 - scale)`, so `atProgress` multiplying it by the same `t` as the
+  scale is exactly the centring offset of the intermediate scale — the margins
+  are equal in pairs on every frame, which `tst_edit_mode.qml` asserts as
+  arithmetic and `test_edit_mode_chrome.py` measures off the drawn desktop at
+  half progress. **And the scale has a ceiling** (`MAX_SCALE`): the derivation
+  is right while the drawer is a meaningful fraction of the width and stops
+  being one as the screen widens — 380px of drawer on 5120px left the desktop at
+  92%, which is the mode's whole signal spent on a border. A ceiling cannot
+  break the derivation, because shrinking further only makes the drawer's slot
+  larger.
+- **...and "dead centre" means dead centre of what the bar and the dock leave,
+  because they stay where they are.** Editing them in place is spec §12 stage 8;
+  until then they keep their edges at full size, and a mode that ignores them
+  draws its chrome on top of them — which is what shipped. `viewportGeometry`
+  takes four INSETS and a CHROME THICKNESS on top of the drawer's width, and the
+  two answer different questions: the insets say which part of the screen the
+  mode may use, and the chrome thickness makes the band above and below the card
+  `margin + toolbarHeight + margin`, so the toolbar centred in that band has a
+  whole margin at each end by construction rather than by whatever the ceiling
+  left over. (It left 100.8px at 5120x1440 for a 56px toolbar, which starts
+  22.4px into a screen whose bar occupies the first 68.) Passing neither term
+  reproduces the old geometry property for property, which
+  `tst_edit_mode.qml` pins.
+
+  Three things about it are worth not re-deriving. **The insets have exactly one
+  derivation** (`modules/imi/editMode/EditModeInsets.qml`): everything else in
+  the mode is re-derived on both surfaces because every input is an `Appearance`
+  token and the same screen, and these are not — they come from
+  `Config.options.bar.*`, `Config.options.dock.*` and `dock_geometry.js`, so a
+  second file working them out is a second answer to where the dock is, which is
+  what `test_dock_position_contract.py` already exists to prevent for the dock's
+  own tree. **What is reserved is each panel's LAYER SURFACE, not its painted
+  body** — the bar's carries the screen-corner decorators below its body and the
+  dock's carries its elevation margin, both take clicks there, and the surface
+  extent is the number `hyprctl layers` reports, so the compositor is a check on
+  it rather than an unrelated measurement (`quickshell:bar` at y=5 h=63 and
+  `quickshell:dock` 75 tall, which is `Appearance.sizes.barSurfaceThickness` and
+  `DockGeometry.thickness`). And **the reservation is a function of
+  CONFIGURATION only** — never of auto-hide, a hover reveal, `GlobalStates.barOpen`,
+  or a fullscreen window dropping the dock's exclusive zone. All four move while
+  the mode is on, and a viewport that changes size mid-edit is b710ef731's moving
+  target: it is the same decision the module already makes about the drawer.
+
+  What this costs is the one symmetry an off-centre destination cannot keep: the
+  four margins are no longer equal in pairs *mid-flight*. What replaced it in
+  the checks is stronger and is what the eye follows — every corner still
+  travels in a straight line, because both terms of each corner's position are
+  linear in `t`. At rest the margins are equal in pairs against the USABLE AREA,
+  and on the machine this was measured on that centre is 3.5px from the screen's
+  own on a 1440-tall panel. b23c3f0f3 ("feat(editMode): shrink the desktop
+  inside what the bar and the dock leave"), 07940391a ("feat(appearance): name
+  what a bar's layer surface occupies").
+- **The blurred backdrop cannot be the lock's `blurLoader` with a second gate**,
+  which is what the spec asked for: that loader is a *child* of
+  `parallaxViewport`, so it takes the edit transform and shrinks along with the
+  desktop it is meant to sit behind. It is a sibling `Loader` sharing one
+  `WallpaperBlurBackdrop` component with the lock's, and it works because a
+  `ShaderEffectSource` renders its source item in that item's OWN coordinates —
+  a transformed wallpaper still yields an untransformed texture.
+- **That backdrop is drawn ABOVE the wallpaper and BELOW the widget canvas, cut
+  out to a rounded rect, and that is the only cheap way to round the desktop's
+  corner** (`modules/imi/background/EditModeCard.qml`, the `editChrome` Loader
+  at `z: 1`). QML has no rounded clip and the desktop is three separately
+  transformed siblings, so no property on any of them rounds a corner, and
+  wrapping all three in one masked layer pushes the wallpaper through an effect
+  for every frame of the shrink — the cost the transform was chosen to avoid.
+  Covering the corner with what is behind it is identical to drawing the backdrop
+  behind everywhere except the four corners, and it gives the drop shadow
+  somewhere honest to live: inside the same cut, over the backdrop, so only the
+  half outside the card survives and its interior never darkens the desktop it is
+  lifting.
+
+  **A cover over EVERYTHING covers everything, which is what the `z: 1` is for.**
+  It shipped at `z: 4` and cut the widgets too: the desktop scales about its own
+  centre, so the canvas's edge lands exactly on the card's edge and a widget
+  parked against a screen edge is flush with the rounding — at a corner the arc
+  comes in on both axes and takes a bite. Measured at 5120x1440, 20px along each
+  edge and 10px on the diagonal of a block pinned there, and this machine's own
+  `plugin-state.json` keeps `visualizer` at 0,1200 on a 1440-tall screen. The
+  trade is deliberate and is the whole of the fix: a widget in the corner now
+  OVERHANGS the rounding, drawn whole over the blurred backdrop. It says "this
+  widget is at the edge of your desktop", where the alternative was moving
+  widgets the user placed. `test_edit_mode_chrome.py` asks the question from both
+  sides — a marker in the wallpaper viewport that has to be cut, a block on the
+  canvas that has to survive — because a single check either way passes on both
+  arrangements. Note the second copy of the arrangement: `EditModeLookProbe.qml`
+  re-declares the four siblings, because weston implements no layer shell, and it
+  scored one render of that fix against its own stale `z: 4`. The contract pins
+  the two z values against each other now.
+
+  **The card's edge is a bevel, not a line.** A 1px `colLayer0Border` outline is
+  right for a panel on a surface these tokens were derived from and is a drawn
+  line over a WALLPAPER: walked round the perimeter on this library's darkest
+  picture, the worst point departed from the backdrop beside it by 2.8/255. Three
+  tones fix it, and it is three because no single one survives every wallpaper —
+  a shade band just outside (which carries a bright picture), a specular on the
+  edge that is brightest along the top and fades to a weak bounce at the bottom
+  (which carries a dark one), and a faint highlight just inside so the specular
+  is the outer face of something. Re-measured: worst-on-perimeter 24.0/255 over
+  the darkest wallpaper and 38.2/255 over the brightest.
+
+  **It shipped as a bevel around a LINE, though, and that is what "the glassy
+  border effect feels off" turned out to be.** The 1px outline stayed, drawn
+  between the specular outside the card and the highlight inside it, so walking
+  inward the profile went shade, crest, *dark line*, highlight, desktop — a
+  NOTCH of up to 70/255 below the lower of the two bright bands either side of
+  it, measured on the real desktop at 5120x1440. A bevel falls off its crest
+  into the surface; this one fell, rose and fell, so the eye reads the dark line
+  as the card's edge and the bright band as a piping outside it, which at the
+  top-left corner looks exactly like chrome trim with a seam in it. The outline
+  is gone, and `docs/M3_GUIDELINES.md` §1 is what licenses that rather than what
+  it is traded against: "visible borders are not required for every surface",
+  and the job the guideline gives an outline — defining edges against complex
+  backgrounds — is the job this bevel exists to do, *because* the outline could
+  not do it over a wallpaper. One edge treatment, not two stacked.
+
+  **And "brightest along the top" was a stroke, because the gradient ran over
+  the bounding box.** The run from the top's value to the flank's was half the
+  card, so the whole 4403px top edge sat at one strength and both top corners
+  with it — 113/255 median along the top against 42 down the left flank. The
+  roll-off belongs to the CORNER ARC, which is precisely the run over which the
+  outline's normal turns from facing up to facing sideways, and it is expressed
+  as `cardRadius / card.height` rather than as a stop someone picked, so a
+  change to the corner moves the light with it. Re-measured after both: the
+  notch is 0.0 median / 5.3 worst (from 6.8 / 50.1) and the crest's spread
+  narrows from 0-125 to 0-109 with the top down at 89 and the flanks and bottom
+  up. The weakest point on the perimeter is 1.8/255 against 6.4 before — both
+  are "no edge here", over the brightest part of the blurred backdrop, and the
+  cause is structural: the shade band is drawn UNDER the specular, so the crest
+  composites on a darkened base and cannot clear a bright backdrop by much at
+  the bottom. Separating them costs a second mask, which is the cost this
+  component is arranged to avoid. 1df616e62 ("fix(editMode): the card's edge
+  stops having a seam drawn through it").
+
+  **And then all three tones went, because the sum of three defensible tones is
+  a border.** Every measurement above scores one tone at a time, and the
+  complaint that followed was about the whole card: *"edit mode's layout having
+  this thick border is what looked ugly for me. I want it to look glassy without
+  it having this thick border."* Walked inward across the left flank on the real
+  desktop — backdrop 28, shade 17, 17, specular 77, 77, highlight 128, desktop
+  105. Five drawn pixels of dark-then-bright piping at one strength the whole way
+  round a 3872px card, which is what a border *is*, and no per-tone number says
+  so. It is now ONE tone, `borderWidth.standard` wide: 0.44 along the top, 0.07
+  along the flank, 0.13 at the bottom.
+
+  Three things about why each tone could go, and they are the reusable part:
+
+  - **The shade band was a hard copy of the shadow.** It existed to carry the
+    edge over a bright picture, and `StyledRectangularShadow` is already a
+    darkening outside the card, from the same lamp, soft where the band was a
+    hard 4px lip. Two darkenings on one edge.
+  - **The inner highlight was 1df616e62's outline in the other colour.**
+    Anything drawn INSIDE the card cannot ride `surround`'s mask — that mask
+    removes exactly the card — so it is a uniform border by construction, at one
+    strength round the whole perimeter, and it composites over the DESKTOP rather
+    than over the backdrop. Measured, it was the brightest thing on the boundary
+    on three edges out of four: +41 levels over a wallpaper at 105 on the flank,
+    +35 over one at 36 along the top. A line brighter than the specular it is
+    supposedly supporting is the edge.
+  - **The catch and the shadow divide the perimeter rather than doubling up**,
+    and that falls out of the shadow's own `offset: (0, 1)` — weakest directly
+    above the card, strongest below, which is the opposite ordering to the catch.
+    Measured over the brightest wallpaper, the backdrop falls 172 → 158 above the
+    card and 237 → 146 below it. The boundary is a bright line where the shade is
+    thin and a pool of shade where the line is not.
+
+  What generalises past the card: **"is this glass or a border" is a question
+  about the whole perimeter, and non-uniformity is a RATIO rather than a
+  direction.** The edge that read as a border was already non-uniform — 0.46
+  along the top against 0.26 down the flank — and 0.26 of white on a 2px band all
+  the way round is a stroke a shade fainter, not a catch. `test_edit_mode_chrome.py`
+  scores three things now: a catch along the top (median 56.5/255), flanks and a
+  bottom that stay inside the range the backdrop and the desktop already span
+  (worst 0.0, against 31.0 and 37.8 before), and a drawn band at most two pixels
+  wide (1, against 5). The first of those is the one that had been missing:
+  **every edge check in that file passed with the edge removed entirely**, because
+  the notch check reads the profile from its crest inward and a bare ramp has no
+  notch in it. `test_edit_mode_contract.py` holds the source half — no
+  `border.width` anywhere in the file (the only way to draw a line the mask does
+  not cut, and what both retired lines were written as), no `colGlassShade`, the
+  width at `borderWidth.standard`, and the flank at most a quarter of the top.
+  ("fix(editMode): the card's edge becomes a catch, not a rim").
+
+  Two things generalise.
+  The one outer tone is a plain `Rectangle` declared INSIDE `surround`, whose
+  layer is already masked to the complement of the card — so the mask cuts it
+  back to the band outside the card by itself and the shading is the Rectangle's
+  own gradient, which is why the whole treatment adds no layer, no mask and no
+  effect (measured under headless weston's software renderer, 14.91s ± 0.22 of
+  user CPU against 14.68s ± 0.32, indistinguishable on a 3-4% spread).
+  And its colour is `Appearance.colors.colGlassSpecular`, the one colour in that
+  file deliberately NOT derived from the wallpaper: every other colour there is
+  generated from the picture on screen, so an edge drawn in one of them is
+  guaranteed to be a colour the picture already contains. Same reasoning as the
+  depth picker's hardcoded contour. Its `colGlassShade` sibling went with the
+  shade band — nothing else had ever read it, and `lint_appearance_tokens.py`
+  fails on a token that is read and not declared, never on one declared and read
+  by nobody, so a dead token there rots silently. ("refactor(appearance): a glass
+  edge is one tone, so colGlassShade goes").
+
+  Two things measured rather than argued while building the original. The shadow
+  stays `StyledRectangularShadow` at the magnitude the component defines —
+  raising `blur` from 9 to 40 on a 4403px card spreads the same darkness over
+  four times the distance and the two renders are indistinguishable, because the
+  edge contrast comes from `colShadow`'s alpha and most of a `RectangularShadow`
+  sits under its target, which the cut removes. And the chrome stands down
+  through **two** gates, the Loader's `active` and its `opacity`: either alone
+  hides it, so a frame comparison passes on a tree with one of them deleted,
+  which is why `test_edit_mode_contract.py` names both.
+- **The per-widget frost is stood down for the mode, not aligned to it**
+  (`PluginWidget.frostSuspended`, the generalisation of what used to be
+  `lockCoversFrost`). Measured on a live desktop with a Wallpaper Engine scene:
+  cards that are visibly frosted at rest render as flat tinted panels under the
+  transform, because the frost's sample rect is computed from three frames the
+  transform does not move together. Suspending it is the difference between a
+  deliberate look and a broken one nothing logs — and it is why proxy
+  rectangles, the spec's fallback, are not needed. It is also the one thing the
+  mode changes in a single frame rather than easing, deliberately: a frost is a
+  sample rect that stops being valid the instant the transform starts, so fading
+  it out fades out a picture that is wrong for the whole fade.
+- **The lattice is a substrate, and it says so** (`WidgetCanvas.qml`'s `lattice`
+  item at `z: -1`). The desktop widgets arrive as EXTERNAL children of the
+  canvas — `Background.qml`'s `Repeater` over the plugin manifests — so nothing
+  in `WidgetCanvas.qml` decides whether they are drawn over the grid; the order
+  is a consequence of when each `Repeater`'s model filled. A widget whose panel
+  is translucent, which every desktop widget is and which this mode makes more
+  so by standing the frost down, then has a crisp full-strength line running
+  across it, and a line is a foreground cue whatever is really in front.
+- **...and it belongs to the GESTURE, in the mode as well as out of it.** The
+  mode forced it on for the whole mode on the spec's §4.1 discoverability
+  argument, and that argument predates the mode having any chrome: the toolbar
+  and the tab bar say it is on now, and a mode that opens on a screen of graph
+  paper hides the desktop you came to look at. What the mode overrides is the
+  config SWITCH (`background.showGrid`, "draw the grid while I drag"), so
+  `gridVisible` is `showGrid && (editMode || the switch)` — the gesture is a
+  required conjunct and a top-level `||` is what the contract forbids. The
+  trigger is the distinction `AbstractWidget` already draws and never a second
+  one: `showGrid` is written from `onDraggingChanged`, which follows
+  `dragActive`, which `onPositionChanged` raises only past `drag.threshold`.
+  That matters because every one of a widget's own controls presses without
+  travelling — the resize grip, the right-click, a click that selects — and a
+  lattice flashing up under each of them is worse than one that never goes away.
+  Two consequences: the fade is `elementMoveFaster` rather than `elementMoveFast`
+  because its reference is now the pointer rather than the 500ms shrink, and
+  `widgetRemoved` takes the lattice down, because a widget destroyed mid-drag is
+  the one end of a gesture that never reaches `onDraggingChanged`. The pixel half
+  is three frames (at rest, mid-drag, and a whole-frame comparison of after
+  against before), because `gridVisible` goes false the instant a drag ends while
+  the fade still has 150ms to run — a lattice that never finished leaving reports
+  the same false.
+- **The whole mode animates on ONE scalar, and it is `GlobalStates.editProgress`
+  rather than a property of the surface that uses it.** The desktop's transform
+  and the chrome that frames it are on two different layer surfaces, in two
+  different scene graphs, and both build their geometry out of the progress —
+  so a second `Behavior on (editMode ? 1 : 0)` on the other surface is two
+  numbers that have to agree, agreeing at rest (the only place anyone looks)
+  and disagreeing exactly on the frames where the chrome frames a rectangle the
+  desktop is not at. `test_edit_mode_contract.py` sweeps the tree for a second
+  `Behavior on editProgress` rather than naming files, because the second one is
+  written by whoever adds the next surface.
+- **The chrome is a SECOND surface, and the viewport deliberately does not move
+  onto it** (`modules/imi/editMode/`). The desktop stays on `quickshell:background`
+  because that is where the wallpaper and the `WidgetCanvas` already are and
+  where a `ShaderEffectSource` can still reach the live Wallpaper Engine layer —
+  but that surface is on `WlrLayer.Bottom`, and measured live the layers come out
+  background / dock+bar / screenCorners+barPopup, so chrome drawn there renders
+  under a bar the mode leaves at full size. Three things a screen-sized surface
+  has to get right, all three of which this repo has already paid for once:
+  **input** (the mask is the toolbar's and the tab bar's rects and nothing else,
+  or the desktop underneath — the thing being edited — stops taking clicks; the
+  surface also does not exist while the mode is off, which is the state nobody
+  looks at); **blur** (a minted namespace absent from `rules.lua` falls through
+  the catch-all `ignore_alpha = 0.05`, under which a screen-sized surface of
+  transparent pixels asks the compositor to blur the entire screen —
+  `quickshell:editMode` is listed at `ignore_alpha = 1` because its two toolbar
+  bodies are opaque `m3surfaceContainer`, the same treatment
+  `quickshell:recordingRegion` and `quickshell:overlay` carry, and reusing
+  `quickshell:popup` is the trap `BarPopupOverlay.qml:53-69` records); and
+  **keyboard** (`WlrKeyboardFocus.None`, or a surface on `Overlay` sits in front
+  of the background and swallows the Escape the exit ladder is answered on).
+- **The chrome's placement IS the shrink's arithmetic, which is why it carries no
+  motion of its own.** Both pieces sit between two rectangles from
+  `edit_mode.js` — `cardRect`, the desktop's own, and `areaRect`, the screen
+  minus what the bar and the dock occupy — for the reason `ClockDepthCutout` is
+  one component. Placed against the SURFACE's own edges instead, which is how
+  stage 4 shipped, the chrome clears the card and lands on whatever is on that
+  edge; `areaRect` is what makes clearing the two panels a property of the
+  arithmetic rather than a literal tuned against `Appearance.sizes.barHeight`.
+  Both are functions of the same progress, and `areaRect` closes in from the
+  whole screen rather than being fixed at the usable area — so at progress 0 the
+  two rectangles coincide, both bands have zero height, and both pieces are
+  parked half off screen and arrive *with* the desktop rather than sliding in
+  from wherever the bar happens to end. A `Behavior` on either would be a target
+  that moves every frame, which restarts every frame and never ticks
+  (b710ef731). Note also what the pixel probe adds over the geometry checks and
+  what it does not: a chrome item left `visible: false` reports its box, passes
+  every geometry assertion, and paints nothing, so the probe measures the drawn
+  extent — while re-asserting "the chrome is outside the card" in the pixel half
+  would read the harness's own numbers back and agree with itself. The probe
+  stands two opaque bands on the reserved edges now, UNDER the chrome, because
+  the class no rect assertion can reach is chrome whose geometry is right and
+  whose shadow or content overhangs into one: planted as a decoration 40px above
+  the toolbar, that is the only check in either half that reddens.
+  620a480de ("test(editMode): score the chrome against the panels, and the edge
+  as a bevel").
+- **The drawer spends the reservation, and the ONLY term of the transform its
+  open state reaches is the desktop's `x`.** `edit_mode.js`'s `drawerTravel` is
+  what the centred desktop's free side cannot absorb of the drawer-plus-margin
+  slot (zero on screens where the scale ceiling left more room than the slot
+  needs), and `atProgress` takes it as a shift applied to `x` alone — the size
+  takes the drawer's WIDTH whether or not it is open, so opening it translates
+  the desktop and can never resize it (spec §1.3; a resize mid-edit is
+  b710ef731's moving target under every widget at once). The shift rides the
+  same `t` as the scale, so the exit lands on the identity even while both
+  scalars are mid-flight. Those scalars are `GlobalStates.editDrawerOpen` /
+  `editDrawerProgress`, beside the mode's own pair for the same two-scene-graphs
+  reason, and the one-scalar sweep in `test_edit_mode_contract.py` refuses a
+  second `Behavior` on either. The drawer itself (`EditModeDrawer.qml`) is
+  chrome: `drawerRect` pins its right edge to the usable area's and animates its
+  WIDTH, because the surface's input mask tracks exactly x/y/width/height — a
+  closed drawer is a zero-width rect whose mask region is empty, which is what
+  lets it sit in `quickshell:editMode`'s mask as a third region without a
+  permanently-reachable full-height rect eating clicks on whatever panel lives
+  on that edge. Its rows are deliberately `MouseArea`s, not buttons: a drag out
+  of the clipped panel needs the implicit grab of the press to keep delivering
+  events after the pointer leaves the reveal, and the contract's no-MouseArea
+  sweep names the drawer as the one exception. The drawer writes no store —
+  both gestures are signals, and `EditModeChromeSurface` makes every write: a
+  drop maps screen→canvas through `canvasPointFromScreen` (the inverse composed
+  out of the same `atProgress` the desktop is drawn with, so the two directions
+  cannot drift), is centred on the span the widget will come up at, snapped and
+  clamped by `dropPosition`, and the position is written BEFORE the enable — a
+  newly enabled plugin mounts at whatever the store holds, and spec §8.3 places
+  an added widget the moment it is added rather than inventing an unplaced
+  state. (feat(editMode): the drawer's travel, rectangle and drop point as
+  arithmetic; feat(editMode): the drawer, fed by the plugin catalogue, and
+  add-at-pointer.)
+- **What the mode may write is a failing check now**
+  (`tests/lint_edit_mode_scope.py`): a write from any file under the edit-mode
+  directories to a `Config.options.*` path outside spec §7.1's placement and
+  presence keys, a `PluginState.setOption` key outside `{__gridSize,
+  positionLocked, clickThrough}`, or a computed path or key — which no allowlist
+  can verify — reddens the suite. Three spellings are caught (assignment,
+  in-place `push`/`splice`, `setNestedValue`), the detector is proven against
+  in-memory fixtures inside the module, and the sweep asserts it still found the
+  edit-mode files so a directory move cannot leave it green over nothing.
+  (test(lint): fail on an edit-mode write outside placement's scope.)
+- **A right-click on a widget is the per-widget menu in the mode and the global
+  lock toggle outside it, and the boundary between the two is the canvas.**
+  `AbstractWidget` resolves the mode off its owning canvas — the same property
+  the marquee and the Escape ladder already run on, so the overlay's canvas
+  (which never follows the mode) keeps today's behaviour with no special case —
+  and only ANNOUNCES the click (`contextMenuRequested`): the base class knows
+  nothing about what a widget is, and `PluginWidget` is what carries an
+  identity. It maps the click with `mapToItem(null, …)` — Qt's own transform
+  chain, which composes the mode's scale, the drawer's shift and the press
+  scale — never a hand-multiplied viewport scale, which is the compensation the
+  contract forbids and is wrong at every scale but 1. The menu's rows are
+  exactly spec §9's three licences: Pin writes the one existing
+  `positionLocked` writer (`PluginState.setOption` — one writer, two call
+  sites) with its drawn check a BINDING on the stored value, seeded the way the
+  host seeds it; Size is a stepper over `offeredGridSizes` in the manifest's
+  own order writing `__gridSize`, with no row at all for a single-span widget
+  (`rowVisible`, not `visible`) and nothing for a widget that declined `grid`,
+  whose own handles keep the size they chose; Remove is presence —
+  `plugins.enabled` is one global list rendered on every monitor, so it removes
+  everywhere, through the same `EditMode.enabledWithout` the drawer's toggle
+  uses. The window is the desktop menu's shape on its reused
+  `quickshell:desktopMenu` namespace (a minted name would repeat the rules.lua
+  threshold exercise to reach the same treatment), the widget vacates the menu
+  from `Component.onDestruction` (the `BarContent.filterLayout` shape — its own
+  Remove destroys the widget under the open menu), and `closeMenu` is the
+  Escape ladder's FIRST rung, so Escape dismisses the menu rather than exiting
+  the mode. (feat(editMode): the menu's open state, and an Escape rung that
+  dismisses it; feat(editMode): right-click in the mode asks for the widget's
+  menu; feat(editMode): the per-widget menu - Remove, Pin, and a Size stepper.)
+- **`WidgetsSubmenu` is gone.** Its widget list had been empty since the desktop
+  widgets became plugins, and its one live control was the global lock the mode
+  suppresses — a switch that turns off something the editor turns back on. The
+  desktop menu's Widgets row keeps its click through to Settings and loses the
+  hover submenu and the chevron that promised it; the sanctioned writers of
+  `background.widgetsLocked` shrink to `AbstractWidget`'s right-click.
+  (refactor(desktopMenu): remove WidgetsSubmenu.)
+- **The bar and the dock are edited in place, at full size — stage 8.** The
+  mode holds them on screen as a TERM of the expressions they already answer
+  auto-hide with (`mustShow` in both bars, the dock's `reveal`), never
+  anywhere near a surface's `visible`, and the reservation stays
+  configuration-only — a bar coming out of hiding changes nothing about the
+  shrunk desktop. Their widgets go inert through an input EATER, not through
+  `enabled`: disabling a MouseArea disables only that area, and disabling the
+  whole subtree runs every control's disabled dim at once. The eater, the
+  reorder gesture (`ReorderDragArea`, whose only arithmetic is
+  `layout_ops.dropTarget`) and the shared `EditRemoveBadge` load per widget
+  from `BarGroup` — one Loader covering both orientations — and
+  `BarEditController` (one component both content trees instantiate, turned
+  by a flag) owns the indicator, the ghost and every commit. Commits map
+  visible indices back to STORED ones (`nthVisible` and friends): the drawn
+  slots are the filtered layouts, and an unmapped edit eats whichever hidden
+  entry sat between. Each bucket's visible boundary doubles as its drop
+  anchor, which is what makes an empty middleLayout a valid drop target. The
+  drawer offers bar widgets (`BarWidgets.offerFor` — the policy promoted so
+  the settings dropdown and the drawer cannot drift) and dock apps
+  (`DesktopEntries` through `AppSearch`), by CLICK only: their drop targets
+  live in other windows whose slot geometry this surface cannot map, so
+  placement is the in-place drag the panels themselves carry. Escape reaches
+  a bar drag through composition into the ladder's `gestureInFlight` (no new
+  rung — the precedence does not care which gesture is in flight) and
+  `GlobalStates.editReorderCancel` is the return path to a grab held on
+  another surface; every commit is also guarded on the mode, because a drag
+  can outlive it. `test_bar_dock_edit_contract.py` pins all of it on BOTH
+  bars, and `BarEditRuntimeTest.qml` drives the along/across pair at both
+  orientations — the axis-inert comparison only real events can see.
+  (feat(bar): the mode holds the bar and the dock on screen, as a term;
+  feat(bar): bar widgets become inert, badged and reorderable in the mode;
+  feat(dock): pinned icons grow remove badges and go inert in the mode;
+  feat(editMode): the drawer grows Bar and Dock sections.)
+- **The Lockscreen tab is a filter on the viewport, and its preview cannot
+  authenticate — stage 9.** The tab is `GlobalStates.editTab`, a string beside
+  the mode holding `edit_mode.js`'s tab constants (the literal lives in that
+  file alone), reset on exit like the drawer and the menu; the ONE derivation
+  of "the viewport is showing the lock screen" is
+  `GlobalStates.editLockPreview`, and the contract forbids an `editTab ===`
+  comparison anywhere else — the chrome's tab bar maps index↔tab through the
+  module's `tabAt`/`tabIndex` for exactly that reason, and its two directions
+  are imperative on purpose, because `ToolbarTabBar`'s wheel handler assigns
+  the inner index directly and would destroy a binding placed on it. What the
+  tab changes is gates on things `Background.qml` already draws: the lock
+  wallpaper, the lock WE project, the peel state, the lock blur (through one
+  local `lockLook`), `AbstractBackgroundWidget`'s lock filter, and the clock's
+  four lock-look bindings (one `lockLook` in the plugin — centring, style,
+  show-only-when-locked, the Locked caption). The islands are the REAL
+  `LockSurface`, neutered by construction: `interactive: false` gates the
+  root area, the field (`enabled` AND `readOnly`), `forceFieldFocus` and
+  every click/key handler uniformly — so `tests/test_lock_preview_contract.py`
+  holds ALL handlers to the one guard and asserts how many it found, since a
+  sweep here that matches nothing is a security hole reading as green — and
+  the context is `LockPreviewContext`, a separate component enumerated
+  against `LockContext`'s whole surface that constructs no pam machinery and
+  spawns nothing (never "the real one with a flag"). The host is a fifth
+  sibling carrying the one edit matrix at z 4, above the widgets the way the
+  real session lock surface is. The bar and the dock leave the tab through
+  the lock's own gates (the bars' loader `active`, the dock's `visible` — a
+  surface teardown per tab flip, sanctioned where auto-hide suspension never
+  is), while `EditModeInsets` deliberately does NOT drop with them: the
+  reservation is configuration-only, and a card resized per tab flip is
+  b710ef731's moving target under every widget at once. Island visibility is
+  the drawer's Lock section — rows signal, the chrome surface flips the three
+  `lock.show*` booleans at literal paths. Known fidelity gaps, accepted and
+  stated: no fingerprint glyph in the preview (knowing means asking the
+  daemon), parallax stays desktop-framed (its zoom feeds the viewport's
+  size), and `centeredWallpaperOnlyWhenLocked` does not preview.
+  (feat(lock): LockSurface takes an interactive switch, default on;
+  feat(lock): LockPreviewContext, a context that cannot authenticate;
+  feat(editMode): the mode's tab, a GlobalStates string beside it;
+  feat(background): the viewport draws its locked inputs on the Lockscreen tab;
+  feat(bar): the bar and the dock leave the Lockscreen tab;
+  feat(editMode): the drawer grows a Lock section for island presence.)
+- **The islands' CONTENTS are three ordered lists, resolved by one module —
+  stage 9b, spec §14 answered "reorder".** `Config.options.lock.islands.
+  {main,left,right}` are declared `list<string>` properties (a `JsonAdapter`
+  cannot hold a dynamic map) whose defaults are the hand-placed order the
+  surface always drew, and `modules/common/functions/lock_islands.js` is the
+  only reading of them: `orderedItems` renders a known id MISSING from a
+  stored list at its default position rather than disappearing it, skips an
+  UNKNOWN stored id without destroying it, and `storedOrder` merges a commit
+  back with every unknown id's presence kept — both directions of the
+  version-skew rule, because a list written by one shell version and read by
+  another is where silent removal happens. `LockSurface` draws each island
+  as a Repeater over the resolver's answer through one `IslandSlot` Loader
+  (Layout facts in `islandItemMeta`, components in `islandComponents`, both
+  pinned to the module's whole vocabulary — a missing entry is an empty slot
+  or a zero margin, not an error); the password field is rendered from the
+  list and pinned unmovable by the module's `reorderable()`, reachable
+  through the published `passwordField` property. The reorder is stage 8's
+  machinery with no fifth copy: `LockIslandEditItem` (eater + shared
+  `ReorderDragArea`), `LockIslandReorder` per island (ONE bucket each — a
+  cross-island move would write an id the receiving island's resolver
+  correctly skips, vanishing it from both), commits through `layout_ops` +
+  `storedOrder` at three literal paths, guarded on the mode, with
+  `GlobalStates.editLockDragActive` composed into the Escape ladder beside
+  the bar's flag. The scope lint sweeps `modules/imi/lock` and admits
+  exactly the three list paths.
+  **Verifying any of this must never touch the live display.** A lock-screen
+  probe run against the user's Wayland session locks the real session, and
+  on this machine a real lock suspends the laptop — so every harness and
+  probe for the lock surface runs under headless weston with its OWN
+  `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` (the shape
+  `test_lock_island_reorder_runtime.py` uses), never a `qs -p` against the
+  session, and anything that genuinely needs a real `WlSessionLock` is
+  recorded as unverified rather than attempted.
+  **The session BUS is part of that isolation, and was the half this harness
+  missed.** `islandItemVisible` hides `username` and `keyboardLayout` while a
+  media player is registered, so a harness on the developer's own bus drags
+  two invisible slots and commits nothing — the reorder check failed on the
+  maintainer's machine, where a browser held an MPRIS name, and passed
+  everywhere else with the shell's code identical. A harness that launches
+  `qs` now wraps it in `dbus-run-session` (or names a bus it starts itself);
+  `tests/lint_runtime_bus_isolation.py` fails a new one that does neither and
+  carries the 33 existing harnesses as a ratchet.
+  (feat(lock): lock_islands.js, the islands' order as arithmetic;
+  feat(config): three ordered island lists under lock.islands;
+  refactor(lock): the three islands become data-driven;
+  test(lint): the scope lint reaches the lock surface and admits its lists;
+  feat(lock): island contents reorder in the mode;
+  test(lock): the reorder harness gets a session bus of its own;
+  test(lint): a qs harness must decide which session bus it talks to.)
+- **"The lock's look is on screen" is ONE derivation, and the palette is one
+  of the things it decides.** `GlobalStates.lockLookActive` is
+  `screenLocked || editLockPreview`, and it sits beside `editLockPreview`
+  rather than replacing it because the two answer different questions:
+  `editLockPreview` decides which SOURCE a layer draws, which every layer
+  answers for itself, and `lockLookActive` decides which THEME the picture is
+  in, of which the shell has exactly one. The disjunction had been written out
+  at six sites across three files and the seventh — `MaterialThemeLoader.
+  lockThemeActive` and Appearance's `wallColorQuant`, which the transparency
+  is derived from — was missed, so Edit Mode's Lockscreen tab drew the lock's
+  wallpaper under the desktop's colours. Six copies of a question is how the
+  seventh gets forgotten. `test_edit_mode_contract.py` pins the definition as
+  well as the sites, because every gate now reads it and a narrowed definition
+  un-filters all of them at once.
+  (feat(editMode): one derivation of "the lock's look is on screen";
+  fix(editMode): the Lockscreen tab carries the palette with it;
+  test(editMode): the tab's palette is driven, and the derivation is pinned.)
+- **The lock screen's widget layout forks from the desktop's on the first Lockscreen-tab
+  edit, and the SPAN forks with the position.** Spec §4.3 chose one shared position and gave two
+  objections; the maintainer overruled it (2026-08-18) and both objections are answered rather than
+  waved off. `modules/common/plugins/layout_surfaces.js` is the arithmetic: `lockPositions` beside
+  `desktopPositions`, same shape, a screen ABSENT from it inherits the desktop's — so every user is
+  still in the one-position model until they move something there — and the first lock write is a
+  SNAPSHOT of the whole screen through one `forkedScreen()` that both writers share. The desktop's
+  span stays the per-plugin `__gridSize` option; a forked lock screen's lives IN the widget's lock
+  record as `gridSize`, so a media widget can be 3×2 on the desktop and 1×2 on the lock (the
+  report). `PluginState.currentSurface` resolves the default from `lockLookActive`; **every
+  undoable write captures the surface at push time** — a closure resolving it at pop time writes
+  the lock's position into the desktop store from the other tab, and the store still reads valid.
+  Planted and caught by name in `EditModeRuntimeTest` for both position and span. Presets carry
+  `lockPositions` under the same `has()` rule as the desktop map, so an older preset keeps a fork.
+  The drawer's Lock section shows "follows the desktop / is separate" and the re-link.
+  (feat(plugins): layout_surfaces.js - two widget layouts, one store, fork on first edit;
+  feat(editMode): every position and span write captures its surface into its undo;
+  test(editMode): the fork is driven through the real drag and the real grip.)
+- **A dragged widget holds a neighbour's edge through a Schmitt trigger, and
+  both thresholds read the SHADOW — stage 10, spec §6.**
+  `modules/common/functions/edge_snap.js` owns the arithmetic: four relations
+  per neighbour per axis, each carrying the `target` the widget travels to AND
+  the `guide` the line is drawn at (they differ for half the relations,
+  because the line belongs to the OTHER widget's edge); the two ADJACENCY
+  relations land one `Appearance.sizes.widgetGridGap` off the neighbour, not
+  flush — flush shipped first and glued widgets into a slab, and the gap that
+  already separates cells INSIDE a widget is what makes two widgets read as
+  one grid (the module takes the gap as a parameter to stay pure; the widget
+  hands in the scaled token; the guide is still at the neighbour's own edge);
+  a perpendicular relevance filter measured as the GAP between extents,
+  boundary excluded; and
+  acquire-at-18/release-at-32 compared against `dragProxy`, never the rendered
+  position — with one threshold the decision boundary and the resulting
+  position are the same number and the widget flip-flops per event.
+  `AbstractWidget` captures neighbour rects at the press (after
+  `widgetDragStarted`, so a group drag's followers are already flagged and
+  excluded), regenerates candidates per event in the drag proxy's handlers
+  (the resolve is stateful, so it lives beside `updateCenterHighlight`, not
+  in the drag Binding), and a held target REPLACES the lattice snap rather
+  than stacking on it — rounding an exact alignment misses the edge by up to
+  half a cell. Snap-then-clamp survives; the group leader snaps and followers
+  ride by delta with no new code. The feature rides
+  `background.showSnapLines` (the switch that already gates the alignment
+  visuals, and the one the dead designsystem duplicate rode for the same
+  feature): the guide and the detent travel together, because either alone is
+  a mystery. Guides draw ABOVE the widgets in the centre-line family's
+  animation tier, travelling while visible and placing instantly while not.
+  Two traps paid for: the hold must be cleared one turn AFTER the drag ends
+  (`Qt.callLater`) — `onDraggingChanged` and the drag Binding's `when` both
+  observe `dragging` with nothing ordering them, and nulling the hold under a
+  still-live Binding rounds an off-lattice landing onto the lattice (measured:
+  released holding 465, committed 468) — and the runtime harness's landings
+  sit on edges the lattice cannot produce (an anchor at x 305), or a wiring
+  that silently fell back to `snapX` passes by coincidence.
+  (feat(widgetCanvas): edge_snap.js, widget edge alignment as arithmetic;
+  feat(widgetCanvas): a dragged widget holds a neighbour's edge, under a travelling guide;
+  fix(widgetCanvas): clear the edge-snap hold after the drag Binding stands down;
+  test(widgetCanvas): the walk pins the detent in raw numbers, not the module's own;
+  test(widgets): drive the edge snap's acquire, detent and release with real drags.)
+- **Ctrl+Z reverses the last COMMITTED mutation, and it lives on the canvas
+  because that is where the keyboard measurably works — stage 10, spec §7.3,
+  gated on §11.4 probe 4 and now measured.** The probe ran in a nested
+  Hyprland on the blur probe's shape, hardened: the nested instance gets its
+  OWN `XDG_RUNTIME_DIR` and reaches its wayland parent through an
+  ABSOLUTE-path `WAYLAND_DISPLAY` (libwayland only prefixes the runtime dir
+  onto a relative name), so its sockets cannot land beside the session's; a
+  fully headless nested Hyprland is not possible — Aquamarine's
+  `CBackend::create()` aborts with no wayland parent and no seat. Keys were
+  injected with wtype (a virtual-keyboard CLIENT of the nested display —
+  ydotool writes uinput into the kernel and reaches the user's real seat, so
+  it is never the tool for this). Measured on 0.56.2: a `Bottom`-layer
+  surface with `keyboardFocus: OnDemand` receives real compositor keys while
+  holding that focus, an Overlay/Exclusive control proved the injection path,
+  and a mapped toplevel beside it did not take the keyboard away
+  (`activewindow: Invalid` throughout). The undo stack sits in `GlobalStates`
+  with its arithmetic in `edit_mode.js` (bounded at 50 dropping the OLDEST,
+  LIFO, copy-on-write because a `property var` signals on reassignment only);
+  recording is gated on the mode, one entry per committed mutation (a release
+  that moved nothing pushes nothing — every click on a draggable widget
+  releases through `commitPosition`), and every entry is a closure over the
+  store write that captures plain data and SINGLETONS only — the mode
+  destroys its overlays, menus and widgets while the stack outlives them, so
+  a closure over a controller throws on the exact keystroke that exists to
+  repair a mistake. The dock-pin entry is the same flip again through
+  `TaskbarApps.togglePin`, because restoring the list would need the chrome
+  surface to read `Config.options.dock` — the second derivation the
+  one-answer contract forbids, and it caught exactly that draft. Two edges
+  the first cut got wrong, both review-caught: a GESTURE that commits several
+  mutations is one entry, so a group release opens a batch the canvas closes
+  with `Qt.callLater` (the leader's commit runs later in the same signal
+  chain and has to fall inside — without it the leader's entry lands last
+  and the first Ctrl+Z moves the leader alone, deforming the cluster); and
+  `PluginState.setOption` treats null as REMOVE, because undoing a
+  first-ever span commit otherwise persisted a literal null that `option()`
+  — which falls back only on `undefined` — would answer past every later
+  caller's fallback.
+  (feat(editMode): the undo stack's arithmetic - bounded, LIFO, copy-on-write;
+  feat(editMode): Ctrl+Z reverses the last committed mutation, on the surface the keyboard reaches;
+  test(editMode): drive undo's record, reverse and gate, and pin its shape;
+  fix(editMode): a group release is one undo entry, and undoing a first commit leaves no null behind.)
+(feat(editMode): shrink the desktop into a viewport on the background surface,
+feat(editMode): stand the per-widget frost down for the mode,
+feat(editMode): draw the shrunk desktop as a card, not as a cropped screenshot,
+feat(editMode): shrink the desktop about dead centre, and move it only for the drawer,
+feat(widgetCanvas): the lattice is a substrate, and it dissolves at the edges,
+feat(editMode): animate the mode on one scalar, shared by every surface,
+feat(editMode): draw the mode's toolbar and tab bar on a surface of their own,
+test(editMode): score the chrome against the desktop it frames,
+fix(widgetCanvas): the lattice comes up with the drag, not with the mode,
+feat(editMode): give the card's edge thickness instead of a drawn line,
+fix(editMode): stop the card's rounded corner biting a widget the user placed,
+fix(editMode): the card's edge becomes a catch, not a rim,
+feat(editMode): the drawer's open state, one scalar beside the mode's,
+feat(editMode): opening the drawer translates the desktop,
+test(editMode): drive the drawer's translation with real gestures.)
+
+**The clock depth layer is the counter-case to that rule, and it is why it is a
+FOURTH sibling.** `widgetCanvas` sits at `z: 2` as a sibling of
+`parallaxViewport`, so a child's `z` can only reorder it against its viewport
+siblings and can never lift it above the desktop widgets — `weTransition` at
+`z: 1` is exactly that case. Anything that must draw *over* the widgets while
+tracking the wallpaper therefore cannot live in the viewport at all: it is a
+sibling at `z: 3` that reconstructs the pan by binding `x`/`y`/`width`/`height`
+to `parallaxViewport`'s **live** properties (never `bgRoot.parallaxOffsets`,
+which is the 600ms Behavior's destination — the frost's `wallpaperRect` reads the
+same four for the same reason), carries its own `visible: !bgRoot.suppressContents`,
+and declares `enabled: false` because `desktopRightClickArea` at `z: -2` works
+only while everything above it lets clicks through.
+`tests/lint_clock_depth_geometry.py` pins all of that;
+`tests/test_clock_depth_compositing.py` renders it under headless weston and
+samples the pan mid-animation, because a layer bound to the destination settles
+in exactly the right place and passes every settled check.
+
+**Being above the widgets is also why it stands down for Edit Mode**
+(`ClockDepthLogic.eligible`'s `editing` refusal). Once the mode's cover moved
+below the widget canvas, this layer was the one thing left drawing above it, and
+it cannot follow the widgets down without putting the widgets under the cover
+again — which is the bite that move removed. Two reasons to refuse rather than
+reorder, and they are both its own: it paints the wallpaper's subject OVER the
+widgets the mode exists to let the user arrange, which is a partly hidden widget
+in the one mode where that matters most (the sibling of the `selecting`
+refusal); and it reconstructs the parallax viewport, which is deliberately
+larger than the screen (`workspaceZoom`, 1.1 by default) with only the layer
+surface's own edge keeping that overscan off screen. The mode's transform pulls
+the desktop's edge away from the surface's and puts the blurred backdrop in
+between, so a subject reaching the picture's edge would be free to paint up to
+154px past the card at 5120x1440. The refusal touches nothing else:
+`ClockDepth.watching` is `enabled || picking`, so entering the mode drops no
+cached answer and leaving it re-runs no segmentation.
+(feat(background): draw the wallpaper's subject over the desktop widgets,
+fix(clockDepth): stand the depth layer down for the mode that arranges widgets.)
+
+**`OpacityMask` masks by the mask's ALPHA channel and nothing else, so a
+grayscale mask is opaque everywhere.** The obvious artifact for a segmentation
+mask is an "L" PNG — white subject, black background, and a mask you can look at
+— and handed to `OpacityMask` it lets the *whole* source through, because black
+at alpha 255 is as opaque as white. The clock depth layer drew the entire
+wallpaper flat over the clock that way, with correct geometry throughout and
+nothing in any log. `scripts/background/subject_mask.py` writes "LA" — the same
+plane in both channels — so the alpha masks and the luminance keeps the file
+inspectable. Anything else here that reaches for `OpacityMask` has the same
+question to answer about what its mask's alpha actually is.
+(fix(background): write the subject mask into its alpha channel too.)
+
+**A mask cut at the model's square input is not the wallpaper's aspect, and
+filling it into the same box is not the same crop.** `isnet-anime` squashes the
+whole picture to 1024² (padding is measurably worse — with black bars the model
+returns the entire picture as the subject), so the stored mask WAS square (it is
+aspect-true since the entry below) while the wallpaper is drawn `PreserveAspectCrop`. Filling both into the viewport
+stretches them differently — by 3.5× on this monitor. `ClockDepthLogic.coverRect`
+returns the rectangle the whole wallpaper would occupy if nothing clipped it; the
+mask is `Image.Stretch`ed into that and the surface clips it back, which is
+undoing the squash and re-applying the crop in one step. Kept as a pure function
+in `modules/common/functions/clockDepth.js` beside the eligibility predicate for
+the same reason `ParallaxMath.sampleOrigin` is: nothing about the rendered layer
+is reachable from `qmltestrunner`, so the arithmetic has to be.
+(feat(background): draw the wallpaper's subject over the desktop widgets.)
+
+**The model's square is the right INPUT and was the wrong STORAGE, and the two
+came apart because the softness was being upscaled with the mask.** Squashing a
+5760x2318 wallpaper into 1024² gives every mask texel ~5.6 picture pixels, and
+what shipped was that raw matte upscaled bilinearly by Qt: hair claimed a band
+of wall around itself and a striped wall behind a hairline showed through as
+subject. The producer now hardens every mask around 0.5 with a k=6 sigmoid
+(0.5 stays at 0.5, so no pixel changes sides) AFTER resampling it to the
+storage size — 4096 on the long side, aspect-true, never larger than the
+wallpaper — and the order is what makes it work: soft band 0.307 Mpx as
+shipped, 0.235 with harden-then-resample, 0.119 with resample-then-harden.
+Three things to carry forward. **A second model pass over the subject's box
+was landed and reverted in the same PR**: measured, it lost 17.7% of the
+coarse subject (the neck went 0.994 → 0.671) for 0.5% gained, and the stripe
+cleanup it was credited with was the hardening's — the stripes were already at
+0.257 in the single pass. **A guided filter was tried and rejected** for
+widening the band along low-contrast outlines. And `coverRect` needed no
+change for a non-square salient mask, for the reason the prompted-model entry
+below already gives — it is a rectangle for the wallpaper and never reads the
+mask's shape — but the comments on both sides of it *said* the mask was
+square, and now say what it was and what it is.
+`tests/test_subject_mask_refine.py` pins the curve, the resample-then-harden
+order (against a control that must itself show the ramp) and the storage size
+without loading a model. Design doc §9.
+77497c63a ("feat(background): harden a mask's edge around the model's own boundary"),
+983e4c529 ("feat(background): store a mask aspect-true at 4096 on the long side"),
+7e0dc5f16 ("revert(background): drop the second model pass over the subject's box"),
+1a6a2b970 ("feat(background): harden the edge after the resample to storage size, not before").
+
+**Two captures separated in wall-clock time on a desktop somebody is using are
+not an A/B test, and the thing that changes between them becomes your signal.**
+The clock depth layer was reported as making the wallpaper's quality "drop
+completely", measured with two `grim -o DP-1` shots taken minutes apart with the
+feature toggled between them, and scored at 97.8% of pixels differing with a mean
+absolute difference of 48.5/255 over the whole frame. That was read as the masked
+copy landing off by a scale factor, and a whole geometry hypothesis was built on
+it. **The user had changed the wallpaper between the two captures.** The diff was
+two different pictures. Nothing about the numbers looked wrong — they were
+enormous, consistent, and reproduced the reported symptom exactly, which is what
+made them convincing. Before diffing two frames of a live desktop, ask what else
+could have moved; if the answer is "anything", the measurement belongs in one
+process with the inputs pinned.
+
+The repair generalises past this feature: **find the invariant that turns the
+question into an oracle.** The depth layer paints the wallpaper's own pixels back
+over the wallpaper, so where no widget sits it draws a picture over itself —
+which means with an empty widget canvas, depth on and depth off must be the same
+frame *whatever the mask contains*. `tests/test_clock_depth_noop.py` runs exactly
+that: one `qs` process, one wallpaper nothing can swap, only the depth flag moving
+between the two grabs. On the current code it is bit-identical on its synthetic
+fixture and differs by at most one least-significant bit on 0.18% of pixels
+against the real 3840x1594 wallpaper — the source making a round trip through the
+effect's intermediate buffer — so the alignment question is settled rather than
+argued. Its fixture's wallpaper aspect is deliberately nothing like its
+viewport's, because at a matching aspect `PreserveAspectCrop` is the identity and
+every crop bug is invisible; the sibling compositing probe's 2:1-into-2:1 fixture
+has that hole, which is why "the fixture actually crops" is a check there rather
+than a comment. Note the half the oracle cannot see: a mask registered to the
+wrong pixels still passes, because masking the wallpaper with the wrong shape
+still draws the wallpaper over the wallpaper.
+(test(background): score the depth layer's no-op invariant in pixels.)
+
+**A visualizer that computes its own geometry is a visualizer that can lie about
+the thing it exists to judge.** The wallpaper selector's depth picker is where
+the accept/decline verdict is given, and it drew its preview from its own copy of
+the layer's stack — the same `coverRect` call, the same clipping surface, the
+same `OpacityMask`. Two hand-written copies of a registration is the shape this
+repo keeps paying for, except worse in this direction: a picker whose crop drifts
+from the layer's certifies a mask against a geometry the desktop never draws, and
+the drift is invisible precisely because both look plausible. They are one
+`modules/imi/background/ClockDepthCutout.qml` now, and the rule the lint enforces
+is the deliverable rather than the component — `coverRect` may be called from
+that file and from its own unit test and nowhere else, so a second caller
+reddens the suite instead of becoming a second opinion.
+
+Three things about building the inspection view on top of it. The veil that dims
+what the model did *not* claim is `OpacityMask { invert: true }` over the **same**
+surface the cutout is masked by, so the lit region and the drawn region cannot be
+a pixel apart. The contour is a `Glow` with `transparentBorder: true`, because
+without it the blur clamps at the item's edge and a subject touching the bottom of
+the frame smears into a band across it — which reads as a defect in the mask being
+judged rather than in the instrument judging it. And its colour is hardcoded,
+which is the one place in this shell that is right: every `Appearance` token is
+generated *from* the wallpaper on screen, so a token there is guaranteed to be a
+colour the picture already contains.
+(refactor(background): one cutout for the layer and the picker to draw.)
+
+**And when both models return nothing, the answer is a different QUESTION, not a
+lower threshold.** Swept over the 94 wallpapers in this library, the two salient
+detectors leave 45 of them at `none` — half the library, with the picker
+correctly reporting that neither found a subject and nothing to be done about it.
+The tempting read is that `EMPTY_FOREGROUND = 0.005` and the `mask > 0.5`
+binarisation are throwing away a faint answer. They are not, and the measurement
+is what settles it: before any threshold, on `aishot-3263.jpg`,
+`isnet-general-use` claims 2.78% of the frame at 0.1 confidence and 0.28% at 0.5,
+`isnet-anime` 0.07% and 0.00%; on `aishot-1206.jpg` it is 1.20%/0.19% and
+0.00%/0.00%. Admitting a claim that small admits noise. These are salient-object
+detectors — one dominant object against a separable background — and a full-bleed
+wallpaper has no background to separate from, so the model is being asked a
+question the picture does not answer. `mobile-sam` is asked a different one
+("what is the thing at this point"), which is why it is a third column in the
+picker rather than a fourth detector, and why the user clicking is not a fallback
+but the mechanism. (feat(background): a third model that answers a click instead
+of the picture.)
+
+Four things about that column generalise past it:
+
+- **The encoder/decoder split is a contract, not an implementation detail.**
+  Encoding the picture costs seconds and depends only on the picture; decoding a
+  mask from clicks reads the embedding and costs milliseconds. Measured on a
+  7680x2160 wallpaper: 1.63s for the first click, 0.34s for the second, of which
+  0.24s is starting Python. A fused single-file export would charge the first
+  click's price for every click, and refinement — which is the entire interaction
+  — would be unusable. `tests/test_clock_depth_cache.py` pins the pair as two
+  files, and pins that a cached embedding comes back with the encoder file absent
+  and `onnxruntime` raising on import.
+  (feat(background): a third model that answers a click instead of the picture.)
+- **The prompt lives inside the mask, in a PNG text chunk.** A SAM mask is a
+  function of the clicks as well as the picture, so something has to record them
+  — and every other place to put them is a pair that has to agree. In the key
+  they mint an entry per click, so a five-click refinement leaves five masks and
+  needs a sixth file to say which was accepted. In a sidecar they are two files a
+  sweep, a copy or a crash can separate, and `accept` is a byte copy so the
+  sidecar would have to be copied by hand in the one place forgetting is silent.
+  In `Config` they are a map keyed by a runtime path, which the `JsonAdapter`
+  cannot hold. Inside the file the prompt cannot arrive without its mask or
+  outlive it, `accept` carries it for free, and the accepted copy keeps saying
+  what it was cut with after the candidate is refined further. `status` reads it
+  back with a hand-written chunk reader, because that path may not import Pillow.
+  (test(clock-depth): pin the prompt, its home in the mask, and the embedding cache.)
+- **`coverRect` needed no new case, and that was confirmed rather than assumed.**
+  A prompted mask comes out at the picture's own aspect (SAM resizes the longest
+  side and pads) where a salient one is square (isnet squashes), and `coverRect`
+  exists precisely because of that squash — so the obvious guess is that a
+  non-square mask needs a second path. It does not: the rect is a rectangle for
+  the WALLPAPER and the function never reads the mask's dimensions at all, so
+  stretching any mask into it maps that mask's whole extent onto the picture's
+  whole extent. `tst_clock_depth_eligibility.qml` pins both halves, and its
+  second case uses a 3.56:1 picture in a 4:3 box on purpose — at a matching
+  aspect the box IS the cover rect and every registration bug is invisible.
+  (test(clock-depth): confirm a picture-shaped mask needs no new registration.)
+- **A file rewritten at the same path is not reloaded, and neither clearing the
+  source nor `cache: false` fixes it.** Qt keys its pixmap cache on the URL, so
+  an `Image` whose file changes underneath it keeps drawing the old bytes for
+  the life of the process. Measured with a `qml6` probe: a 32x8 PNG rewritten on
+  disk at 99x17 and re-assigned to the identical URL still reported
+  `implicitWidth` 32, and setting `source = ""` first and re-assigning did not
+  help; with a `#<token>` fragment appended it loaded the new bytes, and the
+  fragment is not part of the filename so nothing else about the load changes.
+  This bites twice here — the prompted candidate is rewritten on every click and
+  the accepted mask whenever a second candidate is accepted for the same
+  wallpaper — and both failures look like the feature ignoring the user rather
+  than like a cache. `ClockDepthCutout.maskRevision` carries the producer's
+  token (the file's mtime in nanoseconds, as a **string**: 1.8e18 does not
+  survive a JSON round trip through a double), and
+  `tests/lint_clock_depth_geometry.py` fails on a depth layer that names the
+  mask path without it. Anything else here that writes a file the shell is
+  already displaying has the same question to answer.
+  (fix(background): bust Qt's pixmap cache when a mask is rewritten in place.)
+- **A click that finds nothing must not write a `.none` marker, and it does not
+  use the detectors' floor either.** That marker means "this model looked at this
+  picture and there is nothing in it" and is worth not re-learning at 4.5s a
+  time. A click that lands on flat sky is one attempt, and recording it as a
+  refusal tells the picker to stop offering the one column the user aims. The
+  threshold is a separate constant for the same reason: `EMPTY_FOREGROUND`
+  (0.005) divides a model's own answer from a stray fragment, while a click is
+  the user asserting there is something there — measured, reusing it discarded a
+  76000-pixel object on a 7680x2160 wallpaper as "nothing there", and it was not
+  buying the refusal it looked like it was for, since a click on flat sky comes
+  back at 1.6-10% because SAM answers with the sky.
+  (fix(background): a click's floor is not the detectors' floor.)
+
+**A live Wallpaper Engine scene is masked by a mask of its own STILL, keyed on the
+project, and the predicate refuses the wrong silhouette from both sides.** The
+shell already photographs every project it renders (`captureGreeterStill`), and
+that still is the viewport itself at the viewport's size, so a mask cut from it
+registers 1:1 - but the still is re-grabbed every session, so keying its cache
+on the file's stat triple would forget the user's acceptance on every restart.
+`subject_mask.py` takes `--identity we:<projectId>` on every verb and
+`ClockDepth.askingWe` decides when to send it (never during a preview - a
+preview is a still picture over the live scene and the question is about that
+picture). `ClockDepthCutout.liveSource` paints the live surface through the same
+`OpacityMask` (a masked still would freeze every animated pixel inside the
+silhouette), falling back to the wallpaper image, which
+`lint_clock_depth_geometry.py` pins. `clockDepth.js` compares `weActive` against
+`maskIsWe` rather than refusing `weActive`: a project's mask over the static
+fallback (`web`, `weFailed`, the safety screen) is the same wrong silhouette as
+a still picture's mask over a live scene, and one comparison holds both. Two
+things a first cut would get wrong: `status` answers before its picture exists
+(`available: false` - a project on screen for the first time has no still until
+600ms after its first frame), so the picker says "waiting for the first frame"
+and the grab's completion pokes `ClockDepth.refresh()` - observed, not polled -
+and the desktop selector cannot sample another window's surface, so it draws the
+candidate cut from the still over the live scene, frozen inside the silhouette,
+which is exactly the §8.4 honesty question the user is asked to judge.
+(feat(clockDepth): the producer takes an identity in place of the stat triple,
+feat(clockDepth): mask a live Wallpaper Engine scene with a mask of its still.)
+
+**And the click belongs on the desktop, because a mask judged at screen size
+cannot be authored on a thumbnail.** The gesture shipped on a ~300px preview
+inside the depth picker, which is a structural mismatch rather than a matter of
+taste: the mask is scored against real widgets at 5120x1440 and was being aimed
+at a postage stamp, so a click landing on a character's shoulder in the preview
+is several hundred pixels off in the thing being judged - and nothing reports it,
+because a mis-aimed click comes back as a perfectly good mask of the wrong thing.
+`modules/imi/clockDepthSelect/` is a transparent, screen-sized `Overlay` surface
+per output; the picker keeps the two detector columns, this wallpaper's verdict
+and the way in. Four things about it generalise.
+
+- **Nothing on that surface redraws anything, and that is the whole design.**
+  The wallpaper is already on screen at exactly the size and crop the mask has
+  to line up with, and the widgets are already under it, so the pixels clicked
+  are the pixels the depth layer will mask by construction rather than by
+  arithmetic, and the cutout drawn over the widgets IS the occlusion being
+  judged. A second copy of either is a second chance to be misaligned, in a
+  feature that already spent an evening on a misalignment that turned out not to
+  exist (see the two-captures entry above). `test_clock_depth_select_contract.py`
+  fails the suite on an `Image` appearing in that file at all.
+- **A layer surface cannot read another window's items, so the geometry is
+  PUBLISHED rather than re-derived.** The wallpaper viewport is oversized and
+  offset by the parallax pan, and `ParallaxMath.offsets` is right there and
+  pure - reconstructing it on the selector's side would look like reuse and be a
+  second derivation of the one number `ClockDepthCutout` exists to have only one
+  of. `Background.qml` publishes the depth layer's own live box per screen into
+  `GlobalStates.clockDepthViewports` (including the wallpaper ITEM's source, not
+  the config path, for the reason the layer reads the item), the surface draws
+  its cutout into that box, and the click is measured against the rectangle that
+  same cutout publishes. The binding is null while the mode is disarmed, so it is
+  a comparison rather than a fresh object per frame of every pan for the rest of
+  the session. Note which coordinate space that leaves: a click arrives in SCREEN
+  coordinates and the registration is expressed inside the box, so
+  `clockDepth.js`'s `promptFromScreen` composes the translation - and the
+  translation is exactly the term that is zero with parallax off, i.e. correct on
+  the first screen anyone tries it on and wrong on every workspace but the middle
+  one.
+- **Two flags meaning "somebody is picking" is one flag too many.** `ClockDepth`
+  drops every cached answer the moment nothing is `watching`, and the picker's
+  claim (`picking`) dies with the picker as the wallpaper selector closes. Giving
+  the new mode a second write of that same bool means whichever surface goes away
+  last clears it, on an ordering nothing controls - and clearing it forgets the
+  candidate the user walked out to judge. `watching` reads
+  `GlobalStates.clockDepthSelectOpen` directly instead, and the entry point arms
+  BEFORE either surface closes.
+- **The predicate for "can this be picked on" is deliberately not a subset of
+  `eligible`.** Two of that function's refusals - no mask, and the per-wallpaper
+  opt-out - are precisely the states picking exists to change, so inheriting them
+  would make the feature unreachable from the half of the library it was built
+  for. `selectable` refuses the other thing they have in common: a desktop whose
+  pixels are not the still image the producer is being asked about (a preview the
+  wallpaper selector reverts on close, a live Wallpaper Engine project, centred
+  mode, the lock screen). `eligible` gains one refusal of its own, `selecting`,
+  because the accepted mask drawn under a candidate is a second silhouette and
+  wherever the two disagree the difference reads as the candidate having claimed
+  something it did not.
+
+  Two smaller ones. The surface takes `OnDemand` keyboard focus, never
+  `Exclusive` - there is one per output and an Exclusive grab is session-wide,
+  the trap `Screensaver.qml` records. And its namespace needs `blur = false` plus
+  a region over its toolbar rather than falling through to the catch-all
+  `ignore_alpha = 0.05`, under which a screen-sized surface of transparent pixels
+  asks the compositor to blur the entire screen.
+  3869f90e9 ("feat(clockDepthSelect): pick the wallpaper's subject on the desktop itself"),
+  e3f0f7e00 ("feat(background): stand the depth layer down while a pick is live, and hand over its box"),
+  3e30a844b ("feat(clockDepth): answer where a desktop click lands, and when one is allowed"),
+  5ad1db2be ("refactor(wallpapers): make the depth picker the way in, not the place to author").
+
+**A segmentation model returning nothing is usually the wrong model, not an empty
+picture.** `isnet-anime` and `isnet-general-use` are complementary and neither is
+a superset — measured, `isnet-anime` returns `none` on `cat_upscayl_2x…png` where
+`isnet-general-use` returns a foreground of 0.143, and the pair swap on other
+wallpapers. So a UI that reports one model's refusal as "no subject found" states
+a verdict on the image that the evidence does not support, and a user who reads it
+stops. Both models are offered side by side, at the same size, and a refusal
+points at the other column.
+(feat(wallpapers): give the depth picker an inspect mode.)
 
 **A sample rect and the item it samples must be in the same coordinate space —
 and "it samples the real thing" is not evidence that they are.** The desktop
@@ -1441,6 +3403,43 @@ therefore needs a one-shot migration with a marker (`migrateDeadParallaxSwitches
 test that seeds a real config directory. Reset only the switches - a tuned number is a plausible
 preference and usually cannot disable the feature by itself.
 (fix(config): revive the parallax switches every stored config turned off.)
+
+**A player on the MPRIS bus may be a proxy for another player, and every field you would match on
+is the borrowed one.** `playerctld` is `playerctl`'s daemon, not a player: it re-publishes whichever
+player it considers *current* — and current means last **interacted with**, not playing — so it sits
+at `PlaybackStatus: "Playing"` over a paused player's metadata indefinitely.
+[#170](https://github.com/XephyLon/immaterial-impulse/issues/170) measured its `Identity` as
+`"Mozilla zen"`: the name of the player it was mirroring. So `identity`, `desktopEntry`, the track
+title and the playback state are all second-hand, and a rule as reasonable as "prefer a player that
+is playing and has metadata" matches it *truthfully*. The only honest thing about it is its bus
+name, which is what `services/MprisSelection.js` excludes it by — and unconditionally:
+`media.filterDuplicatePlayers` is a preference about duplicates, while a proxy is not a player at
+all. Two neighbours that look like the same case and are not: `plasma-browser-integration` may be
+the only MPRIS source for a browser whose own is switched off, and `kdeconnect.mpris_*` is a phone,
+which is a genuine remote rather than a local mirror. Both stay.
+bb789e017 ("fix(mpris): stop a proxy and duplicate suppression hiding what is playing").
+
+**Duplicate suppression must never drop a bus that is playing, and note which half of that issue's
+diagnosis was wrong.** #170 blamed `playerctld` — but on the reporting machine it was already
+excluded, and what actually decided the selection was the *other* filter: while
+`plasma-browser-integration` is on the bus, every native Firefox and Chromium bus was dropped as its
+duplicate. That integration republishes one browser tab at a time, so with a paused video mirrored
+through it and music playing in the other browser, the only bus carrying the music was suppressed
+and the paused mirror was the sole surviving candidate. A correct-looking diagnosis of a real
+lurking bug can still not be the bug in front of you; read what the filter chain actually returns
+before fixing the part that was named. bb789e017 ("fix(mpris): stop a proxy and duplicate
+suppression hiding what is playing").
+
+**An MPRIS bus name is not stable, so nothing may be stored against it.** The spec lets a program
+publishing more than one bus append `.instance<pid>` — Chromium writes
+`org.mpris.MediaPlayer2.chromium.instance700643`, Firefox `.instance_1_52` — and that suffix is new
+on every launch. `bar.media.preferredPlayer` stores the bus name minus the
+`org.mpris.MediaPlayer2.` prefix and minus that suffix, which is what survives a restart and what
+the settings picker writes; a `kdeconnect` bus carries no suffix and keeps its whole name, one id
+per device and player. Resolution lives in `MprisController` alone (`activePlayer`,
+`meaningfulPlayers`, `playerOptions`) because four widgets used to carry their own copy of it and
+had already drifted apart; `tests/test_mpris_controller_contract.py` fails the suite on a fifth.
+25329ade9 ("feat(mpris): resolve the preferred player once, against a stable bus id").
 
 **Treat repeated binding exceptions as potential resource runaways, not harmless log noise.** A
 sidebar media-player binding called `filterDuplicatePlayers()` without defining the helper in that
@@ -1504,6 +3503,226 @@ freezes the shell (this is exactly what a bulk token migration did to `ConfigRow
 
 **Strict UI Guidelines:** See [`docs/M3_GUIDELINES.md`](docs/M3_GUIDELINES.md) for the definitive rules on tokens, rounding, layering, and expressive motion that all new components must follow.
 
+**Take a motion tier whole, because half of one is silently a generic curve.**
+`NumberAnimation { duration: Appearance.animation.elementMoveFaster.duration }` reads as compliant —
+it names a token, it has no literal — and leaves `easing.type` at Qt's default, which is
+`Easing.Linear`: exactly the generic curve `docs/M3_GUIDELINES.md` §2 forbids. Every resize grip in
+the shell faded in linearly that way beside neighbours easing on `expressiveEffects`, and nothing
+about the source shows it. Use the tier's own component
+(`animation: Appearance.animation.elementMoveFaster.numberAnimation.createObject(this)`), which
+carries the duration, the type and the curve together. Two neighbouring shapes of the same mistake:
+a duration written as a literal that happens to match a *different* tier's number (Edit Mode's entry
+was `duration: 400` beside `expressiveDefaultSpatial`, which is 500ms's curve at 400ms's clock — a
+third timing nothing else in the shell moves at), and an element given no transition at all beside
+ones that have them, which is what "not M3E-compliant" usually turns out to mean when someone says
+it about a screen rather than about a line. Note `elementMoveEnter`/`elementMoveExit` both carry
+`alwaysRunToEnd`, so they are wrong for anything the user can reverse mid-flight — a mode toggled
+twice inside its own duration finishes arriving before it starts leaving.
+(fix(editMode): take the motion tiers whole instead of half of one each.)
+
+**...and that rule is a failing check now, with a register, because writing it down twice was not
+enough.** `tests/lint_motion_tier_partial.py` fails on an animation that names a tier's `duration`
+and sets no easing at all. The two fixes above are why it exists rather than a third paragraph:
+2044e1b3b ("fix(bar): give the util button's expand the curve it names") repaired the two size
+Behaviors in `modules/imi/bar/UtilButton.qml` and left **three more partial takes a dozen lines
+below in the same file**, and 8d81d7471 ("fix(editMode): take the motion tiers whole instead of half
+of one each") found the resize grip doing it after every grip in the shell had faded linearly since
+the file was written. Both fixes repaired the sites someone had noticed.
+
+The tree carries **40** of these across 17 files, and they are deliberately **not** fixed — the
+register in that file holds a count per file, for the reason `docs/M3_GUIDELINES.md` §3 already
+gives for this whole class: a curve shape is visually perceptible and cannot be verified from a
+test, so forty unverified visual changes in one branch is worse than forty known ones written down.
+It is a **ratchet**, not an allowlist: a file outside it may have none, a registered file may not
+grow, and a registered file that *shrinks* also fails, so fixing one forces the number down and the
+register cannot rot into something nobody rechecks. Two things it deliberately ignores, with the
+reasoning in the file: an easing that is present but generic (§3's separate register — a curve
+somebody chose, where this is a curve nobody chose), and a duration paired with a curve read
+straight out of `animationCurves` (a drift risk, not a live defect, and it would triple the register
+for no bug). 1c728dd6a ("test(lint): fail on an animation that takes a tier's duration and leaves
+its curve").
+
+**...and the sibling defect is the one that lint deliberately waved through: a duration read out
+of `animationCurves` is the tier's BASE, and the speed multiplier is not in it.**
+`Appearance.animation.<tier>.duration` is `motion.scale(...)` applied to
+`animationCurves.<x>Duration`, so a site reading the second spelling is an animation the motion
+slider and the reduce-motion switch cannot reach — silently, in the one tree where 954a7885a
+("feat(motion): one policy for the speed, the floor and the stagger") exists so that they can.
+Nine sites were doing it, and every one of them reads as compliant: they name tokens, carry no
+millisecond literal, and pair with the matching curve. Two of the nine are worse than the rest —
+both `ShapeCanvas.qml` copies, so a shape morph was the one animation in the shell that could not
+be retimed from `Appearance` at all, the design system's copy having the 350 and the six control
+points written out by hand. Nothing in the suite could see any of it; a survey found it
+(`docs/p3drovfx-animation-research-2026-08-16.md` §7). Where the duration and the curve are the
+same tier, take the tier whole. Where they are deliberately different — `StyledFlickable`'s rubber
+band pushes out on the effects duration against `emphasizedDecel`, the recording panel pulses on
+500ms against `expressiveEffects` — scale the base through the policy's own door,
+`Appearance.animation.scale()`, rather than borrowing whichever tier happens to share the number
+and tying the site to a curve it does not use. `tests/lint_motion_multiplier_bypass.py` fails on a
+new one; its second fixture is the one that earns its place, because a bare search for the token
+reports the honest fix as an offender.
+("fix(motion): every catalogued duration goes through the policy").
+
+**There is ONE desktop-widget base class, and a dead copy of it is more dangerous than a live
+duplicate.** The vendored design system arrived carrying its own `AbstractWidget.qml` and
+`WidgetCanvas.qml` under `designsystem/widgets/widgetCanvas/`, which nothing has ever imported —
+`PluginWidget`, `AbstractBackgroundWidget` and the canvas itself all resolve
+`modules/common/widgets/widgetCanvas/`. Dead code is not why it was deleted: it still carried the
+`MouseArea.drag` + `dragProxy { x: root.x }` pair that d2ebb5aeb ("fix(widgetCanvas): compute the
+drag by hand - MouseArea.drag cannot track it") removed against measurements, and it was gated on
+a config path that does not exist — three fixes behind the live one and the richer-looking of the
+two, so the next agent looking for how a widget drag works finds a plausible file with more snap
+code in it and nothing to say it never runs. `tests/lint_no_stale_widget_canvas.py` fails on a
+second file of either name and on an import of the deleted path; the first half is the one that
+matters, because a dead copy is invisible to every other check in the suite.
+("refactor(designsystem): delete the dead copy of the widget base class").
+
+**An animation that loops forever must stop when what it animates is off screen, because a
+running animation is a repaint of the whole output — including the parts nobody can see.** The
+chain is not visible from the animation: a running animation writes a property every frame; that
+dirties the scene; a dirty scene makes the shell commit a frame; and a commit makes the
+*compositor* repaint the entire output. So one `RotationAnimation` with `loops: Animation.Infinite`
+in `CookieClock.qml` — 30 seconds per turn, behind an opaque fullscreen game — kept a 5120×1440
+240Hz screen redrawing continuously, and the user reported "my game's FPS is halved when qs is
+running even in fullscreen". It was, and it was that. Measured against FFXIV's own frame counter
+(OCR'd off its System Configuration window, so every state used one instrument): shell stopped
+108, shell stock **52**, the spin gated on `visible` **94**. Found by `QSG_RENDER_TIMING=1` — one
+window syncing at 243Hz for 0ms of render work — and `QT_LOGGING_RULES=qt.quick.dirty=true`
+naming the node. `visible` is *effective* visibility, false while any ancestor is hidden, so the
+animation never has to know why it is off screen. `tests/lint_infinite_animation_visibility.py`
+fails a new ungated one and carries seven registered files whose animations live on surfaces that
+are unmapped when idle, as a ratchet.
+
+Two things about the *surfaces* were learned in the same investigation and are worth stating
+because both look like the fix and one is forbidden. `quickshell:barPopup` — a screen-sized
+surface on the **Overlay** layer hosting the bar's hover cards — was mapped for the whole session
+with nothing in it, and a mapped Overlay surface sits over every fullscreen window; unmapping it
+while idle was worth 98 → 105 and is safe because no renderer lives in it. The **background**
+surface is the same shape one layer down and unmapping it measures better still, and it is
+**pinned mapped** by `test_background_fullscreen_suppression.py`: `visible: false` on a
+WlrLayershell window destroys it, and destroying that one is what left the embedded Wallpaper
+Engine renderer strobing at 30Hz — a photosensitive-seizure hazard. Frame rate does not outrank
+that. The frames came back by stopping what kept the window *busy*, not by removing the window.
+(perf(clock): the cookie's spin stops when the cookie is off screen;
+perf(bar): the popup overlay surface is mapped only while it has a card;
+test(perf): infinite animations are gated on visibility, and the overlay stands down.)
+
+**And the last blocker was not the shell at all: any Overlay surface, from anyone, at any size,
+holds the fullscreen fast path shut.** With every shell-side cost gone the game still read 84
+against a 94 ceiling, `solitaryBlockedBy: other overlays`, and the only overlay left was the
+Activate Linux plugin's 340×120 watermark — a process the shell spawns but a surface the shell does
+not own. Killing that one process: `solitary` went from 0 to the game's own address, Hyprland's GPU
+share from ~9% to **0.0%**, the game to 92. The plugin now stands its watermark down while any
+monitor's active workspace has a fullscreen window (`XephyLon/activate-linux-plugin#1`), reading
+`HyprlandData.hasfullscreen` like the bar and dock do — a first cut on `Hyprland.workspaces[..].
+toplevels` did not re-evaluate on workspace change. The general rule is in `docs/PLUGINS.md`
+§"Overlay surfaces and fullscreen windows". Two lessons for the next investigation: `hyprctl
+monitors`' `solitaryBlockedBy` is the first thing to read, because it names the class of blocker
+outright; and the shell's *own* GPU share reading 0.0% does not clear the shell, because what the
+shell spawns and what the compositor does on the shell's behalf are both invisible there.
+(docs(plugins): an Overlay surface holds the fullscreen fast path shut.)
+
+**How fast the shell moves is one scalar, and where the bottom of that scale is, is a *different*
+declared thing.** `modules/common/motion_policy.js` is the arithmetic (pure, `.pragma library`, so
+the decisions are testable and nothing about the rendering has to be); `Appearance.animation`
+exposes `multiplier`, `reduceMotion`, `reduceMotionFloor`, `scale()`, `scaleVelocity()` and the
+stagger helpers, and every tier duration and velocity in that block — plus `Appearance.interaction`'s
+five tiers — goes through them. That reaches ~700 `Appearance.animation` call sites and all 140
+`SpanTravel`/`SpanFade` uses without one of them changing.
+
+This is worth having *here* and is largely decorative in the fork it came from, and the difference is
+structural: 1728 of their `duration:` values are hardcoded literals across 272 files, so their slider
+does nothing for about half of that shell. Ours has 164 literals in 62 files.
+
+Five things about it that are not obvious:
+
+- **The reduce-motion floor is not reachable by the multiplier, and that is the whole point.** The
+  fork spells the same idea as `animationMultiplier <= 0.25`, re-derived by hand as a private
+  `_animationsDisabled` at seven call sites — so there, "the user turned motion off" and "the user
+  likes it snappy" are one number, and dragging a speed slider one notch too far *is* the
+  accessibility state. `MULTIPLIER_MIN` is 0.5, `clampMultiplier()` holds for a hand-edited
+  `config.json` too, and `appearance.motion.reduceMotion` is a separate declared key with its own
+  switch. A floor a slider can land on is a floor a user can leave by accident.
+- **The floor is a duration of 0 rather than "switch the Behaviors off", and both halves were
+  measured with a `qml6` probe rather than reasoned about.** An animation driven by a `Behavior`
+  never emits `finished` at *any* duration — it runs as a job rather than through `start()` — while
+  an animation the code *starts* emits it even at duration 0. Every cleanup here that hangs off a
+  completion (`BarPopupOverlay.contentExit` releasing the outgoing content tree,
+  `ExpandablePanel`'s spent stagger animations) hangs off a started one, so a floor of 0 strands
+  none of them; disabling the Behaviors would have reached only half the motion and left the
+  started animations at full length. Collapsing the *durations* also reaches the two things a
+  `Behavior` does not — a `Timer` whose interval is a tier duration, and a `PauseAnimation` written
+  as the difference of two tiers — so a hand-built sequence keeps its order at the floor.
+- **A velocity is the reciprocal axis.** `SmoothedAnimation.velocity` is px/s, so a slower shell
+  wants a *smaller* number; applying the duration multiplier to it makes "slower" mean "faster".
+  `scaleVelocity()` divides, and the floor's velocity is large-but-finite rather than `Infinity`.
+- **Two spellings of a tier's base exist in that block and a scaling has to catch both.** Four tiers
+  read `animationCurves.*Duration` and eight state a literal; a scaling applied to one spelling
+  leaves a third of the catalogue frozen, reads perfectly in review and logs nothing.
+  `tests/test_motion_policy_contract.py` reads the whole block rather than a sample, and
+  `tests/test_motion_multiplier_runtime.py` reads the catalogue back off a real shell against a
+  seeded config — the QML default and the value the `JsonAdapter` merges over it are different
+  numbers and only the second one runs.
+- **The interaction model is a separate object and is easy to miss.** It carries the motion that
+  fires on every hover and press in the shell, so a multiplier that slows every panel while leaving
+  every button acknowledging at a fixed 150ms is half a multiplier — and reduce motion would skip
+  the class of motion the user touches most.
+  954a7885a ("feat(motion): one policy for the speed, the floor and the stagger"),
+  da2a87c07 ("feat(appearance): thread the motion policy through every catalogued tier"),
+  416dd1420 ("feat(settings): a motion speed slider and a reduce-motion switch").
+
+**One spelling of "these N things arrive in sequence".** `Appearance.animation.staggerRanks()` /
+`.staggerStep` / `.staggerDelay()` are it. There were two cascades and they disagreed in exactly the
+way that makes duplication a defect rather than redundancy: `Carousel.qml` clamped at ten members
+and `ExpandablePanel.qml` not at all, `Carousel` stepped 50ms and `ExpandablePanel` 40ms, and both
+numbers were literals. Three rules live in the policy now:
+
+- **Rank by VISIBLE position, never by position in `children`.** A hidden participant that spends a
+  slot leaves a hole one step wide in the middle of the cascade, and nothing downstream compensates
+  because every later member is still counted from its own index.
+- **Clamp the ladder.** `leadIn + index * step` is unbounded and the failure is silent — a twenty
+  member group's last member arrives most of a second after the container has finished opening, by
+  which point the wave has stopped reading as one gesture.
+- **The step is a fraction of a catalogued duration, and it is published UNSCALED.** Whatever
+  consumes it scales it once; scaling it in `Appearance` as well would apply the multiplier twice
+  and a wave would run at the square of the setting.
+
+A delegate cannot see its siblings, so `Carousel`'s rank stays the model index — the clamp and the
+scaled step still come from the policy, which was the half that was wrong. And a wave is a
+**cancellable** list rather than loose animations: `expanded` flipping twice inside the first wave's
+own length used to leave it running, because the collapse created a fade to 0 per child without
+stopping the entrances, so a child still sitting in its `PauseAnimation` faded back *in* onto a
+panel that had already closed — and its spent object was never destroyed, because `stop()` does not
+raise `finished`. The survey this came from proposes a third fix, "store the stagger in the model
+row so a recycled delegate keeps its place"; that one **does not apply here** and was not written —
+our staggered surfaces are `FlowButtonGroup`s whose contents are fixed for the life of the card that
+owns them, and a Docker refresh destroys the whole `ExpandablePanel` rather than recycling anything
+under it. fb92b4f5d ("fix(widgets): rank a stagger by visible position, clamp it, and let a wave be
+cancelled").
+
+**`Behavior on <non-animatable>` with a trailing bare `PropertyAction {}` defers a write instead of
+animating it.** A `Loader.source` is a `url`, which QML cannot interpolate, so the `Behavior` cannot
+animate it — and the *bare* `PropertyAction` (no `target`, no `property`, no `value`) means "apply
+the pending write here". That is how `modules/imi/onScreenDisplay/OnScreenDisplay.qml` lets the
+outgoing indicator leave before its replacement is built, with no pending-value field, no state
+machine, and no pair of `Timer`s whose intervals have to keep agreeing with two animations'
+durations. The construct is **not new to this tree** — `modules/common/widgets/StyledText.qml` has
+carried a `Behavior on text` ending in one since it came from end-4, switched on at ~20 call sites
+by `animateChange: true`.
+
+Three things to know before reaching for it. Measured with a `qml6` probe: the **initial** write is
+still applied immediately, because a `Behavior` does not fire before its component is finalized — so
+a surface that is opening does not wait for a fade of nothing. Naming the action's `target` and
+`property` instead of leaving it bare *looks* equivalent and is a hand-written re-derivation of what
+the bare form takes from the `Behavior` it sits in, so a rename makes it match nothing with no
+warning (`modules/imi/bar/Media.qml` and `modules/imi/sidebarLeft/SidebarPlayerControl.qml` both
+spell it that way). And it is pinned from both sides, because the failure direction is bad — a bare
+form that stopped being honoured would leave the pending write *never* applied, i.e. the OSD showing
+the indicator the user navigated away from, with nothing in any log:
+`tests/tst_deferred_property_swap.qml` pins the construct against Qt itself and
+`tests/test_osd_indicator_swap.py` pins that the call site still uses it.
+f968a55c4 ("feat(osd): let the outgoing indicator leave before its replacement arrives").
+
 **The sidebar's bottom widget group has a fixed height, and that is load-bearing.**
 `BottomWidgetGroup.qml`'s `expandedHeight` is a constant (352) rather than a binding on its
 content, because the group and the notification list share the sidebar column: every pixel the
@@ -1528,7 +3747,9 @@ Shared building blocks to reach for before writing something from scratch: `Styl
 widget's hover popup: a declaration plus a hover state machine, *not* a window - its content is
 hosted on `modules/imi/bar/BarPopupOverlay.qml`'s shared card, b22a923a5 ("refactor(bar): delete
 the per-popup layer surface")), `StyledRectangularShadow`, `DockIconMotion` (wraps a dock icon's visuals with hover-lift /
-press-squish / launch-bounce / appear-pop feedback, driven by `services/DockLaunchTracker`),
+press-squish / launch-bounce / appear-pop feedback, driven by `services/DockLaunchTracker`; the
+lift and the bounce are magnitudes travelling along `dock_geometry.js`'s inward vector, not a
+negative y),
 `SchemePaletteCircle` (an Android 12-style palette circle for a colour scheme, fed from
 `services/SchemePreview`, with the scheme's glyph as the fallback while the colour venv has not
 answered). All in `modules/common/widgets/`.
@@ -1555,7 +3776,10 @@ pages - don't reintroduce a second single-line text-entry widget.
 controls form one continuous semantic unit (for example, the fields and actions for a single custom
 AI provider). Cohesive mode removes internal spacing and corner rounding while retaining the outer
 group corners. Controls rendered inside a group should rely on the group's inset; avoid adding a
-second horizontal inset that misaligns their icons or labels with neighboring rows.
+second horizontal inset that misaligns their icons or labels with neighboring rows. **A row that
+comes and goes declares `rowVisible`, never `visible`** — see the effective-visibility note under
+[Dynamic/data-driven QML gotchas](#dynamicdata-driven-qml-gotchas) for the empty plate the second
+spelling leaves behind and why the widget cannot repair it by mirroring `visible`.
 
 **`colLayer0` vs `colLayer1`/`colLayer2`/...** - these are not interchangeable "just pick one that
 looks transparent enough" tokens:

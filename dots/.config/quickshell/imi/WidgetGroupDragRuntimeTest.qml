@@ -29,16 +29,18 @@ ShellRoot {
     id: harness
 
     property int failures: 0
+    property int checksRun: 0
     readonly property string testScreen: "GROUP-TEST"
 
     function check(label, ok) {
+        harness.checksRun++;
         console.log(`[WidgetGroupDrag] ${label}: ${ok ? "ok" : "FAIL"}`);
         if (!ok)
             harness.failures++;
     }
 
     function finish() {
-        console.log(`[WidgetGroupDrag] failures: ${harness.failures}`);
+        console.log(`[WidgetGroupDrag] checks: ${harness.checksRun} failures: ${harness.failures}`);
         Qt.exit(harness.failures === 0 ? 0 : 1);
     }
 
@@ -197,6 +199,15 @@ ShellRoot {
             if (!PluginState.ready || !Config.ready)
                 return;
             Config.options.background.widgetsLocked = false;
+            // Every expected landing in this file is a lattice stop, and the
+            // widgets are deliberately packed close enough to marquee in one
+            // gesture - close enough that the widget-to-widget edge snap
+            // (edge_snap.js, which rides this switch) captures some of the
+            // drags onto a neighbour's edge instead. That gesture has its own
+            // harness (WidgetEdgeSnapRuntimeTest.qml); this one is about the
+            // marquee and the group, so the alignment helpers stand down the
+            // same way the lock above is normalised.
+            Config.options.background.showSnapLines = false;
             if (harness.at(alphaWidget, 48, 48)
                     && harness.at(betaWidget, 240, 48)
                     && harness.at(ghostWidget, 48, 240)

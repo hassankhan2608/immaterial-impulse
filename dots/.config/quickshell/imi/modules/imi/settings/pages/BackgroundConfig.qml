@@ -271,6 +271,27 @@ ContentPage {
             }
 
             ContentSubsection {
+                title: Translation.tr("Depth")
+                Layout.fillWidth: true
+
+                GroupedList {
+                    ConfigSwitch {
+                        id: clockDepthSwitch
+                        Layout.fillWidth: true
+                        buttonIcon: "layers"
+                        text: Translation.tr("Widgets behind the wallpaper's subject")
+                        // The switch alone changes nothing on screen: depth is a
+                        // per-wallpaper artifact accepted in the wallpaper
+                        // selector, and this only decides whether an accepted one
+                        // is drawn. Off by default, because a feature that puts
+                        // pixels over the clock ships off.
+                        checked: Config.options.background.clockDepth.enable
+                        onToggleRequested: Config.options.background.clockDepth.enable = !Config.options.background.clockDepth.enable
+                    }
+                }
+            }
+
+            ContentSubsection {
                 title: Translation.tr("Centered wallpaper")
                 Layout.fillWidth: true
 
@@ -336,43 +357,6 @@ ContentPage {
             }
         }
 
-        ContentSection {
-            icon: "widgets"
-            shape: MaterialShape.Shape.Pill
-            title: Translation.tr("Widgets")
-
-            ContentSubsection {
-                title: Translation.tr("Show widgets on")
-                visible: Hyprland.monitors.values.length > 1
-                Layout.bottomMargin: Appearance.spacing.space150
-
-                WidgetsMonitorSelector {
-                    configEntry: Config.options.background
-                }
-            }
-
-            ContentSubsection {
-                title: Translation.tr("Canvas")
-                Layout.bottomMargin: Appearance.spacing.space150
-
-                GroupedList {
-                    ConfigSwitch {
-                        Layout.fillWidth: true
-                        buttonIcon: "grid_4x4"
-                        text: Translation.tr("Show alignment grid while dragging")
-                        checked: Config.options.background.showGrid
-                        onToggleRequested: Config.options.background.showGrid = !Config.options.background.showGrid
-                    }
-                    ConfigSwitch {
-                        Layout.fillWidth: true
-                        buttonIcon: "align_horizontal_center"
-                        text: Translation.tr("Show snap lines when dropping")
-                        checked: Config.options.background.showSnapLines
-                        onToggleRequested: Config.options.background.showSnapLines = !Config.options.background.showSnapLines
-                    }
-                }
-            }
-        }
 
         ContentSection {
             shape: MaterialShape.Shape.Puffy
