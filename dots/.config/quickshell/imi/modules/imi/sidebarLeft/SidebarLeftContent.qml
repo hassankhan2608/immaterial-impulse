@@ -13,12 +13,15 @@ Item {
     property int sidebarPadding: Appearance.spacing.space125
     anchors.fill: parent
     property bool aiChatEnabled: Config.options.policies.ai !== 0
+    property bool tailnetEnabled: Config.options.sidebar.tailnet.enable && Tailscale.installed
     property bool translatorEnabled: Config.options.sidebar.translator.enable
     property bool animeEnabled: Config.options.policies.weeb !== 0
     property bool animeCloset: Config.options.policies.weeb === 2
     property bool mediaEnabled: Config.options.sidebar.media.enable
+    readonly property int tailnetIndex: root.tailnetEnabled ? (root.aiChatEnabled ? 1 : 0) : -1
     property var tabButtonList: [
         ...(root.aiChatEnabled ? [{"icon": "neurology", "name": Translation.tr("Intelligence")}] : []),
+        ...(root.tailnetEnabled ? [{"icon": Tailscale.materialSymbol, "name": Translation.tr("Tailnet")}] : []),
         ...(root.translatorEnabled ? [{"icon": "translate", "name": Translation.tr("Translator")}] : []),
         ...(root.mediaEnabled ? [{"icon": "music_note", "name": Translation.tr("Media")}] : []),
         ...((root.animeEnabled && !root.animeCloset) ? [{"icon": "bookmark_heart", "name": Translation.tr("Anime")}] : [])
@@ -73,7 +76,6 @@ Item {
                 id: swipeView
                 anchors.fill: parent
                 spacing: Appearance.spacing.space150
-                currentIndex: tabBar.currentIndex
 
                 clip: true
                 layer.enabled: true
@@ -87,17 +89,31 @@ Item {
 
                 contentChildren: [
                     ...(root.aiChatEnabled ? [aiChat.createObject()] : []),
+                    ...(root.tailnetEnabled ? [tailnet.createObject()] : []),
                     ...(root.translatorEnabled ? [translator.createObject()] : []),
                     ...(root.mediaEnabled ? [media.createObject()] : []),
-                    ...((root.tabButtonList.length === 0 || (!root.aiChatEnabled && !root.translatorEnabled && root.animeCloset)) ? [placeholder.createObject()] : []),
+                    ...((root.tabButtonList.length === 0 || (!root.aiChatEnabled && !root.tailnetEnabled && !root.translatorEnabled && root.animeCloset)) ? [placeholder.createObject()] : []),
                     ...(root.animeEnabled ? [anime.createObject()] : []),
                 ]
             }
         }
 
+        TaildropPanel {
+            // The column's own spacing keeps the tab bar flush against the
+            // content pane, so this group asks for its gap itself - same
+            // rhythm as the right sidebar's bottom widget group.
+            Layout.topMargin: sidebarPadding
+            visible: root.tailnetIndex >= 0 && swipeView.currentIndex === root.tailnetIndex
+            Layout.fillWidth: true
+        }
+
         Component {
             id: aiChat
             AiChat {}
+        }
+        Component {
+            id: tailnet
+            Tailnet {}
         }
         Component {
             id: translator

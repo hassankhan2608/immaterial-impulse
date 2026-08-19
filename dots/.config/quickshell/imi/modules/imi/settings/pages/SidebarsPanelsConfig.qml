@@ -181,14 +181,14 @@ ContentPage {
             Rectangle {
                 Layout.fillWidth: true
                 Layout.topMargin: Appearance.spacing.space50
-                implicitHeight: translatorCol.implicitHeight + 24
+                implicitHeight: leftPanelTogglesCol.implicitHeight + 24
                 radius: Appearance.rounding.normal
                 color: Appearance.colors.colLayer1
                 border.width: Appearance.borderWidth.standard
                 border.color: "transparent"
 
                 ColumnLayout {
-                    id: translatorCol
+                    id: leftPanelTogglesCol
                     anchors { fill: parent; margins: Appearance.spacing.space150 }
                     spacing: Appearance.spacing.space100
 
@@ -199,6 +199,19 @@ ContentPage {
                             text: Translation.tr("Enable Translator")
                             checked: Config.options.sidebar.translator.enable
                             onToggleRequested: Config.options.sidebar.translator.enable = !Config.options.sidebar.translator.enable
+                        }
+                    }
+
+                    RowLayout {
+                        spacing: Appearance.spacing.space100
+                        ConfigSwitch {
+                            customIcon: "tailscale-symbolic.svg"
+                            text: Translation.tr("Enable Tailnet")
+                            // The panel still hides itself when the tailscale
+                            // binary is missing; this is the wanted/not-wanted
+                            // switch, same as the Translator above.
+                            checked: Config.options.sidebar.tailnet.enable
+                            onToggleRequested: Config.options.sidebar.tailnet.enable = !Config.options.sidebar.tailnet.enable
                         }
                     }
                 }

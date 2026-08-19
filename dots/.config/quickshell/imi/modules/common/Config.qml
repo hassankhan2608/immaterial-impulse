@@ -1348,6 +1348,11 @@ Singleton {
                     property bool enable: false
                     property int delay: 300 // Delay before sending request. Reduces (potential) rate limits and lag.
                 }
+                property JsonObject tailnet: JsonObject {
+                    // The panel is also hidden when the tailscale binary is
+                    // absent; this only says whether it is wanted at all.
+                    property bool enable: true
+                }
                 property JsonObject media: JsonObject {
                     property bool enable: true
                     property bool artColors: false

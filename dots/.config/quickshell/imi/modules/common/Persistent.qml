@@ -72,6 +72,7 @@ Singleton {
                     property bool collapsed: false
                     property int tab: 0
                 }
+                property bool taildropCollapsed: false
             }
 
             property JsonObject booru: JsonObject {

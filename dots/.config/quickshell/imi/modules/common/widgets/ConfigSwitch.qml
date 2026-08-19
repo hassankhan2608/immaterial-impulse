@@ -7,6 +7,10 @@ import QtQuick.Controls
 RippleButton {
     id: root
     property string buttonIcon
+    // A row whose subject has a real logo names an SVG in assets/icons here
+    // instead of a Material symbol in `buttonIcon`; the leading slot holds one
+    // or the other, never both.
+    property string customIcon: ""
     property string description: ""
     // Shown as a hoverable "i" beside the control rather than inline, so a long
     // explanation doesn't stretch the row.
@@ -64,6 +68,16 @@ RippleButton {
         RowLayout {
             Layout.fillWidth: true
             spacing: Appearance.spacing.space150
+            CustomIcon {
+                visible: root.customIcon.length > 0
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: iconWidget.iconSize
+                Layout.preferredHeight: iconWidget.iconSize
+                source: root.customIcon
+                colorize: true
+                color: root.toggled ? Appearance.colors.colOnPrimary : Appearance.colors.colOnSecondaryContainer
+            }
+
             OptionalMaterialSymbol {
                 id: iconWidget
                 icon: root.buttonIcon

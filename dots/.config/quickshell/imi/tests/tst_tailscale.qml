@@ -18,6 +18,8 @@ TestCase {
         Tailscale.backendState = ""
         Tailscale.currentExitNodeId = ""
         Tailscale.exitNodes = []
+        Tailscale.devices = []
+        Tailscale.keyExpiryDays = -1
     }
 
     function makeStatus(overrides) {
@@ -143,4 +145,90 @@ TestCase {
         const parsed = Tailscale.parseStatus(status)
         compare(parsed.exitNodes[0].name, "exitbox")
     }
+    function test_builds_complete_device_list() {
+        const status = makeStatus({
+            Self: {
+                ID: "n0",
+                HostName: "laptop",
+                DNSName: "laptop.example.ts.net.",
+                TailscaleIPs: ["fd7a::1", "100.64.0.1"],
+                Online: true,
+                OS: "linux",
+                RxBytes: 2048,
+                TxBytes: 1024
+            },
+            Peer: {
+                "nodekey:aa": {
+                    ID: "n1",
+                    HostName: "offline",
+                    DNSName: "offline.example.ts.net.",
+                    TailscaleIPs: ["100.64.0.2"],
+                    Online: false,
+                    OS: "windows",
+                    LastSeen: "2026-08-10T08:00:00Z"
+                },
+                "nodekey:bb": {
+                    ID: "n2",
+                    HostName: "phone",
+                    DNSName: "phone.example.ts.net.",
+                    TailscaleIPs: ["100.64.0.3"],
+                    Online: true,
+                    OS: "android",
+                    Relay: "fra",
+                    CurAddr: ""
+                }
+            }
+        })
+        const devices = Tailscale.parseStatus(status).devices
+        compare(devices.length, 3)
+        compare(devices[0].id, "n0")
+        compare(devices[0].isSelf, true)
+        compare(devices[0].ip, "100.64.0.1")
+        compare(devices[0].dnsName, "laptop.example.ts.net")
+        compare(devices[0].rxBytes, 2048)
+        compare(devices[1].id, "n2")
+        compare(devices[1].relay, "fra")
+        compare(devices[2].id, "n1")
+        compare(devices[2].online, false)
+    }
+
+    function test_apply_status_exposes_device_counts() {
+        Tailscale.applyStatus(makeStatus({
+            Self: { ID: "n0", HostName: "laptop", TailscaleIPs: ["100.64.0.1"], Online: true },
+            Peer: {
+                "nodekey:aa": { ID: "n1", HostName: "online", TailscaleIPs: ["100.64.0.2"], Online: true },
+                "nodekey:bb": { ID: "n2", HostName: "offline", TailscaleIPs: ["100.64.0.3"], Online: false }
+            }
+        }))
+        compare(Tailscale.deviceCount, 3)
+        compare(Tailscale.onlineCount, 2)
+    }
+
+    function test_key_expiry_days_are_deterministic() {
+        const now = Date.parse("2026-08-11T00:00:00Z")
+        compare(Tailscale.daysUntil("2026-08-14T00:00:00Z", now), 3)
+        compare(Tailscale.daysUntil("2026-08-10T23:59:59Z", now), -1)
+        compare(Tailscale.daysUntil("", now), -1)
+        compare(Tailscale.daysUntil("not-a-date", now), -1)
+    }
+
+    function test_invalid_status_clears_devices_and_expiry() {
+        Tailscale.devices = [{ id: "stale", online: true }]
+        Tailscale.keyExpiryDays = 12
+        Tailscale.applyStatus("")
+        compare(Tailscale.devices.length, 0)
+        compare(Tailscale.keyExpiryDays, -1)
+        compare(Tailscale.deviceCount, 0)
+        compare(Tailscale.onlineCount, 0)
+    }
+
+    function test_taildrop_listing_accepts_only_arrays() {
+        const files = Tailscale.parseIncomingFiles('[{"Name":"report.pdf","Size":4096}]')
+        compare(files.length, 1)
+        compare(files[0].Name, "report.pdf")
+        compare(Tailscale.parseIncomingFiles("{}").length, 0)
+        compare(Tailscale.parseIncomingFiles("not-json").length, 0)
+        compare(Tailscale.parseIncomingFiles("").length, 0)
+    }
+
 }
