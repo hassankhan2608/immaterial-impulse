@@ -14,6 +14,7 @@ Item {
     anchors.fill: parent
     property bool aiChatEnabled: Config.options.policies.ai !== 0
     property bool tailnetEnabled: Config.options.sidebar.tailnet.enable && Tailscale.installed
+    property bool ociVpsEnabled: Config.options.sidebar.ociVps.enable && OciVps.configured
     property bool translatorEnabled: Config.options.sidebar.translator.enable
     property bool animeEnabled: Config.options.policies.weeb !== 0
     property bool animeCloset: Config.options.policies.weeb === 2
@@ -22,6 +23,7 @@ Item {
     property var tabButtonList: [
         ...(root.aiChatEnabled ? [{"icon": "neurology", "name": Translation.tr("Intelligence")}] : []),
         ...(root.tailnetEnabled ? [{"icon": Tailscale.materialSymbol, "name": Translation.tr("Tailnet")}] : []),
+        ...(root.ociVpsEnabled ? [{"icon": OciVps.materialSymbol, "name": Translation.tr("VPS")}] : []),
         ...(root.translatorEnabled ? [{"icon": "translate", "name": Translation.tr("Translator")}] : []),
         ...(root.mediaEnabled ? [{"icon": "music_note", "name": Translation.tr("Media")}] : []),
         ...((root.animeEnabled && !root.animeCloset) ? [{"icon": "bookmark_heart", "name": Translation.tr("Anime")}] : [])
@@ -90,9 +92,10 @@ Item {
                 contentChildren: [
                     ...(root.aiChatEnabled ? [aiChat.createObject()] : []),
                     ...(root.tailnetEnabled ? [tailnet.createObject()] : []),
+                    ...(root.ociVpsEnabled ? [ociVps.createObject()] : []),
                     ...(root.translatorEnabled ? [translator.createObject()] : []),
                     ...(root.mediaEnabled ? [media.createObject()] : []),
-                    ...((root.tabButtonList.length === 0 || (!root.aiChatEnabled && !root.tailnetEnabled && !root.translatorEnabled && root.animeCloset)) ? [placeholder.createObject()] : []),
+                    ...((root.tabButtonList.length === 0 || (!root.aiChatEnabled && !root.tailnetEnabled && !root.ociVpsEnabled && !root.translatorEnabled && root.animeCloset)) ? [placeholder.createObject()] : []),
                     ...(root.animeEnabled ? [anime.createObject()] : []),
                 ]
             }
@@ -114,6 +117,10 @@ Item {
         Component {
             id: tailnet
             Tailnet {}
+        }
+        Component {
+            id: ociVps
+            Vps {}
         }
         Component {
             id: translator

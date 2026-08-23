@@ -1436,6 +1436,18 @@ Singleton {
                     // absent; this only says whether it is wanted at all.
                     property bool enable: true
                 }
+                property JsonObject ociVps: JsonObject {
+                    // Hidden anyway when ~/.oci/config holds no API key; this
+                    // only says whether the panel is wanted at all.
+                    property bool enable: true
+                    // Empty means "the first instance the tenancy lists", which
+                    // is right for the common single-instance account.
+                    property string instanceName: ""
+                    property string profile: "DEFAULT"
+                    // Metered usage moves once a day and both APIs are rate
+                    // limited per tenancy, so this is deliberately slow.
+                    property int pollInterval: 900000
+                }
                 property JsonObject media: JsonObject {
                     property bool enable: true
                     property bool artColors: false

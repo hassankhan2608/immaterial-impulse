@@ -2,6 +2,7 @@ module testservices
 singleton Battery Battery.qml
 singleton BluetoothStatus BluetoothStatus.qml
 singleton MediaCapture MediaCapture.qml
+singleton OciVps OciVps.qml
 singleton OpenRgb OpenRgb.qml
 singleton PhoneConnect PhoneConnect.qml
 singleton PluginStore PluginStore.qml

@@ -214,6 +214,19 @@ ContentPage {
                             onToggleRequested: Config.options.sidebar.tailnet.enable = !Config.options.sidebar.tailnet.enable
                         }
                     }
+
+                    RowLayout {
+                        spacing: Appearance.spacing.space100
+                        ConfigSwitch {
+                            buttonIcon: "cloud"
+                            text: Translation.tr("Enable VPS")
+                            // Hidden anyway without an API key in
+                            // ~/.oci/config; this is the wanted/not-wanted
+                            // switch, same as the two above.
+                            checked: Config.options.sidebar.ociVps.enable
+                            onToggleRequested: Config.options.sidebar.ociVps.enable = !Config.options.sidebar.ociVps.enable
+                        }
+                    }
                 }
             }
         }
