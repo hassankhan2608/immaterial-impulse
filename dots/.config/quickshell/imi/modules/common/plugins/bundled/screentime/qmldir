@@ -1,0 +1,4 @@
+module ScreenTimePlugin
+singleton ScreenTimeService 1.0 ScreenTimeService.qml
+ScreenTimeWidget 1.0 ScreenTimeWidget.qml
+ScreenTimePopup 1.0 ScreenTimePopup.qml

@@ -1,0 +1,6 @@
+module ScreenTimeComponents
+TimelineBarcode 1.0 TimelineBarcode.qml
+HourlyChart 1.0 HourlyChart.qml
+StackedWeekBars 1.0 StackedWeekBars.qml
+YearHeatmap 1.0 YearHeatmap.qml
+TopList 1.0 TopList.qml

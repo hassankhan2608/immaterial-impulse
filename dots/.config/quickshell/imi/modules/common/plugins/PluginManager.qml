@@ -125,7 +125,7 @@ Singleton {
                 notesManifestFile, visualizerManifestFile,
                 customImageManifestFile, imageConverterManifestFile,
                 userCardManifestFile, worldClockManifestFile,
-                calendarManifestFile].forEach(fileView => {
+                calendarManifestFile, screentimeManifestFile].forEach(fileView => {
             if (!fileView.loaded) return;
             try {
                 const text = fileView.text();
@@ -428,6 +428,12 @@ Singleton {
     FileView {
         id: calendarManifestFile
         property string pluginBase: Quickshell.shellPath("modules/common/plugins/bundled/calendar")
+        path: pluginBase + "/manifest.json"
+        onLoaded: root.scheduleRebuild()
+    }
+    FileView {
+        id: screentimeManifestFile
+        property string pluginBase: Quickshell.shellPath("modules/common/plugins/bundled/screentime")
         path: pluginBase + "/manifest.json"
         onLoaded: root.scheduleRebuild()
     }

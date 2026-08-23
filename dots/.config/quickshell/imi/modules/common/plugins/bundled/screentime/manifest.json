@@ -1,0 +1,25 @@
+{
+    "id": "screentime",
+    "name": "Screen Time",
+    "description": "Local screen-time dashboard backed by ActivityWatch: today, week, and month views with apps, categories and domains",
+    "version": "1.0.0",
+    "author": "Palccod; ported for Immaterial Impulse",
+    "license": "MIT",
+    "source": "Port of Omalog",
+    "sourceUrl": "https://github.com/Palccod/Omalog",
+    "apiVersion": 1,
+    "capabilities": ["bar-widget", "settings"],
+    "permissions": ["process", "settings_read", "settings_write"],
+    "defaultWidth": 0,
+    "defaultHeight": 0,
+    "options": [
+        {
+            "key": "showBarWidget",
+            "type": "boolean",
+            "label": "Show bar widget",
+            "icon": "view_day",
+            "default": true
+        }
+    ],
+    "barWidget": { "component": "ScreenTimeWidget.qml" }
+}
