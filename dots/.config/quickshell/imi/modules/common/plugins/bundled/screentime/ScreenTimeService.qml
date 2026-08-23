@@ -77,36 +77,61 @@ Singleton {
         runHelper("month", function(payload) { root.monthData = payload })
     }
 
+    // One helper process, one request at a time. Each queued command carries
+    // its own callback so today/week/month cannot overwrite one another while
+    // the previous process is still running.
+    property var fetchQueue: []
+    property var activeRequest: null
+
     function runHelper(command, onSuccess) {
+        root.fetchQueue = root.fetchQueue.concat([{
+            command: command,
+            onSuccess: onSuccess
+        }])
         root.loading = true
-        root.onSuccess = onSuccess
-        helperProc.command = ["python3", FileUtils.trimFileProtocol(root.scriptPath), command]
-        helperProc.running = true
+        root.runNext()
     }
 
-    property var onSuccess: null
+    function runNext() {
+        if (helperProc.running || root.activeRequest !== null
+                || root.fetchQueue.length === 0) return
+        const queue = root.fetchQueue.slice()
+        const next = queue.shift()
+        root.fetchQueue = queue
+        root.activeRequest = next
+        helperProc.command = [
+            "python3",
+            FileUtils.trimFileProtocol(root.scriptPath),
+            next.command
+        ]
+        helperProc.running = true
+    }
 
     Process {
         id: helperProc
         stdout: StdioCollector { id: helperOutput }
         onExited: (exitCode, exitStatus) => {
-            root.loading = false
+            const request = root.activeRequest
+            root.activeRequest = null
             if (exitCode !== 0) {
                 root.lastError = "helper exited " + exitCode
                 if (root.trackerOnline) root.trackerOnline = false
-                return
-            }
-            try {
-                const payload = JSON.parse(helperOutput.text)
-                if (payload.error) {
-                    root.lastError = payload.error
-                    return
+            } else {
+                try {
+                    const payload = JSON.parse(helperOutput.text)
+                    if (payload.error) {
+                        root.lastError = payload.error
+                    } else {
+                        root.lastError = ""
+                        if (request && request.onSuccess)
+                            request.onSuccess(payload)
+                    }
+                } catch (e) {
+                    root.lastError = "invalid payload: " + e
                 }
-                root.lastError = ""
-                if (root.onSuccess) root.onSuccess(payload)
-            } catch (e) {
-                root.lastError = "invalid payload: " + e
             }
+            root.loading = root.fetchQueue.length > 0
+            Qt.callLater(root.runNext)
         }
     }
 
