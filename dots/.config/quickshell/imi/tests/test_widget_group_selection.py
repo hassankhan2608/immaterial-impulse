@@ -171,12 +171,20 @@ class GroupDragIsRigid(unittest.TestCase):
         and PluginWidget overrides that one function.
         """
         base = uncommented(BASE)
-        release = re.search(r"(?m)^    onReleased: \{(.*?)^    \}", base, re.S)
+        # The handler takes the mouse event now: Edit Mode's drop back into the
+        # drawer is decided from the release POINT, and a subclass cannot get in
+        # front of this handler to read it - QML runs a base class's signal
+        # handlers first, so a second `onReleased` below would arrive after the
+        # commit it exists to prevent. The parameter list is admitted; not one
+        # of the body's rules is.
+        release = re.search(r"(?m)^    onReleased:(?: \(mouse\) =>)? \{(.*?)^    \}",
+                            base, re.S)
         assert release, "the base class no longer releases"
         body = release.group(1)
         self.assertIn("root.commitPosition();", body)
-        # The only thing the handler may do besides committing is decline to,
-        # for the release that follows a cancelled gesture. A write-back
+        # The only things the handler may do besides committing are decline to
+        # (the release that follows a cancelled gesture) and hand the release to
+        # a subclass that takes the widget off the desktop instead. A write-back
         # spelled out here would be the second copy this check exists to stop.
         for writeback in ("configEntry.x", "setPosition", "targetX ="):
             self.assertNotIn(writeback, body,
@@ -194,15 +202,36 @@ class GroupDragIsRigid(unittest.TestCase):
     def test_the_plugin_commit_still_restores_the_binding_and_persists(self):
         """Dropping `restoreXYBinding()` leaves every group member frozen at
         its last dragged position for the session (forceCenter dies with it);
-        dropping `setPosition` makes a group move revert on restart. Both
+        dropping the store write makes a group move revert on restart. Both
         halves read fine on their own.
+
+        The write lives in `commitPlacement` now, which the keyboard step
+        also calls - it takes the placement coordinate the caller already
+        knows, because `x` lags it through the position Behavior and a step
+        that read `x` stored a value the animation had not reached. So the
+        guarantee is the same and spread over two functions: the drag's
+        commit must still restore the binding AND still reach the write,
+        and the write must still be a `setPosition`. Checking only
+        `commitPosition` for the call would pass on a `commitPlacement`
+        that had quietly stopped persisting anything.
         """
+        source = uncommented(HOST)
         match = re.search(r"function commitPosition\(\)\s*\{(.*?)\n    \}",
-                          uncommented(HOST), re.S)
+                          source, re.S)
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("restoreXYBinding()", body)
-        self.assertIn("PluginState.setPosition", body)
+        self.assertIn("commitPlacement(", body)
+
+        placement = re.search(
+            r"function commitPlacement\(beforeX, beforeY\)\s*\{(.*?)\n    \}",
+            source, re.S)
+        self.assertIsNotNone(
+            placement,
+            "commitPlacement is gone - the drag and the keyboard step share it, "
+            "so both stop persisting together")
+        self.assertIn("PluginState.setPosition", placement.group(1))
+        self.assertIn("GlobalStates.editUndoPush", placement.group(1))
 
 
 class TheSelectionIsVisible(unittest.TestCase):

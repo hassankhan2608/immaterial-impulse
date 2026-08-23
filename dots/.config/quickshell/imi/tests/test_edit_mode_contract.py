@@ -82,6 +82,7 @@ CHROME_CONTENT = ROOT / "modules/imi/editMode/EditModeChromeContent.qml"
 DRAWER = ROOT / "modules/imi/editMode/EditModeDrawer.qml"
 MENU = ROOT / "modules/imi/editMode/EditWidgetMenu.qml"
 MENU_CONTENT = ROOT / "modules/imi/editMode/EditWidgetMenuContent.qml"
+DRAWER_DROP = ROOT / "modules/imi/editMode/EditModeDrawerDrop.qml"
 INSETS = ROOT / "modules/imi/editMode/EditModeInsets.qml"
 DESKTOP_MENU = ROOT / "modules/imi/desktopMenu/DesktopMenu.qml"
 LOCK_SURFACE = ROOT / "modules/imi/lock/LockSurface.qml"
@@ -90,13 +91,14 @@ RULES = ROOT.parents[1] / "hypr/hyprland/rules.lua"
 BAR_CONTROLLER = ROOT / "modules/imi/bar/BarEditController.qml"
 LOCK_REORDER = ROOT / "modules/imi/lock/LockIslandReorder.qml"
 DRAG_APPS = ROOT / "modules/common/widgets/DragApps.qml"
+CATALOGUE_ROW = ROOT / "modules/common/widgets/CatalogueRow.qml"
 
 # Everything that takes part in the mode. Listed rather than globbed so a new
 # participant is a deliberate addition to this list, which is where someone
 # reads what the rules are.
 PARTICIPANTS = [BACKGROUND, CANVAS, WIDGET, BACKGROUND_WIDGET, PLUGIN_WIDGET,
                 CHROME_SCOPE, CHROME_SURFACE, CHROME_CONTENT, DRAWER,
-                MENU, MENU_CONTENT]
+                MENU, MENU_CONTENT, DRAWER_DROP]
 
 
 def read(path: Path) -> str:
@@ -188,7 +190,11 @@ def test_nothing_computes_the_mode_from_anything_but_the_one_flag():
                 # The chrome surface's own layer-shell namespace, which is a
                 # string and not a predicate at all.
                 or "WlrLayershell.namespace" in line
-                or line.lstrip().startswith("//")
+                # Comments, in either spelling. The sweep only admitted `//`,
+                # so a `/** */` line naming `quickshell:editMode` - which the
+                # chrome scope's own header does, to say which layer it is on -
+                # read as a second source for the mode.
+                or line.lstrip().startswith(("//", "*", "/*"))
             )
             assert allowed, f"{path.name}: a second source for the mode: {line.strip()}"
 
@@ -332,6 +338,45 @@ def test_the_chrome_stands_down_through_two_gates_and_not_one():
     assert "card: bgRoot.editCard" in body and "cardRadius: bgRoot.editCardRadius" in body
     assert "EditMode.cardRect(" in text, \
         "the card's rectangle must come from the same arithmetic as the transform"
+
+
+def test_the_chrome_yields_to_a_workspace_summoned_over_the_desktop():
+    # The mode's two halves are on opposite sides of the window stack: the
+    # desktop being edited is `quickshell:background` on WlrLayer.Bottom, this
+    # chrome is `quickshell:editMode` on WlrLayer.Overlay. Anything covering the
+    # screen lands between them - the desktop is hidden and the toolbar, tab bar
+    # and drawer are painted over the top of it, which is not untidy but
+    # unusable: the widgets being arranged cannot be seen.
+    #
+    # Static because no harness can see it. weston implements no
+    # wlr-layer-shell, so nothing in the suite maps either surface, let alone
+    # stacks a window between two of them.
+    text = read(CHROME_SCOPE)
+    assert "specialWorkspace" in text, \
+        "the chrome no longer yields to a scratchpad summoned over the desktop"
+    # Per MONITOR, because a scratchpad is per monitor. Read off this screen's
+    # own Hyprland record rather than off a global "is one open anywhere".
+    assert re.search(r"HyprlandData\.monitors\.find\(", text), \
+        "the special-workspace state must be read for THIS screen"
+    assert re.search(r"monitor\.name === surfaceLoader\.modelData\?\.name", text), \
+        "the monitor must be matched by name; screens and monitors are two " \
+        "lists that are not promised to share an order"
+    # ...and it has to reach the surface. A property computed and never spent is
+    # the shape that passes a grep and changes nothing.
+    assert re.search(r"underneath:\s*surfaceLoader\.specialShown", text), \
+        "the special-workspace state is computed but never handed to the surface"
+    # It moves the chrome UNDER the window rather than removing it. The first
+    # attempt stood the surface down, and a mode popping out of existence while
+    # everything around it is being dimmed is uglier than the overlap it fixed -
+    # so the check pins the layer switch, not the disappearance.
+    surface = read(CHROME_SURFACE)
+    assert re.search(r"WlrLayershell\.layer:\s*root\.underneath\s*\?\s*WlrLayer\.Bottom\s*:\s*WlrLayer\.Overlay",
+                     surface), \
+        "the chrome must drop to the desktop's own layer while something is " \
+        "summoned over it, not vanish"
+    assert not re.search(r"active:[^\n]*specialShown", text), \
+        "the chrome must not be gated out of existence by the special " \
+        "workspace; that is the version that snapped"
 
 
 def test_the_lattice_declares_where_it_sits_rather_than_inheriting_it():
@@ -622,6 +667,54 @@ def test_every_pixel_that_is_not_chrome_falls_through_to_the_desktop():
             f"{path.name} adds a pointer area to a surface whose mask is three rects"
 
 
+def test_the_drawer_draws_its_rows_with_a_component_that_is_not_a_control():
+    """The shared row must stay a plain item, or the drag out of the drawer dies.
+
+    The drawer's catalogues (desktop widgets, bar widgets, dock apps, the lock
+    islands and their per-widget picker, the two lock re-link rows) all draw
+    `CatalogueRow` now, and the same component draws every settings row and
+    every widget-store card - so the tempting next edit is to fold the hover,
+    the cursor and the click into it and let the call sites stop repeating
+    themselves. That would take the desktop section's rows with it.
+
+    Those rows are `MouseArea`s by construction (65602708e): a drag out of a
+    clipped panel needs the implicit grab of the press to keep delivering
+    events after the pointer has left the row, which is why they are the
+    deliberate exception to the no-MouseArea sweep above. A shared row that
+    is itself a control either eats the press before the MouseArea sees it or
+    forces the drawer off the shared component again. Neither failure is
+    loud: drag-to-place simply stops carrying anything out, on a gesture no
+    test in this suite drives.
+    """
+    row = code(CATALOGUE_ROW)
+    assert row.strip().startswith("import"), "CatalogueRow.qml is not QML"
+    for spelling in ("MouseArea", "TapHandler", "DragHandler", "RippleButton",
+                     "Button {", "signal clicked"):
+        assert spelling not in row, (
+            f"CatalogueRow grew a {spelling} - the drawer's drag-out needs the "
+            f"press to stay with the call site's own MouseArea")
+    # ...and the drawer still keeps the gesture, on the section that has one.
+    drawer = code(DRAWER)
+    assert "CatalogueRow {" in drawer, \
+        "the drawer no longer draws its rows with the shared component"
+    assert "delegate: MouseArea {" in drawer and "preventStealing: true" in drawer, \
+        ("the desktop section's rows stopped being pointer areas - a Button "
+         "does not keep delivering events once the pointer leaves the drawer")
+    # Every row body in the file is that component, not just one of them. The
+    # check above passes on a drawer where five rows share the component and a
+    # sixth is spelled out beside them, which is exactly the state a branch
+    # that grew a row while the extraction was landing arrives in: the lock
+    # section's widget-choice re-link was written as a hand-rolled
+    # icon/label/label/glyph RowLayout, and merging the two left it as the one
+    # row in the drawer that would drift on its own. A row body here is a
+    # `contentItem:`, and every one of them has to name the shared row.
+    bodies = re.findall(r"contentItem:\s*(\w+)", drawer)
+    assert bodies, "no row bodies found in the drawer - this check reads nothing"
+    assert set(bodies) == {"CatalogueRow"}, (
+        "a drawer row is spelled out by hand instead of drawing the shared "
+        f"catalogue row: {sorted(set(bodies) - {'CatalogueRow'})}")
+
+
 def test_the_chrome_surface_leaves_the_keyboard_to_the_desktop():
     # Escape is answered by WidgetCanvas on the background surface, through
     # edit_mode.js's ladder. A chrome surface on Overlay taking OnDemand focus
@@ -650,19 +743,30 @@ def test_the_chrome_surface_mints_a_namespace_and_declares_it_to_the_compositor(
                      rules), \
         f"{namespace} has no alpha threshold in rules.lua"
     # Above the bar and the dock, or the chrome renders underneath the two
-    # surfaces the mode deliberately leaves at full size.
-    assert re.search(r"WlrLayershell\.layer:\s*WlrLayer\.Overlay", text), \
+    # surfaces the mode deliberately leaves at full size. That is the DEFAULT
+    # branch: the other one is `Bottom`, taken only while something is summoned
+    # over the desktop, where being below the bar and the dock is correct
+    # because the chrome is below the window too.
+    assert re.search(r"WlrLayershell\.layer:[^\n]*WlrLayer\.Overlay", text), \
         "the chrome must sit above the bar and the dock"
+    assert not re.search(r"WlrLayershell\.layer:\s*WlrLayer\.Bottom\s*$", text, re.M), \
+        "Bottom must be the conditional branch, never the resting layer"
 
 
 def test_the_chrome_stands_down_through_two_gates_of_its_own():
-    # The same lesson as the desktop card's, on a surface this time: either gate
-    # alone hides the chrome, so a frame comparison passes on a tree with one of
-    # them deleted - and then the survivor gets deleted as redundant.
+    # The same lesson as the desktop card's, on a surface this time: any gate
+    # alone hides the chrome, so a frame comparison passes on a tree with the
+    # other deleted - and then the survivor gets deleted as redundant. Each is
+    # pinned by what it reads, not by the whole expression, so adding a third
+    # does not have to edit this test to keep the first two honest.
     scope = read(CHROME_SCOPE)
-    assert re.search(r"active:\s*GlobalStates\.editMode \|\| GlobalStates\.editProgress > 0",
-                     scope), \
+    active = re.search(r"active:(.*?)\n\n", scope, re.S)
+    assert active, "the chrome loader has no `active` binding"
+    body = active.group(1)
+    assert "GlobalStates.editMode" in body, \
         "the chrome surface must not exist while the mode is off"
+    assert "GlobalStates.editProgress > 0" in body, \
+        "the chrome must outlive the flag to travel back out with the desktop"
     assert re.search(r"opacity:\s*GlobalStates\.editProgress", read(CHROME_SURFACE)), \
         "the chrome must be transparent while the mode is off"
 
@@ -1063,6 +1167,208 @@ def test_remove_is_presence_through_the_one_spelling():
         "the drawer's toggle left the shared spelling"
 
 
+def test_the_drawers_two_directions_ask_one_predicate_of_one_rectangle():
+    """A row let go back over the drawer is abandoned; a widget carried in off
+    the desktop and let go there is removed. Same rectangle, opposite
+    directions, and they run in two different windows - so the rect crosses the
+    boundary once (published, the `clockDepthViewports` shape) and the question
+    is asked through the module on both sides.
+
+    Two hand-written bounds checks would be the "two fields that must agree"
+    this file already forbids elsewhere, and the second one is the one nobody
+    looks at: it is on the desktop's release path, which fires on every click
+    on every widget.
+    """
+    surface = code(CHROME_SURFACE)
+    widget = code(PLUGIN_WIDGET)
+    for name, text in (("the chrome surface", surface), ("PluginWidget", widget)):
+        assert "EditMode.pointInDrawerReveal(" in text, \
+            f"{name} decides the drop without the shared predicate"
+        # ...and does not carry its own. The comparison chain the surface used
+        # to spell out is what this replaced, and it is easy to write again.
+        assert not re.search(r"\.width\s*&&", text), \
+            f"{name} still compares against a reveal's edges by hand"
+
+    # The rect itself is derived ONCE and published, because a layer surface
+    # cannot read another window's items. Both halves, because either alone is
+    # silent: a publisher nobody reads changes nothing, and a reader with no
+    # publisher answers null for ever and the gesture simply never fires.
+    assert "GlobalStates.editDrawerReveals" in surface, \
+        "the chrome surface no longer publishes the reveal it owns"
+    assert "chrome.drawer" in declaration(surface, "drawerReveal"), \
+        "the published reveal is a second derivation instead of the drawn rect"
+    assert re.search(r"Component\.onDestruction:\s*root\.publishDrawerReveal\(null\)",
+                     surface), \
+        ("a chrome surface that goes must take its rectangle with it, or a "
+         "later drag lands on a drawer that is not there")
+    assert "GlobalStates.editDrawerReveals[" in widget, \
+        "the widget works the drawer's rectangle out again instead of reading it"
+
+    # The predicate takes SCREEN coordinates, because its two callers reach
+    # them differently and only one of them may map through the widget.
+    decide = re.search(r"function dropWouldRemoveAt\([^)]*\)\s*\{(.*?)\n    \}",
+                       widget, re.S)
+    assert decide, "PluginWidget no longer decides the drop"
+    assert "mapToItem" not in decide.group(1), \
+        "the predicate maps a point itself, so its two callers cannot differ"
+    # ...and it asks the MEMBERSHIP question the write asks. A widget can be on
+    # screen and draggable without being in `plugins.enabled` - `lockOnlyWidget`
+    # is exactly that - and `EditModeDrawerDrop` declines such an id, so a
+    # predicate that did not ask lit the drawer for a drop that then did
+    # nothing at all: the release swallowed the commit on the strength of the
+    # hint, and the removal was declined after it.
+    assert "Config.options.plugins.enabled.includes(" in decide.group(1), \
+        "the drop hint promises a removal the write is going to decline"
+
+    # The release maps through Qt's own transform chain - the same contract the
+    # right-click carries, and correct there because nothing moves the widget
+    # on a release. A hand-multiplied viewport scale is right at scale 1 and
+    # wrong at every scale the mode actually draws.
+    answer = re.search(r"function releaseRemovesWidget\([^)]*\)\s*\{(.*?)\n    \}",
+                       widget, re.S)
+    assert answer and "rootWidget.mapToItem(null" in answer.group(1), \
+        "the release's drop point is not mapped through the transform chain"
+
+    # The DRAG's hint may not: a base class's handlers run first, so
+    # AbstractWidget has already moved the item `mouse.x/y` are relative to and
+    # mapping them out again overshoots the pointer by that event's delta -
+    # measured as a hint that never lit up. It reads the pointer position
+    # AbstractWidget records before it moves anything.
+    # The parameter list is admitted by the pattern on purpose: a handler that
+    # takes `mouse` is exactly the mutation this is here to redden, and a
+    # pattern that could not match it would report "there is no hint" instead.
+    hint = re.search(r"onPositionChanged:(?: \([^)]*\) =>)? \{(.*?)\n    \}",
+                     widget, re.S)
+    assert hint, "PluginWidget no longer publishes the drop hint"
+    assert "dragPointerParentX" in hint.group(1) \
+        and "mouse." not in hint.group(1), \
+        "the drop hint maps this event's own coordinates through a moved item"
+    assert re.search(r"root\.dragPointerParentX = p\.x", code(WIDGET)), \
+        "AbstractWidget stopped recording where the pointer was before it moved"
+
+
+def test_a_drop_on_the_drawer_removes_and_commits_nothing():
+    """The release has to reach the removal INSTEAD of the commit, and the
+    position must not be written on the way out.
+
+    Both halves are load-bearing. A commit would store the drawer's own
+    coordinates as where the user left the widget, so undoing the removal would
+    bring it back under the panel it was dropped on - where the click path's
+    Remove correctly brings it back to where it was, because it writes no
+    position at all.
+
+    The ordering cannot be arranged from the subclass: signal handlers declared
+    at two levels of one component both run, base first, so a second
+    `onReleased` on PluginWidget would arrive after the commit it exists to
+    prevent (measured with a qml6 probe). Hence the overridable predicate.
+    """
+    base = code(BACKGROUND_WIDGET)
+    handler = re.search(r"onReleased: \(mouse\) => \{(.*?)\n    \}", base, re.S)
+    assert handler, "the one release handler is gone or has changed shape"
+    body = handler.group(1)
+    assert "releaseRemovesWidget(" in body and "commitPosition()" in body, \
+        "the release no longer offers the subclass a way out before committing"
+    assert body.index("releaseRemovesWidget(") < body.index("commitPosition()"), \
+        "the commit runs before the question that is supposed to prevent it"
+    assert re.search(r"function releaseRemovesWidget\([^)]*\)\s*\{\s*return false;\s*\}",
+                     base), \
+        "the base must answer false, so every non-plugin widget commits as before"
+
+    answer = re.search(r"function releaseRemovesWidget\([^)]*\)\s*\{(.*?)\n    \}",
+                       code(PLUGIN_WIDGET), re.S)
+    assert answer, "PluginWidget no longer answers the release"
+    assert "setPosition" not in answer.group(1) \
+        and "commitPlacement" not in answer.group(1) \
+        and "commitPosition" not in answer.group(1), \
+        "the drop commits a placement on its way off the desktop"
+    assert "GlobalStates.editWidgetDroppedOnDrawer(" in answer.group(1), \
+        "the drop is not announced, so nothing can answer it"
+
+    # The write stays in the edit-mode directory, which is the one
+    # lint_edit_mode_scope.py polices - a plugins.enabled write moved one
+    # directory sideways is that lint's own worked example of the rule getting
+    # lost. It is not on the chrome PanelWindow, because weston implements no
+    # wlr-layer-shell and a write there is a write no harness can drive.
+    drop = code(DRAWER_DROP)
+    assert 'Config.setNestedValue("plugins.enabled"' in drop, \
+        "the drop's answer no longer writes presence"
+    assert "EditMode.enabledWithout(" in drop, \
+        "the drop spells its own removal loop instead of the shared one"
+    assert "GlobalStates.editUndoPush(" in drop, \
+        "a removal by drag is a committed mutation and records an undo entry"
+    assert "setPosition" not in drop, \
+        "the removal touches the stored position, which is what undo restores"
+    assert "PanelWindow" not in drop and "Item {" not in drop, \
+        "the drop's answer grew a surface a harness cannot build"
+    assert code(PLUGIN_WIDGET).count("editWidgetDroppedOnDrawer") == 1, \
+        "a second announcer would remove one widget twice"
+
+    # ONE listener. plugins.enabled is a single global list drawn on every
+    # monitor, so one per chrome surface would answer a drop once per screen
+    # and spend an undo entry on each. Counted as DECLARATIONS across the
+    # shipped tree rather than as files naming it: the first version of this
+    # check asked only whether EditModeChrome.qml declared one, which is true
+    # of a tree that declares a second somewhere else - planted, and it passed.
+    declarations = []
+    for path in sorted(ROOT.rglob("*.qml")):
+        rel = str(path.relative_to(ROOT))
+        # The harnesses build one on purpose - that is the whole reason the
+        # write lives in a QtObject - and they ship no surfaces.
+        if rel.startswith("tests/") or rel.endswith(("RuntimeTest.qml", "Probe.qml")):
+            continue
+        declarations += [rel] * len(
+            re.findall(r"^\s*EditModeDrawerDrop \{", code(path), re.M))
+    assert declarations == ["modules/imi/editMode/EditModeChrome.qml"], \
+        f"EditModeDrawerDrop is not declared exactly once beside the chrome: {declarations}"
+
+
+def test_the_sidebars_close_for_the_mode_and_stay_closed():
+    """Both sidebars are `WlrLayer.Top`; the mode's chrome is `Overlay`. So the
+    widget drawer, which shares the right sidebar's edge, is painted over an
+    open sidebar - reported by the user as the drawer drawing through it.
+
+    Neither sidebar is EDITABLE in the mode: it has no drawer section, no
+    remove badge, no reorder the mode drives, and no key in
+    `lint_edit_mode_scope.py`'s allowlist. It is a panel covering the thing
+    being edited, which is the case `activeBarPopup` beside it already answers
+    the same way.
+
+    Closing them on entry is only half of it - the corners, the bar's buttons
+    and the IPC handlers can all open one again while the mode is on - so the
+    refusal lives on the flag, which is the one gate every path shares.
+    """
+    states = code(GLOBAL_STATES)
+    entry = re.search(r"onEditModeChanged: \{(.*?)\n        else", states, re.S)
+    assert entry, "the mode's entry branch is gone or has changed shape"
+    for flag in ("sidebarLeftOpen", "sidebarRightOpen"):
+        assert re.search(rf"root\.{flag} = false;", entry.group(1)), \
+            f"entering the mode leaves {flag} open under the chrome"
+        handler = re.search(rf"on{flag[0].upper()}{flag[1:]}Changed: \{{(.*?)\n    \}}",
+                            states, re.S)
+        assert handler, f"{flag} has no change handler to refuse an open"
+        assert re.search(rf"root\.{flag} && root\.editMode", handler.group(1)), \
+            f"{flag} can still be opened over the mode's chrome"
+
+    # The refusal comes before the notification sweep, or a refused open counts
+    # as the user having read what it would have shown them.
+    right = re.search(r"onSidebarRightOpenChanged: \{(.*?)\n    \}", states, re.S)
+    assert right.group(1).index("root.editMode") \
+        < right.group(1).index("Notifications.markAllRead"), \
+        "a refused sidebar open still marks the notifications read"
+
+    # And the chrome's layer is untouched. `underneath` exists because REMOVING
+    # the chrome popped it out of existence while the compositor dimmed
+    # everything around it, and it answers a special workspace covering the
+    # whole desktop - not a panel on one edge of it.
+    surface = code(CHROME_SURFACE)
+    assert re.search(r"WlrLayershell\.layer: root\.underneath \? WlrLayer\.Bottom "
+                     r": WlrLayer\.Overlay", surface), \
+        "the chrome's layer stopped being the special-workspace switch alone"
+    for name in ("sidebarLeftOpen", "sidebarRightOpen"):
+        assert name not in surface, \
+            f"the chrome surface decides its layer from {name}"
+
+
 def test_the_menu_window_is_the_desktop_menus_shape():
     # A transient full-screen Overlay window that exists only while open, on
     # the reused quickshell:desktopMenu namespace - the same kind of surface as
@@ -1162,7 +1468,11 @@ def test_the_viewport_draws_its_locked_inputs_on_the_lockscreen_tab():
         "the lock blur must be active for the locked look"
     # And the widget filter: the tab shows the widgets the lock screen will.
     widget = code(BACKGROUND_WIDGET)
-    assert re.search(r"opacity:\s*\(" + LOCK_LOOK + r"\s*&&\s*!visibleWhenLocked\)",
+    # One expression asks WHICH surface is on screen and then that surface's
+    # own filter, so a widget picked for the lock alone cannot leak onto the
+    # desktop and one the desktop shows cannot leak onto the lock.
+    assert re.search(r"opacity:\s*\(" + LOCK_LOOK
+                     + r"\s*\?\s*visibleWhenLocked\s*:\s*visibleOnDesktop\)",
                      widget), \
         "AbstractBackgroundWidget's lock filter does not cover the preview"
     # The palette is a locked input too, and the one that was missed: the tab
@@ -1226,6 +1536,39 @@ def test_island_visibility_is_presence_through_literal_paths():
             f"the surface must flip lock.{key} at its literal path"
     assert not re.search(r"Config\.options\.lock\[", surface + drawer), \
         "a computed lock key routes around the allowlist"
+
+
+def test_the_lock_section_picks_which_widgets_the_lock_screen_shows():
+    # The other half of the fork spec §4.3 chose for the layout: presence
+    # inherits the desktop's enabled set until the first pick on this tab, and
+    # the drawer says which of the two states it is in. Three things about the
+    # arrangement are checked because each is silent when wrong.
+    drawer = code(DRAWER)
+    # The picker lives UNDER the master gate, in both senses: the rows are
+    # built only while `lock.showWidgets` is on, because with the lock showing
+    # no widgets at all they would be controls that change nothing.
+    rows = declaration(drawer, "lockWidgetRows")
+    assert rows and "Config.options.lock.showWidgets" in rows, \
+        ("the per-widget rows must be gated on the master switch, or the Lock "
+         "section offers a picker for a lock screen that shows no widgets")
+    assert "desktopManifests" in rows, \
+        ("the picker must offer the same catalogue the Widgets section does - "
+         "a second filter is a second answer to what a desktop widget is")
+    # One list, two kinds of row, and the delegate has to route the click by
+    # kind: an island writes a lock.show* boolean and a widget writes the
+    # choice, and the two go to different signals.
+    assert re.search(r"lockRow\.isWidget\s*\n?\s*\?\s*root\.lockWidgetToggleRequested",
+                     drawer), \
+        "a widget row's click must raise the per-widget signal, not the island one"
+    # And the master gate's own caption stops claiming "every" once it is not.
+    assert "Show the widgets picked below while locked" in drawer, \
+        ("the Desktop widgets row must say which state the choice is in, or "
+         "'every' goes on describing a set the picked rows have replaced")
+    surface = code(CHROME_SURFACE)
+    assert "onLockWidgetToggleRequested" in surface, \
+        "the surface does not answer the drawer's per-widget signal"
+    assert "onLockPresenceResetRequested" in surface, \
+        "the surface does not answer the drawer's re-link"
 
 
 def test_the_clock_previews_its_locked_look_through_one_derivation():
@@ -1386,10 +1729,12 @@ def test_every_committed_mutation_records_exactly_its_entries():
     expected = {
         PLUGIN_WIDGET: 2,      # a drag's release; a span commit (grip + Size row path)
         MENU_CONTENT: 2,       # the Size stepper; Remove
-        CHROME_SURFACE: 10,    # presence toggle, 3 bar-bucket adds, 3 lock keys,
-                               # add-at-pointer, dock pin toggle, and the lock
+        CHROME_SURFACE: 12,    # presence toggle, 3 bar-bucket adds, 3 lock keys,
+                               # add-at-pointer, dock pin toggle, the lock
                                # layout re-link (spec §4.3 as amended: one entry
-                               # that puts a forked screen back whole)
+                               # that puts a forked screen back whole), and the
+                               # widget-choice pair beside it - one pick, and
+                               # its own re-link
         BAR_CONTROLLER: 1,     # one snapshot helper serving reorder and remove
         LOCK_REORDER: 3,       # one literal path per island
         DRAG_APPS: 2,          # the dock's reorder commit; the badge unpin
@@ -1406,6 +1751,98 @@ def test_every_committed_mutation_records_exactly_its_entries():
     assert re.search(
         r"if \(beforeX !== rootWidget\.targetX \|\| beforeY !== rootWidget\.targetY\)",
         widget), "the drag-release push lost its moved-something guard"
+
+
+def test_every_staggered_drawer_member_arrives_on_all_three_channels():
+    """The drawer's entrance is one scalar driving three properties.
+
+    A member arriving on opacity alone is a fade, which is what
+    `docs/M3_GUIDELINES.md` §2 ("Component Entrance and Exit") says a component
+    entrance is not - and a member that folds `appear` into two of the three
+    finishes its scale on a different schedule from its opacity, which reads as
+    a hiccup rather than as one motion. The realistic regression is a fifth
+    section added to the column and dressed by copying half of a neighbour, so
+    the sweep finds the members rather than naming them.
+    """
+    text = code(DRAWER)
+    ids = re.findall(r"id: (\w+)\n\s*property real appear: 1", text)
+    assert len(ids) >= 9, (
+        f"only {len(ids)} drawer members declare an `appear` - the column has "
+        f"nine that should, so either a member lost its entrance or this sweep "
+        f"stopped finding them")
+    for name in ids:
+        for channel in (f"opacity: {name}.appear",
+                        f"scale: root.entranceScale({name}.appear)",
+                        f"transform: Translate {{ y: root.entranceOffset({name}.appear) }}"):
+            assert channel in text, (
+                f"{name} does not fold `appear` into `{channel.split(':')[0]}`. "
+                f"All three channels ride one scalar so they cannot land on "
+                f"different schedules.")
+
+    # ...and the members that must NOT be dressed this way are the column's own
+    # RippleButtons - the lock section's two re-link rows. A `RippleButton`
+    # already declares `appear` and folds it into its `opacity`, and it owns
+    # `scale` through the interaction model and the disabled dim through that
+    # same opacity binding - so it rides the wave through the property the
+    # runner writes, and a second writer of either channel here would REPLACE
+    # the control's binding rather than compose with it: a press that stops
+    # squishing, and a disabled row drawn as enabled. Swept rather than named,
+    # because the first version of this named the one row that existed and went
+    # quiet the moment a second was added beside it.
+    ripple_rows = re.findall(r"\n {12}RippleButton \{\n {16}id: (\w+)", text)
+    assert len(ripple_rows) >= 2, (
+        f"this sweep found {len(ripple_rows)} column-level RippleButtons in the "
+        f"drawer - the lock section has two re-link rows, so either they moved "
+        f"or the sweep stopped finding them")
+    for name in ripple_rows:
+        assert name not in ids, (
+            f"{name} redeclares `appear`. It is a RippleButton, which already "
+            f"has one and already folds it into the opacity that carries its "
+            f"disabled dim - a second declaration here shadows the control's "
+            f"own and draws the row as enabled while it is not.")
+        for channel in (f"opacity: {name}.appear",
+                        f"scale: root.entranceScale({name}.appear)"):
+            assert channel not in text, (
+                f"{name} writes `{channel.split(':')[0]}` itself. On a control "
+                f"that already writes it, that replaces the binding rather "
+                f"than composing with it - lint_interaction_motion_double.py "
+                f"and lint_disabled_opacity.py exist for the same doubling.")
+
+
+def test_the_drawer_arms_its_entrance_before_the_reveal_draws():
+    """Putting the members away is the gesture's start, not the gate's.
+
+    Measured: with the reset inside the wave the rows were drawn at full
+    strength for the whole 100ms run up to the gate and then blinked out to
+    cascade back in. The arm hangs off the intent flag, which flips at the
+    click, while the wave hangs off the container's progress.
+    """
+    text = code(DRAWER)
+    # The HANDLER's own body, not a substring search: the first version of this
+    # asserted `"onOpeningChanged" in text`, which a renamed handler satisfies -
+    # planted as `onOpeningChangedXX:` and it stayed green.
+    handler = re.search(r"\n    onOpeningChanged:\s*\{(.*?)\n    \}", text, re.S)
+    assert handler, (
+        "the drawer has no `onOpeningChanged` handler, so nothing parks its "
+        "members when the gesture starts and its contents are visible until "
+        "the gate and then blink out")
+    body = handler.group(1)
+    assert "park()" in body, (
+        "the drawer's intent handler no longer parks its members.")
+    assert "root.opening" in body and "editDrawerProgress" not in body, (
+        "the park hangs off something other than the intent flag. The gate is "
+        "the container's progress and the arm is the click - two events, or "
+        "the members are put away at the moment they are meant to come out.")
+    # ...and the park is an assignment, in the runner both adopters share: a
+    # start value written through the same animated property the end value
+    # goes through is swallowed by the retarget, which is the defect that left
+    # the wallpaper selector with no entrance at all.
+    wave = code(ROOT / "modules/common/widgets/StaggerWave.qml")
+    park = wave[wave.index("function park()"):]
+    park = park[:park.index("\n    }")]
+    assert "= 0;" in park and "Animation" not in park, (
+        "StaggerWave.park animates the entrance's START state instead of "
+        "assigning it.")
 
 
 if __name__ == "__main__":

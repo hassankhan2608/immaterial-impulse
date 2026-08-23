@@ -45,6 +45,30 @@ Visible borders are not required for every surface. Many components rely entirel
 - Let `GroupedList` provide the common content inset. Child controls must not add another horizontal
   inset that makes icons, labels, or fields drift out of alignment with adjacent rows.
 
+### Dialogs
+
+`WindowDialog` is the only dialog card in this shell and its numbers are rules, not defaults.
+
+- **Content padding is `WindowDialog.contentPadding`, and it is `Appearance.spacing.space400` (32).**
+  It is one property because two things derive from it - the content column's `margins` and the
+  card's `implicitHeight` - and they used to be two separate spellings of the card's corner radius,
+  which made the padding 23px for a reason that was not a spacing reason at all. Anything that
+  bleeds out to the card's edge (a `WindowDialogSeparator`, a full-width list, a progress bar)
+  cancels *that* property, never `Appearance.rounding.large`.
+- **32 is deliberately one step above M3's 24dp basic-dialog padding.** It is a maintainer decision,
+  taken because `space300` is a single pixel away from the value it replaces. Do not restore 24.
+- **The confirming action carries a filled container; the dismissing action is then outlined.**
+  A dialog whose actions are all flat stays flat - the pairing is between a filled button and its
+  partner, not a decoration every Cancel gets. The rule is derived by `WindowDialogButtonRow` from
+  whether one of its children is filled, and applied by `DialogButton.outlined`; a call site must
+  not spell it for itself. The outline is `colOutline` at `borderWidth.standard`, never
+  `colOutlineVariant` - a dialog action's edge is what makes it read as pressable, and the variant
+  is this document's *subtle* boundary tone.
+- **Actions sit `Appearance.spacing.space100` (8) apart**, which is M3's dialog-action gap. Judge
+  that gap between the buttons' *drawn* edges: a flat button's painted extent is its label, an
+  outlined or filled one's is its container, so the same `spacing` reads very differently either
+  side of adding an outline.
+
 ### Corner Rounding (Radii)
 Always use predefined rounding values from `Appearance.rounding`. Never use hardcoded pixel values (e.g., `radius: 12`) or arbitrary maximum values (e.g., `radius: 9999`).
 
@@ -114,10 +138,17 @@ Never use raw integer durations (e.g., `duration: 150`), generic QML easing curv
 leaves `easing.type` at Qt's default, which is `Easing.Linear`, the generic curve this section
 forbids. Prefer the tier's own `numberAnimation`/`colorAnimation` factory, which carries the
 duration, the type and the curve together; write out `<tier>.type` and `<tier>.bezierCurve` beside
-the duration only where the factory's `alwaysRunToEnd` would change the behaviour (a transition the
-user can reverse mid-flight). `tests/lint_motion_tier_partial.py` fails the suite on a new partial
-take and holds the existing ones in a per-file register that may only shrink; the durations quoted
-below are the *base* values, before the user's speed multiplier.
+the duration only where the factory's `alwaysRunToEnd` would change the behaviour — which means an
+animation something calls `start()` on, **not** a `Behavior`. Measured: `QQuickBehavior::write` stops
+the animation instance directly, so a `Behavior` reversed mid-flight reads the same value with and
+without the flag, while a started animation stopped mid-flight runs on to its target. A `Behavior`
+may take any tier's factory. `tests/lint_motion_tier_partial.py` fails the suite on a new partial
+take; its per-file register of pre-existing ones is **empty**, so the rule now holds for the whole
+tree with no exceptions. Note what that check cannot see: an easing that is *present* but does not
+resolve — `easing.type: Easing.BezierSpline` with no `bezierCurve` beside it is measurably
+`Easing.Linear` — so an animation naming two different tiers is worth a second look even when the
+lint is green. The durations quoted below are the *base* values, before the user's speed
+multiplier.
 
 ### Speed, and the reduce-motion floor
 
@@ -136,6 +167,24 @@ Rank by *visible* position (a hidden member that spends a slot leaves a hole in 
 wave), take the clamp (`index * step` is unbounded and a long list cascades for seconds), and let
 the step be a fraction of a catalogued duration rather than a literal. Scale the step and the lead-in
 once, at the call site, so a wave collapses to nothing under reduce motion with no second gate.
+
+In practice a container does not call those three itself: it declares a
+`modules/common/widgets/StaggerWave.qml`, points it at the item whose children are the members, and
+calls `enter()` / `leave()`. That component is where all four rules above are applied, and it is the
+only file permitted to call `staggerRanks` — `tests/test_motion_policy_contract.py` fails the suite
+on a second one, because a second runner is how the two cascades that predate the policy came to
+disagree about both the clamp and the step. A member opts in by declaring `property real appear: 1`
+and folding it into its own opacity; `RippleButton` already does.
+
+Prefer the container's own *effective* `visible` as the trigger over the state that opens it. A wave
+asked for before the container is on screen ranks every member as hidden, writes nothing, and leaves
+the surface blank — `StaggerWave` holds the entrance until the container is visible for exactly that
+reason, but a trigger that is already the right one needs no rescuing.
+
+Not every group wants one. A list the user is about to type into — the launcher's results — is a
+group whose entrance is latency on the thing being waited for, and one that rebuilds per keystroke
+restarts the wave before it finishes. Say why a surface was left alone rather than staggering
+everything that happens to be a `Repeater`.
 
 ### Swapping content that cannot be interpolated
 

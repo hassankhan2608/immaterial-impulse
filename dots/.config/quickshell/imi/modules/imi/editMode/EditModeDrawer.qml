@@ -33,6 +33,17 @@ import qs.modules.common.plugins
  * arranged. The bar section's bucket picker names the buckets the way the
  * current orientation draws them.
  *
+ * ---- what a row is ----------------------------------------------------------
+ *
+ * `CatalogueRow` - the icon/name/description/affordance shape this file used to
+ * spell out once per row shape, shared with every settings row and the widget
+ * store. Counting them here is what went stale the first time a row was added,
+ * so the rule is stated instead: EVERY row body in this file is that component,
+ * and `test_edit_mode_contract.py` reads them one by one. The rows' INTERACTION
+ * is still each section's own, and deliberately: the desktop section's rows are
+ * `MouseArea`s (see above), every other row is a `RippleButton`, and the shared
+ * component is not interactive at all so it can sit inside either.
+ *
  * ---- what this file writes --------------------------------------------------
  *
  * Nothing, same as stage 5: every gesture is a signal, and the chrome surface
@@ -63,14 +74,39 @@ Item {
     // while locked. A signal like everything else here; the surface makes the
     // write at the boolean's own literal path.
     signal lockToggleRequested(string key)
+    // One widget's presence on the lock screen. The first one forks the lock's
+    // widget choice from the desktop's, the same way the first move forks the
+    // layout - the drawer never forks by itself, a pick does.
+    signal lockWidgetToggleRequested(string pluginId)
     // The lock layout's re-link: this screen's widgets go back to following
     // the desktop's arrangement. Only offered while the screen is forked.
     signal lockLayoutResetRequested()
+    // The same, for the widget choice. Two questions, two re-links: a user who
+    // arranged the lock screen apart from the desktop has not necessarily
+    // picked a different set of widgets for it, and re-linking one must not
+    // silently discard the other.
+    signal lockPresenceResetRequested()
 
     // Which screen this drawer is arranging - handed in by the surface, so
     // the fork question below is asked about the right monitor.
     property string screenName: ""
     readonly property bool lockLayoutForked: PluginState.lockLayoutForked(root.screenName)
+    // Presence is one global choice, not a per-screen one: `plugins.enabled`
+    // is one list drawn on every monitor, so the lock's fork of it is too.
+    readonly property bool lockPresenceForked: PluginState.lockPresenceForked()
+
+    // A desktop widget is being carried over this screen's drawer, so letting
+    // go will REMOVE it rather than move it. Written by the widget, because the
+    // pointer and the grab are on the background surface; drawn here, because
+    // the widget itself is under this panel by then and cannot show anything.
+    //
+    // Deliberately not gated on the SECTION showing. The reveal is one
+    // rectangle and the abandon check on the way out does not ask which section
+    // it is either: the section filters the CATALOGUE, it does not decide what
+    // the panel is. A gesture that silently did nothing on three sections out
+    // of four would be the quiet failure this repo keeps paying for.
+    readonly property bool dropWouldRemove: root.screenName !== ""
+        && GlobalStates.editDrawerDropScreen === root.screenName
 
     // Which section is showing, and which bucket a bar-widget click appends
     // to. Session state of the drawer itself; neither survives the mode.
@@ -108,16 +144,109 @@ Item {
     // scope lint's allowlist has carried since it was written. Translation.tr
     // in a binding, so a language change re-evaluates the rows.
     readonly property var lockIslandRows: [
-        { key: "showToolbars", name: Translation.tr("Toolbars"),
+        { kind: "island", key: "showToolbars", name: Translation.tr("Toolbars"),
             icon: "call_to_action",
             description: Translation.tr("The islands beside the password field") },
-        { key: "showMedia", name: Translation.tr("Media player"),
+        { kind: "island", key: "showMedia", name: Translation.tr("Media player"),
             icon: "music_note",
             description: Translation.tr("Playback info while music is playing") },
-        { key: "showWidgets", name: Translation.tr("Desktop widgets"),
+        { kind: "island", key: "showWidgets", name: Translation.tr("Desktop widgets"),
             icon: "widgets",
-            description: Translation.tr("Show every desktop widget while locked") }
+            // The master gate's own caption has to say which of the two states
+            // the choice below it is in, or "every" goes on claiming something
+            // the picked rows have stopped doing.
+            description: root.lockPresenceForked
+                ? Translation.tr("Show the widgets picked below while locked")
+                : Translation.tr("Show every desktop widget while locked") }
     ]
+
+    // The per-widget presence rows, under the master gate: with
+    // `lock.showWidgets` off the lock screen shows no desktop widget at all,
+    // so a picker there would be a row of controls that change nothing. The
+    // gate is the row directly above them.
+    readonly property var lockWidgetRows: Config.options.lock.showWidgets
+        ? root.desktopManifests.map(manifest => ({
+            kind: "widget",
+            id: manifest.id,
+            name: manifest.name,
+            icon: "widgets",
+            description: manifest.description ?? ""
+        }))
+        : []
+
+    // One list, two kinds of row: the islands, then the widgets they sit
+    // among. Two ListViews would each want the column's height and would put
+    // the picker's own scroll position somewhere the islands are not.
+    readonly property var lockRows: root.lockIslandRows.concat(root.lockWidgetRows)
+
+    // ---- the entrance --------------------------------------------------------
+    //
+    // The panel arrives as a surface and THEN fills, rather than sliding in with
+    // everything already in it. That is the one grammar the motion survey found
+    // measured off the sibling fork and missing here
+    // (docs/p3drovfx-motion-measured-2026-08-22.md §2.1, §4.2): their container
+    // is at 90% by 133ms and its first child does not reach 50% until 233ms,
+    // while every group in this shell arrived all at once because nothing asked
+    // it not to.
+    //
+    // Three rules, none of them this file's. The wave itself is a `StaggerWave`
+    // declared beside the column it walks - the ranking, the clamp, the scaled
+    // step and the cancellation are the shared runner's, so this file decides
+    // only WHEN.
+    //
+    //  - the contents wait for the container (`Appearance.animation.contentGate`),
+    //  - they are ranked by VISIBLE position, which matters more here than
+    //    anywhere else that staggers: only one of the four sections is drawn at
+    //    a time, so most of the column is hidden on any given open and an
+    //    unranked wave would spend most of its clamped slots on nothing,
+    //  - and they do NOT leave on the close. `contentsIn` stays true for the
+    //    whole exit, so the rows ride the panel off as one rigid transform, and
+    //    the reset happens once the reveal has no width left - off screen, where
+    //    nobody sees a member snap back to its start.
+    readonly property bool opening: GlobalStates.editDrawerOpen
+    readonly property bool contentsIn: Appearance.animation.contentsArrived(
+        GlobalStates.editDrawerProgress, root.opening)
+
+    // A member arrives with three properties moving together, not as a fade:
+    // opacity, a scale, and a small rise. One `appear` scalar drives all three
+    // so they cannot finish on different schedules, which is what
+    // docs/M3_GUIDELINES.md §2 ("Component Entrance and Exit") requires and what
+    // reads as a hiccup when it is missed.
+    //
+    // The rise is a spacing token. The scale is DERIVED from it rather than
+    // picked: the survey measured 0.85, but that is a popup's compact cards, and
+    // on this panel's full-width rows the same factor is a 52px horizontal swing
+    // inside a 380px drawer - a zoom, not a settle. Matching the scale's own
+    // excursion to the rise keeps the two terms one motion at any drawer width,
+    // with the measured 0.85 as the floor so a narrow panel cannot invert it.
+    readonly property real entranceRise: Appearance.spacing.space250
+    readonly property real entranceScaleFrom: Math.max(0.85,
+        1 - root.entranceRise / Math.max(1, root.panelWidth))
+    function entranceScale(appear) {
+        return root.entranceScaleFrom + (1 - root.entranceScaleFrom) * appear;
+    }
+    function entranceOffset(appear) {
+        return (1 - appear) * root.entranceRise;
+    }
+
+    // Arming and running are two events, not one, and measuring showed why.
+    // Setting the members to zero inside the wave meant they were drawn at full
+    // strength inside the first 100ms of reveal - the whole run up to the gate -
+    // and then blinked out to cascade back in. Nothing about a gate implies
+    // "and the contents were visible until now": they have to be put away when
+    // the gesture starts, which is the intent flipping, and let out when the
+    // container has arrived, which is the gate.
+    onOpeningChanged: {
+        if (root.opening)
+            entrance.park();
+    }
+
+    onContentsInChanged: {
+        if (root.contentsIn)
+            entrance.enter();
+        else
+            entrance.settle();
+    }
 
     Rectangle {
         id: panel
@@ -131,12 +260,54 @@ Item {
         color: Appearance.m3colors.m3surfaceContainer
         radius: Appearance.rounding.verylarge
 
+        // "Let go here and this widget leaves the desktop", in the drawer's
+        // OWN row vocabulary rather than a new one: a row that is being pressed
+        // paints `colLayer2Active` over this same body, and the pointer IS down
+        // for the whole of the gesture this answers, so the panel takes the
+        // pressed tone the way one of its rows would. Declared before the
+        // column so it tints the body and not the rows, and it takes the same
+        // tier whole - the one whose reference is the pointer.
+        Rectangle {
+            anchors.fill: parent
+            radius: panel.radius
+            color: root.dropWouldRemove
+                ? Appearance.colors.colLayer2Active : "transparent"
+            Behavior on color {
+                animation: Appearance.animation.elementMoveFaster.colorAnimation.createObject(this)
+            }
+        }
+
         ColumnLayout {
+            id: drawerColumn
             anchors.fill: parent
             anchors.margins: Appearance.spacing.space150
             spacing: Appearance.spacing.space100
 
+            // The group's arrival, through the one runner every staggered
+            // surface in this shell asks - the ranking, the clamp, the scaled
+            // step and the cancellation are all its, so the drawer cannot
+            // disagree with the sidebar about any of them.
+            //
+            // No `leadIn`, deliberately, and it is the one thing this adopter
+            // does differently: every other container's motion is something
+            // QML has no scalar for - a settings page's cross-fade, a layer
+            // surface the compositor slides - so a fixed head start is the
+            // best available guess at "the container is there now". This
+            // drawer's reveal IS `GlobalStates.editDrawerProgress`, so the
+            // gate above asks the real question and the wave is simply not
+            // started until it answers. A lead-in as well would be two waits
+            // in front of one wave, only one of them answerable.
+            StaggerWave {
+                id: entrance
+                target: drawerColumn
+            }
+
             RowLayout {
+                id: addHeaderRow
+                property real appear: 1
+                opacity: addHeaderRow.appear
+                scale: root.entranceScale(addHeaderRow.appear)
+                transform: Translate { y: root.entranceOffset(addHeaderRow.appear) }
                 Layout.fillWidth: true
                 // A Layout nested in a Layout defaults to fillHeight TRUE, and
                 // a row of chrome that fills is a row that competes with the
@@ -162,6 +333,11 @@ Item {
 
             // One chip per target surface.
             RowLayout {
+                id: sectionChipRow
+                property real appear: 1
+                opacity: sectionChipRow.appear
+                scale: root.entranceScale(sectionChipRow.appear)
+                transform: Translate { y: root.entranceOffset(sectionChipRow.appear) }
                 Layout.fillWidth: true
                 Layout.fillHeight: false
                 Layout.leftMargin: Appearance.spacing.space75
@@ -192,6 +368,11 @@ Item {
             }
 
             StyledText {
+                id: sectionHint
+                property real appear: 1
+                opacity: sectionHint.appear
+                scale: root.entranceScale(sectionHint.appear)
+                transform: Translate { y: root.entranceOffset(sectionHint.appear) }
                 Layout.fillWidth: true
                 Layout.fillHeight: false
                 Layout.leftMargin: Appearance.spacing.space75
@@ -211,6 +392,10 @@ Item {
             // ---- desktop widgets (stage 5's list, unchanged) ---------------
             ListView {
                 id: list
+                property real appear: 1
+                opacity: list.appear
+                scale: root.entranceScale(list.appear)
+                transform: Translate { y: root.entranceOffset(list.appear) }
                 visible: root.section === "widgets"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -294,49 +479,44 @@ Item {
                         }
                     }
 
-                    RowLayout {
+                    CatalogueRow {
                         anchors.fill: parent
                         anchors.leftMargin: Appearance.spacing.space100
                         anchors.rightMargin: Appearance.spacing.space100
-                        spacing: Appearance.spacing.space100
+                        rowSpacing: Appearance.spacing.space100
 
-                        MaterialSymbol {
-                            text: "widgets"
-                            iconSize: 22
-                            color: Appearance.colors.colOnSurfaceVariant
-                        }
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 0
-                            StyledText {
-                                Layout.fillWidth: true
-                                text: entry.modelData.name
-                                font.pixelSize: Appearance.font.pixelSize.normal
-                                color: Appearance.colors.colOnSurface
-                                elide: Text.ElideRight
+                        rowIcon: "widgets"
+                        rowIconSize: 22
+                        rowIconColor: Appearance.colors.colOnSurfaceVariant
+                        title: entry.modelData.name
+                        titleFont.pixelSize: Appearance.font.pixelSize.normal
+                        titleColor: Appearance.colors.colOnSurface
+                        titleFillsWidth: true
+                        titleElides: true
+                        description: entry.modelData.description ?? ""
+                        descriptionColor: Appearance.colors.colOnSurfaceVariant
+                        descriptionWraps: false
+
+                        affordance: [
+                            MaterialSymbol {
+                                text: entry.widgetEnabled ? "check_circle" : "add"
+                                iconSize: 20
+                                color: entry.widgetEnabled
+                                    ? Appearance.colors.colPrimary
+                                    : Appearance.colors.colOnSurfaceVariant
                             }
-                            StyledText {
-                                Layout.fillWidth: true
-                                visible: (entry.modelData.description ?? "").length > 0
-                                text: entry.modelData.description ?? ""
-                                font.pixelSize: Appearance.font.pixelSize.smaller
-                                color: Appearance.colors.colOnSurfaceVariant
-                                elide: Text.ElideRight
-                            }
-                        }
-                        MaterialSymbol {
-                            text: entry.widgetEnabled ? "check_circle" : "add"
-                            iconSize: 20
-                            color: entry.widgetEnabled
-                                ? Appearance.colors.colPrimary
-                                : Appearance.colors.colOnSurfaceVariant
-                        }
+                        ]
                     }
                 }
             }
 
             // ---- bar widgets ----------------------------------------------
             RowLayout {
+                id: barBucketRow
+                property real appear: 1
+                opacity: barBucketRow.appear
+                scale: root.entranceScale(barBucketRow.appear)
+                transform: Translate { y: root.entranceOffset(barBucketRow.appear) }
                 visible: root.section === "bar"
                 Layout.fillWidth: true
                 Layout.fillHeight: false
@@ -364,6 +544,10 @@ Item {
 
             ListView {
                 id: barList
+                property real appear: 1
+                opacity: barList.appear
+                scale: root.entranceScale(barList.appear)
+                transform: Translate { y: root.entranceOffset(barList.appear) }
                 visible: root.section === "bar"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -381,31 +565,30 @@ Item {
                     colRipple: Appearance.colors.colLayer2Active
                     onClicked: root.barAddRequested(modelData.id, root.barBucket)
 
-                    contentItem: RowLayout {
+                    contentItem: CatalogueRow {
                         anchors {
                             fill: parent
                             leftMargin: Appearance.spacing.space100
                             rightMargin: Appearance.spacing.space100
                         }
-                        spacing: Appearance.spacing.space100
+                        rowSpacing: Appearance.spacing.space100
 
-                        MaterialSymbol {
-                            text: modelData.icon || "extension"
-                            iconSize: 22
-                            color: Appearance.colors.colOnSurfaceVariant
-                        }
-                        StyledText {
-                            Layout.fillWidth: true
-                            text: modelData.name
-                            font.pixelSize: Appearance.font.pixelSize.normal
-                            color: Appearance.colors.colOnSurface
-                            elide: Text.ElideRight
-                        }
-                        MaterialSymbol {
-                            text: "add"
-                            iconSize: 20
-                            color: Appearance.colors.colOnSurfaceVariant
-                        }
+                        rowIcon: modelData.icon || "extension"
+                        rowIconSize: 22
+                        rowIconColor: Appearance.colors.colOnSurfaceVariant
+                        title: modelData.name
+                        titleFont.pixelSize: Appearance.font.pixelSize.normal
+                        titleColor: Appearance.colors.colOnSurface
+                        titleFillsWidth: true
+                        titleElides: true
+
+                        affordance: [
+                            MaterialSymbol {
+                                text: "add"
+                                iconSize: 20
+                                color: Appearance.colors.colOnSurfaceVariant
+                            }
+                        ]
                     }
                 }
             }
@@ -413,6 +596,10 @@ Item {
             // ---- dock apps ------------------------------------------------
             MaterialTextField {
                 id: appSearchField
+                property real appear: 1
+                opacity: appSearchField.appear
+                scale: root.entranceScale(appSearchField.appear)
+                transform: Translate { y: root.entranceOffset(appSearchField.appear) }
                 visible: root.section === "dock"
                 Layout.fillWidth: true
                 placeholderText: Translation.tr("Search apps")
@@ -420,6 +607,10 @@ Item {
 
             ListView {
                 id: appList
+                property real appear: 1
+                opacity: appList.appear
+                scale: root.entranceScale(appList.appear)
+                transform: Translate { y: root.entranceOffset(appList.appear) }
                 visible: root.section === "dock"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -456,33 +647,37 @@ Item {
                     colRipple: Appearance.colors.colLayer2Active
                     onClicked: root.dockToggleRequested(appRow.appId)
 
-                    contentItem: RowLayout {
+                    contentItem: CatalogueRow {
                         anchors {
                             fill: parent
                             leftMargin: Appearance.spacing.space100
                             rightMargin: Appearance.spacing.space100
                         }
-                        spacing: Appearance.spacing.space100
+                        rowSpacing: Appearance.spacing.space100
 
-                        Image {
+                        // An app's leading visual is its own icon, not a
+                        // glyph - the one thing in this catalogue that is not
+                        // a Material Symbol, and what iconComponent is for.
+                        iconComponent: Image {
                             sourceSize.width: 26
                             sourceSize.height: 26
                             source: Quickshell.iconPath(appRow.modelData.icon, "image-missing")
                         }
-                        StyledText {
-                            Layout.fillWidth: true
-                            text: appRow.modelData.name ?? appRow.appId
-                            font.pixelSize: Appearance.font.pixelSize.normal
-                            color: Appearance.colors.colOnSurface
-                            elide: Text.ElideRight
-                        }
-                        MaterialSymbol {
-                            text: appRow.pinned ? "check_circle" : "add"
-                            iconSize: 20
-                            color: appRow.pinned
-                                ? Appearance.colors.colPrimary
-                                : Appearance.colors.colOnSurfaceVariant
-                        }
+                        title: appRow.modelData.name ?? appRow.appId
+                        titleFont.pixelSize: Appearance.font.pixelSize.normal
+                        titleColor: Appearance.colors.colOnSurface
+                        titleFillsWidth: true
+                        titleElides: true
+
+                        affordance: [
+                            MaterialSymbol {
+                                text: appRow.pinned ? "check_circle" : "add"
+                                iconSize: 20
+                                color: appRow.pinned
+                                    ? Appearance.colors.colPrimary
+                                    : Appearance.colors.colOnSurfaceVariant
+                            }
+                        ]
                     }
                 }
             }
@@ -490,16 +685,21 @@ Item {
             // ---- lock screen presence -------------------------------------
             ListView {
                 id: lockList
+                property real appear: 1
+                opacity: lockList.appear
+                scale: root.entranceScale(lockList.appear)
+                transform: Translate { y: root.entranceOffset(lockList.appear) }
                 visible: root.section === "lock"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
                 spacing: Appearance.spacing.space25
-                model: root.section === "lock" ? root.lockIslandRows : []
+                model: root.section === "lock" ? root.lockRows : []
 
                 delegate: RippleButton {
                     id: lockRow
                     required property var modelData
+                    readonly property bool isWidget: lockRow.modelData.kind === "widget"
                     // Read per key rather than bracket-indexed: the scope
                     // lint forbids a computed lock path even for a read's
                     // shape, and three keys do not need a lookup.
@@ -508,6 +708,13 @@ Item {
                         : lockRow.modelData.key === "showMedia"
                             ? Config.options.lock.showMedia
                             : Config.options.lock.showWidgets
+                    // A widget row's check follows the lock's own choice,
+                    // which reads through to the desktop's enabled set until
+                    // the first pick forks it - so the rows open showing
+                    // exactly what the lock screen shows today.
+                    readonly property bool rowOn: lockRow.isWidget
+                        ? PluginState.lockWidgetEnabled(lockRow.modelData.id)
+                        : lockRow.islandOn
 
                     width: lockList.width
                     implicitHeight: 60
@@ -515,47 +722,120 @@ Item {
                     colBackground: "transparent"
                     colBackgroundHover: Appearance.colors.colLayer2Hover
                     colRipple: Appearance.colors.colLayer2Active
-                    onClicked: root.lockToggleRequested(lockRow.modelData.key)
+                    onClicked: lockRow.isWidget
+                        ? root.lockWidgetToggleRequested(lockRow.modelData.id)
+                        : root.lockToggleRequested(lockRow.modelData.key)
 
-                    contentItem: RowLayout {
+                    contentItem: CatalogueRow {
                         anchors {
                             fill: parent
-                            leftMargin: Appearance.spacing.space100
+                            // The widget rows are the master gate's contents,
+                            // and the indent is what says so - they follow it
+                            // in one list and would otherwise read as three
+                            // more things the lock screen has.
+                            leftMargin: lockRow.isWidget
+                                ? Appearance.spacing.space300
+                                : Appearance.spacing.space100
                             rightMargin: Appearance.spacing.space100
                         }
-                        spacing: Appearance.spacing.space100
+                        rowSpacing: Appearance.spacing.space100
 
+                        rowIcon: lockRow.modelData.icon
+                        rowIconSize: 22
+                        rowIconColor: Appearance.colors.colOnSurfaceVariant
+                        title: lockRow.modelData.name
+                        titleFont.pixelSize: Appearance.font.pixelSize.normal
+                        titleColor: Appearance.colors.colOnSurface
+                        titleFillsWidth: true
+                        titleElides: true
+                        // A widget row carries the manifest's own
+                        // description, which a manifest may omit - the shared
+                        // row draws the label only when it has one, so the
+                        // `?? ""` is about not assigning undefined to a
+                        // string, not about the empty row's height.
+                        description: lockRow.modelData.description ?? ""
+                        descriptionColor: Appearance.colors.colOnSurfaceVariant
+                        descriptionWraps: false
+
+                        affordance: [
+                            MaterialSymbol {
+                                text: lockRow.rowOn ? "check_circle" : "add"
+                                iconSize: 20
+                                color: lockRow.rowOn
+                                    ? Appearance.colors.colPrimary
+                                    : Appearance.colors.colOnSurfaceVariant
+                            }
+                        ]
+                    }
+                }
+            }
+
+            // ---- lock screen widget choice: forked or following -----------
+            //
+            // The same row the layout gets below, for the other half of the
+            // fork: which widgets the lock screen shows inherits the desktop's
+            // set until the first pick above, and this says which state it is
+            // in and offers the way back. Only while the master gate is on -
+            // with the lock showing no widgets at all, "follows the desktop"
+            // is a claim about a set nobody can see.
+            //
+            // Neither this row nor the layout re-link below it is DRESSED with
+            // the three channels above, and both still arrive with the wave.
+            // A `RippleButton` declares `appear` itself and folds it into its
+            // own opacity and a 6px rise, so the runner reaches it like any
+            // other member - measured, these two land one and two steps behind
+            // the list. What it must not be handed is a second writer of
+            // either channel: `scale` is `interactionMotion`'s (a scale here
+            // replaces the control's rather than composing with it -
+            // lint_interaction_motion_double.py) and that same opacity binding
+            // carries the disabled dim (a second one draws this row as enabled
+            // while it is not - lint_disabled_opacity.py, and the bug
+            // ExpandablePanel's `appear` indirection exists for).
+            RippleButton {
+                id: lockPresenceRow
+                visible: root.section === "lock" && Config.options.lock.showWidgets
+                enabled: root.lockPresenceForked
+                Layout.fillWidth: true
+                Layout.fillHeight: false
+                implicitHeight: 60
+                buttonRadius: Appearance.rounding.large
+                colBackground: "transparent"
+                colBackgroundHover: Appearance.colors.colLayer2Hover
+                colRipple: Appearance.colors.colLayer2Active
+                onClicked: root.lockPresenceResetRequested()
+
+                contentItem: CatalogueRow {
+                    anchors {
+                        fill: parent
+                        leftMargin: Appearance.spacing.space100
+                        rightMargin: Appearance.spacing.space100
+                    }
+                    rowSpacing: Appearance.spacing.space100
+
+                    rowIcon: root.lockPresenceForked ? "call_split" : "link"
+                    rowIconSize: 22
+                    rowIconColor: Appearance.colors.colOnSurfaceVariant
+                    title: root.lockPresenceForked
+                        ? Translation.tr("Widget choice is separate")
+                        : Translation.tr("Widget choice follows the desktop")
+                    titleFont.pixelSize: Appearance.font.pixelSize.normal
+                    titleColor: Appearance.colors.colOnSurface
+                    titleFillsWidth: true
+                    titleElides: true
+                    description: root.lockPresenceForked
+                        ? Translation.tr("Click to show the desktop's widgets again")
+                        : Translation.tr("Pick a widget above to choose the lock screen's own")
+                    descriptionColor: Appearance.colors.colOnSurfaceVariant
+                    descriptionWraps: false
+
+                    affordance: [
                         MaterialSymbol {
-                            text: lockRow.modelData.icon
-                            iconSize: 22
+                            visible: root.lockPresenceForked
+                            text: "restart_alt"
+                            iconSize: 20
                             color: Appearance.colors.colOnSurfaceVariant
                         }
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 0
-                            StyledText {
-                                Layout.fillWidth: true
-                                text: lockRow.modelData.name
-                                font.pixelSize: Appearance.font.pixelSize.normal
-                                color: Appearance.colors.colOnSurface
-                                elide: Text.ElideRight
-                            }
-                            StyledText {
-                                Layout.fillWidth: true
-                                text: lockRow.modelData.description
-                                font.pixelSize: Appearance.font.pixelSize.smaller
-                                color: Appearance.colors.colOnSurfaceVariant
-                                elide: Text.ElideRight
-                            }
-                        }
-                        MaterialSymbol {
-                            text: lockRow.islandOn ? "check_circle" : "add"
-                            iconSize: 20
-                            color: lockRow.islandOn
-                                ? Appearance.colors.colPrimary
-                                : Appearance.colors.colOnSurfaceVariant
-                        }
-                    }
+                    ]
                 }
             }
 
@@ -566,6 +846,10 @@ Item {
             // (spec §4.3 as amended). This row says which state the screen is
             // in, and while forked offers the way back - the drawer never
             // forks by itself; a drag does that.
+            //
+            // Undressed, for the reason stated on the widget-choice row above:
+            // this is a `RippleButton` and it rides the wave through its own
+            // `appear`.
             RippleButton {
                 id: lockLayoutRow
                 visible: root.section === "lock"
@@ -579,47 +863,38 @@ Item {
                 colRipple: Appearance.colors.colLayer2Active
                 onClicked: root.lockLayoutResetRequested()
 
-                contentItem: RowLayout {
+                contentItem: CatalogueRow {
                     anchors {
                         fill: parent
                         leftMargin: Appearance.spacing.space100
                         rightMargin: Appearance.spacing.space100
                     }
-                    spacing: Appearance.spacing.space100
+                    rowSpacing: Appearance.spacing.space100
 
-                    MaterialSymbol {
-                        text: root.lockLayoutForked ? "call_split" : "link"
-                        iconSize: 22
-                        color: Appearance.colors.colOnSurfaceVariant
-                    }
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
-                        StyledText {
-                            Layout.fillWidth: true
-                            text: root.lockLayoutForked
-                                ? Translation.tr("Widget layout is separate")
-                                : Translation.tr("Widget layout follows the desktop")
-                            font.pixelSize: Appearance.font.pixelSize.normal
-                            color: Appearance.colors.colOnSurface
-                            elide: Text.ElideRight
-                        }
-                        StyledText {
-                            Layout.fillWidth: true
-                            text: root.lockLayoutForked
-                                ? Translation.tr("Click to use the desktop layout again")
-                                : Translation.tr("Move a widget here to arrange the lock screen on its own")
-                            font.pixelSize: Appearance.font.pixelSize.smaller
+                    rowIcon: root.lockLayoutForked ? "call_split" : "link"
+                    rowIconSize: 22
+                    rowIconColor: Appearance.colors.colOnSurfaceVariant
+                    title: root.lockLayoutForked
+                        ? Translation.tr("Widget layout is separate")
+                        : Translation.tr("Widget layout follows the desktop")
+                    titleFont.pixelSize: Appearance.font.pixelSize.normal
+                    titleColor: Appearance.colors.colOnSurface
+                    titleFillsWidth: true
+                    titleElides: true
+                    description: root.lockLayoutForked
+                        ? Translation.tr("Click to use the desktop layout again")
+                        : Translation.tr("Move a widget here to arrange the lock screen on its own")
+                    descriptionColor: Appearance.colors.colOnSurfaceVariant
+                    descriptionWraps: false
+
+                    affordance: [
+                        MaterialSymbol {
+                            visible: root.lockLayoutForked
+                            text: "restart_alt"
+                            iconSize: 20
                             color: Appearance.colors.colOnSurfaceVariant
-                            elide: Text.ElideRight
                         }
-                    }
-                    MaterialSymbol {
-                        visible: root.lockLayoutForked
-                        text: "restart_alt"
-                        iconSize: 20
-                        color: Appearance.colors.colOnSurfaceVariant
-                    }
+                    ]
                 }
             }
         }

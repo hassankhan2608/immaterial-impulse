@@ -28,11 +28,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nested_display  # noqa: E402
 HARNESS = ROOT / "KbOptionsRuntimeTest.qml"
 SHIPPED_DEFAULT = ROOT / "defaults/config.json"
 
@@ -53,11 +57,11 @@ EXPECTED_CHECKS = 1
 
 
 def _runtime_available():
-    return bool(os.environ.get("WAYLAND_DISPLAY")) and shutil.which("qs") is not None
+    return nested_display.available()
 
 
 @unittest.skipUnless(_runtime_available(),
-                     "needs a Wayland session and qs on PATH")
+                     "needs qs, weston and dbus-run-session on PATH")
 class KbOptionsMigrationRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="imi-kboptions-runtime-"))
@@ -91,13 +95,17 @@ class KbOptionsMigrationRuntimeTest(unittest.TestCase):
         self.lua_file.write_text(lua)
 
     def launch(self, expected):
-        env = dict(os.environ)
+        env = nested_display.start(self, "kboptions")
         env["XDG_CONFIG_HOME"] = str(self.config_home)
         env["XDG_STATE_HOME"] = str(self.home / "state")
         env["XDG_CACHE_HOME"] = str(self.home / "cache")
         env["XDG_DATA_HOME"] = str(self.home / "data")
         env["KBOPT_EXPECT"] = expected
-        proc = subprocess.run(["qs", "-p", str(HARNESS)], cwd=str(ROOT), env=env,
+        proc = subprocess.run(
+            # dbus-run-session, not the inherited DBUS_SESSION_BUS_ADDRESS: a
+            # shell reading MPRIS, UPower or a portal off the developer's bus
+            # measures their session rather than this tree.
+            ["dbus-run-session", "--", "qs", "-p", str(HARNESS)], cwd=str(ROOT), env=env,
                               capture_output=True, text=True, timeout=180)
         output = proc.stdout + proc.stderr
         failed = [line for line in output.splitlines() if "FAIL" in line]

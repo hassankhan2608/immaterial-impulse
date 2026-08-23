@@ -181,6 +181,14 @@ function usableArea(input) {
 // `margin` is one token: the gap between the desktop and the screen's edge, and
 // the gap between the desktop and the drawer's slot once there is a drawer.
 //
+// `edgeMargin` is the OTHER gap - between the chrome and the usable area's own
+// edge - and it is a second token because the two are not the same distance.
+// The desktop's margin is a gap between two pieces of content and wants to be
+// generous; the chrome's is a gap between a floating toolbar and the edge of
+// the screen and wants to be tight, because every pixel of it is taken off the
+// desktop the mode exists to show. It defaults to `margin`, which is the
+// symmetric band the geometry had before the two were told apart.
+//
 // `chromeThickness` is the toolbar's own height, and it is passed rather than
 // measured for the same reason `drawerWidth` is: the desktop's transform is
 // built out of this function on the BACKGROUND surface, where neither the
@@ -191,6 +199,8 @@ function viewportGeometry(input) {
     const screenHeight = (input && input.screenHeight) || 0;
     const drawerWidth = (input && input.drawerWidth) || 0;
     const margin = (input && input.margin) || 0;
+    const edgeMargin = (input && input.edgeMargin !== undefined)
+        ? input.edgeMargin : margin;
     const chromeThickness = (input && input.chromeThickness) || 0;
     if (screenWidth <= 0 || screenHeight <= 0)
         return {
@@ -201,13 +211,24 @@ function viewportGeometry(input) {
     const area = usableArea(input);
     // Two margins horizontally (outside the desktop, and between the desktop
     // and the drawer). Vertically the desktop gives up a whole band on each
-    // side: a margin, the chrome, and another margin - so the toolbar centred
-    // in that band has `margin` above and below it by construction, whatever
-    // the screen is and wherever the bar happens to be. With no chrome the band
-    // collapses back to one margin, which is what the geometry was before the
-    // chrome existed.
-    const band = chromeThickness > 0 ? margin * 2 + chromeThickness : margin;
-    const roomX = area.width - drawerWidth - margin * 2;
+    // side, and the band is ASYMMETRIC: an edge margin, the chrome, and a full
+    // margin - the tight gap on the outside where the toolbar floats against
+    // the screen, the generous one on the inside between it and the desktop.
+    //
+    // Symmetric was the wrong shape. This axis is the one that binds on a wide
+    // screen, so both outer margins come straight off the desktop the mode
+    // exists to show: at 5120x1440 the symmetric band cost 24px of desktop
+    // height and 85px of width to put air above a toolbar that already floats
+    // over the wallpaper. With no chrome the band collapses back to one margin,
+    // which is what the geometry was before the chrome existed.
+    const band = chromeThickness > 0
+        ? edgeMargin + chromeThickness + margin : margin;
+    // Horizontally, left to right: a margin, the desktop, a margin, the
+    // drawer, and the drawer's own edge gap. The last term is what stops the
+    // open drawer sitting flush on the screen's edge - it was missing, so the
+    // panel had a rounded right corner against nothing.
+    const roomX = area.width - drawerWidth - margin * 2
+        - (drawerWidth > 0 ? edgeMargin : 0);
     const roomY = area.height - band * 2;
     const scale = Math.max(MIN_SCALE,
         Math.min(MAX_SCALE, roomX / screenWidth, roomY / screenHeight));
@@ -237,18 +258,18 @@ function viewportGeometry(input) {
         // opens another into it, and only the machine where the two differ
         // ever sees it.
         drawer: drawerWidth,
-        margin: margin
+        margin: margin,
+        edgeMargin: edgeMargin
     };
 }
 
 // How far LEFT the desktop travels when the drawer is fully open: whatever the
 // centred desktop's free side cannot absorb of the drawer's slot.
 //
-// The slot is `drawer + margin` against the usable area's right edge - the
-// drawer sits flush on the edge and the margin is the gap between it and the
-// desktop, which is exactly the room `viewportGeometry` reserved in the SIZE
-// (`roomX = area.width - drawerWidth - margin * 2`: one margin outside the
-// desktop, one between it and the drawer). A centred desktop already has
+// The slot is `edgeMargin + drawer + margin` against the usable area's right
+// edge - the drawer's own gap from the screen edge, the drawer, and the gap
+// between it and the desktop, which is exactly the room `viewportGeometry`
+// reserved in the SIZE. A centred desktop already has
 // `(area.width - width) / 2` free on that side, so the travel is the
 // difference, floored at zero for the screens where the ceiling left more
 // room than the slot needs.
@@ -261,7 +282,33 @@ function drawerTravel(geometry) {
     if (!geometry || !(geometry.width > 0) || !geometry.area)
         return 0;
     const free = (geometry.area.width - geometry.width) / 2;
-    return Math.max(0, (geometry.drawer || 0) + (geometry.margin || 0) - free);
+    const edge = geometry.edgeMargin !== undefined
+        ? geometry.edgeMargin : (geometry.margin || 0);
+    return Math.max(0,
+        (geometry.drawer || 0) + (geometry.margin || 0) + edge - free);
+}
+
+// Where a chrome piece sits in its band, as a FRACTION of the band's slack
+// rather than as a pixel offset from the edge.
+//
+// A fraction because the band has no height at progress 0 - it grows out of
+// nothing as the desktop shrinks away from it - and a piece placed at a fixed
+// `edgeMargin` from the area's edge would be sitting fully on screen before the
+// mode had started. At a fraction it is parked off the edge at 0 and lands at
+// exactly `edgeMargin` at 1, with no Behavior of its own; a piece whose target
+// moves every frame must not have one (b710ef731).
+//
+// The band is `edgeMargin + chrome + margin`, so its slack is
+// `edgeMargin + margin` and the piece starts `edgeMargin` into it. The BOTTOM
+// band is the mirror, which is `1 - this`: from the card's edge it is the
+// margin first and the edge gap last.
+function chromeBandFraction(geometry) {
+    if (!geometry)
+        return 0.5;
+    const margin = geometry.margin || 0;
+    const edge = geometry.edgeMargin !== undefined ? geometry.edgeMargin : margin;
+    const slack = edge + margin;
+    return slack > 0 ? edge / slack : 0.5;
 }
 
 // The entry and exit animation, expressed as one scalar the shell can put a
@@ -357,18 +404,69 @@ function areaRect(geometry, progress, screenWidth, screenHeight) {
 // It spans exactly the card's band (same y, same height), which needs no shift
 // term: the drawer's travel moves the desktop sideways and sideways does not
 // change y or height.
+//
+// It slides out from `edgeMargin` in from the area's right edge rather than
+// from the edge itself, so the panel keeps a gap on the side it opens against.
+// Expressed as an offset on the ORIGIN rather than a smaller width, because the
+// width is the reveal and the reveal must still reach the drawer's full size.
+//
+// The drawer's scalar is NOT clamped to 1, and that asymmetry is the whole
+// point of this line. `elementMove`'s curve overshoots to 1.0139 at 280ms and
+// only comes back inside 1 at the end of its 500ms, so `Math.min(1, ...)` froze
+// the panel at its full width for the last 271ms of every open while the
+// desktop's own `drawerTravel * editDrawerProgress` - which nothing clamps -
+// went on overshooting and settling. One gesture, two halves, two effective
+// curves: measured on the real Behavior, the panel's last drawn movement was at
+// 226ms and the desktop's was at 497ms. Letting the reveal overshoot with it
+// costs ~1.4% of the drawer's width, which lands inside the `edgeMargin` gap
+// the panel already keeps against the screen edge.
+//
+// The floor stays. Run backwards the same curve undershoots to -0.0139, and a
+// negative width is not an expressive settle - it is a rect the input mask
+// cannot build. The desktop is free to undershoot past its resting x, because
+// that IS the settle; the panel simply has nowhere further to go once it is
+// gone.
 function drawerRect(geometry, progress, drawerProgress, screenWidth, screenHeight) {
     const t = Math.max(0, Math.min(1, progress || 0));
-    const p = Math.max(0, Math.min(1, drawerProgress || 0)) * t;
+    const p = Math.max(0, drawerProgress || 0) * t;
     const area = areaRect(geometry, progress, screenWidth, screenHeight);
     const card = cardRect(geometry, progress, screenWidth, screenHeight);
     const width = (geometry.drawer || 0) * p;
+    const edge = geometry.edgeMargin !== undefined
+        ? geometry.edgeMargin : (geometry.margin || 0);
     return {
-        x: area.x + area.width - width,
+        x: area.x + area.width - edge - width,
         y: card.y,
         width: width,
         height: card.height
     };
+}
+
+// Is a SCREEN point on the drawer's reveal?
+//
+// One spelling, because the same rectangle answers the two halves of one
+// gesture and they run in opposite directions. A row dragged OUT of the drawer
+// and let go back over it is the gesture being ABANDONED; a widget dragged in
+// off the desktop and let go over it is the widget being REMOVED. Two
+// hand-written bounds checks would be two answers to "is the pointer on the
+// drawer", and the second one is the one nobody looks at.
+//
+// "The drawer is open" needs no term of its own: a closed drawer is a
+// zero-width rect - `drawerRect` animates the WIDTH precisely so the surface's
+// input mask collapses with it - so the emptiness test below is the same
+// question asked of the same number.
+//
+// Written against the four fields rather than against a type, so a caller may
+// hand in this module's own answer or the QML `rect` a surface stored it in.
+function pointInDrawerReveal(reveal, x, y) {
+    if (!reveal)
+        return false;
+    const width = reveal.width || 0;
+    const height = reveal.height || 0;
+    if (!(width > 0) || !(height > 0))
+        return false;
+    return x >= reveal.x && x <= reveal.x + width
+        && y >= reveal.y && y <= reveal.y + height;
 }
 
 // The inverse of the one transform, for the drop: a release from the drawer

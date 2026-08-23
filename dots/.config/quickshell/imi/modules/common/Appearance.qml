@@ -515,6 +515,17 @@ Singleton {
         // the catalogue. Unscaled on purpose: whatever consumes it scales it
         // once, and scaling here too would apply the multiplier twice.
         readonly property int staggerStep: MotionPolicy.staggerStep(animationCurves.expressiveEffectsDuration)
+        // How far a container must have opened before its contents start
+        // arriving, and the predicate that reads it. A wave with no gate races
+        // the reveal it is meant to land in, which is what makes a staggered
+        // group read as loose instead of composed. Unitless and unscaled - it
+        // is a fraction of the container's OWN progress, so the speed slider
+        // and the reduce-motion floor reach it through that scalar's tier
+        // rather than through a second gate here.
+        readonly property real contentGate: MotionPolicy.CONTAINER_CONTENT_GATE
+        function contentsArrived(progress: real, opening: bool): bool {
+            return MotionPolicy.contentsArrived(progress, opening);
+        }
         function staggerRanks(included: var): var {
             return MotionPolicy.staggerRanks(included);
         }
@@ -826,6 +837,13 @@ Singleton {
         // The gap outside the shrunk desktop on its three free sides, and
         // between it and the drawer's slot on the fourth.
         property real editModeMargin: root.spacing.space300
+        // The gap between Edit Mode's own chrome - the toolbar, the tab bar and
+        // the drawer - and the edge of the usable area. Half the desktop's,
+        // because it is a floating surface's gap from the screen edge rather
+        // than a gap between two pieces of content, and because on the vertical
+        // axis it is the term that binds: every pixel here is one the shrunk
+        // desktop does not get.
+        property real editModeEdgeMargin: root.spacing.space150
         // M3's toolbar height (m3.material.io/components/toolbars). It is a
         // token rather than a literal inside Toolbar.qml because Edit Mode's
         // viewport reserves a band for the toolbar on the BACKGROUND surface,

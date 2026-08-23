@@ -58,7 +58,14 @@ PanelWindow {
     // (deba3e3f6).
     color: "transparent"
     WlrLayershell.namespace: "quickshell:editMode"
-    WlrLayershell.layer: WlrLayer.Overlay
+    // Whether something is summoned over the desktop this chrome frames - a
+    // special workspace, today. Under it the chrome drops to the desktop's own
+    // layer, so the compositor blurs and dims both halves of the mode together
+    // instead of painting the toolbar over the window. `Bar.qml:96` switches
+    // its layer on the same kind of condition.
+    property bool underneath: false
+
+    WlrLayershell.layer: root.underneath ? WlrLayer.Bottom : WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
     exclusiveZone: 0
@@ -93,6 +100,7 @@ PanelWindow {
         screenHeight: root.height,
         drawerWidth: Appearance.sizes.editModeDrawerWidth,
         margin: Appearance.sizes.editModeMargin,
+        edgeMargin: Appearance.sizes.editModeEdgeMargin,
         chromeThickness: Appearance.sizes.toolbarHeight,
         insetTop: root.insets.top,
         insetBottom: root.insets.bottom,
@@ -117,6 +125,27 @@ PanelWindow {
         Region {
             item: chrome.drawerItem
         }
+    }
+
+    // The drawer's reveal, handed to the surface that owns the desktop. A
+    // widget dragged back into the drawer is removed, and the widget deciding
+    // that is on `quickshell:background`, in another window, which cannot read
+    // this item - so the rect crosses the boundary rather than being derived
+    // there a second time. The entry is dropped on the way out, so the map is
+    // exactly "the screens whose drawer exists" and a mode that has ended
+    // leaves no rectangle behind for a later drag to land on.
+    readonly property rect drawerReveal: chrome.drawer
+    onDrawerRevealChanged: root.publishDrawerReveal(root.drawerReveal)
+    Component.onCompleted: root.publishDrawerReveal(root.drawerReveal)
+    Component.onDestruction: root.publishDrawerReveal(null)
+    function publishDrawerReveal(reveal) {
+        const name = root.screen?.name ?? "";
+        const published = Object.assign({}, GlobalStates.editDrawerReveals);
+        if (reveal === null)
+            delete published[name];
+        else
+            published[name] = reveal;
+        GlobalStates.editDrawerReveals = published;
     }
 
     // What the drop writes, and the only file in the mode that writes it. The
@@ -234,6 +263,32 @@ PanelWindow {
         }
     }
 
+    // One widget's presence on the lock screen. The first pick forks the
+    // lock's whole widget choice from the desktop's, the same way the first
+    // move forks the layout - so the undo entry has to be able to restore
+    // "following" as well as a set, which is what a null record set is.
+    //
+    // Not a Config write at all: presence on the DESKTOP is `plugins.enabled`
+    // and stays there, and the lock's fork of it is layout state, so it lives
+    // where the lock's positions and spans already do.
+    function toggleLockWidget(pluginId) {
+        const before = PluginState.lockPresenceRecords();
+        GlobalStates.editUndoPush(() => PluginState.restoreLockPresence(before));
+        PluginState.setLockWidgetEnabled(pluginId,
+            !PluginState.lockWidgetEnabled(pluginId));
+    }
+
+    // Re-link the lock's widget choice to the desktop's. One committed
+    // mutation, one undo entry, and the closure carries the whole set rather
+    // than re-picking it - a re-fork from the desktop would be a different set
+    // the moment the enabled list has moved since.
+    function resetLockPresence() {
+        if (!PluginState.lockPresenceForked()) return;
+        const forked = PluginState.lockPresenceRecords();
+        GlobalStates.editUndoPush(() => PluginState.restoreLockPresence(forked));
+        PluginState.resetLockPresence();
+    }
+
     // Re-link this screen's lock layout to the desktop's. One committed
     // mutation, one undo entry: the closure puts the whole forked screen back
     // by writing each widget's lock position again on the LOCK surface, named
@@ -250,10 +305,11 @@ PanelWindow {
 
     function addWidgetAt(manifest, dropX, dropY) {
         // A release back over the drawer is the gesture being abandoned, not
-        // an instruction to add the widget at the drawer.
-        const reveal = chrome.drawer;
-        if (dropX >= reveal.x && dropX <= reveal.x + reveal.width
-                && dropY >= reveal.y && dropY <= reveal.y + reveal.height)
+        // an instruction to add the widget at the drawer. Asked through the
+        // module because the INVERSE gesture - a widget carried off the
+        // desktop and let go here, which removes it - asks the same question
+        // of the same rectangle from the other surface.
+        if (EditMode.pointInDrawerReveal(chrome.drawer, dropX, dropY))
             return;
         const point = EditMode.canvasPointFromScreen(root.viewport,
             GlobalStates.editProgress, root.editShift, dropX, dropY);
@@ -312,6 +368,12 @@ PanelWindow {
         // rather than by a literal measured against one of them.
         area: EditMode.areaRect(root.viewport, GlobalStates.editProgress,
             root.width, root.height)
+        // The band's split, from the SAME geometry the band was reserved out
+        // of. Derived rather than restated out of the two Appearance tokens
+        // here: the reservation and the placement reading different numbers is
+        // exactly the "two fields that must agree" that puts the chrome in a
+        // band that is not its size.
+        bandFraction: EditMode.chromeBandFraction(root.viewport)
         // The second of the mode's two stand-down gates, the other being the
         // loader that creates this window at all. Either alone hides the
         // chrome, which is exactly why both are named in
@@ -344,7 +406,9 @@ PanelWindow {
             TaskbarApps.togglePin(appId);
         }
         onLockIslandToggleRequested: (key) => root.toggleLockIsland(key)
+        onLockWidgetToggleRequested: (pluginId) => root.toggleLockWidget(pluginId)
         onLockLayoutResetRequested: root.resetLockLayout()
+        onLockPresenceResetRequested: root.resetLockPresence()
         screenName: root.screen?.name ?? ""
         // A preference, not a layout mutation: it is not one of §7.3's five
         // committed mutations and records no undo entry, same as the global

@@ -30,6 +30,50 @@ CONFIG = ROOT / "modules/common/Config.qml"
 SETTINGS_PAGE = ROOT / "modules/imi/settings/pages/AppearanceConfig.qml"
 EXPANDABLE_PANEL = ROOT / "modules/common/widgets/ExpandablePanel.qml"
 CAROUSEL = ROOT / "modules/common/plugins/designsystem/widgets/Carousel.qml"
+STAGGER_WAVE = ROOT / "modules/common/widgets/StaggerWave.qml"
+EDIT_MODE_DRAWER = ROOT / "modules/imi/editMode/EditModeDrawer.qml"
+
+# Every container that staggers a group, as a RATCHET rather than a list: a new
+# adopter is a line here, and an adopter that quietly stops staggering fails the
+# suite instead of going quiet. The measured survey
+# (docs/p3drovfx-motion-measured-2026-08-22.md §4.2) found the policy correct,
+# the guideline written, and the wiring at three files against the sibling
+# fork's twenty - so the thing that decays here is adoption, not the arithmetic,
+# and adoption is what this pins.
+STAGGER_ADOPTERS = {
+    "modules/common/widgets/ExpandablePanel.qml",
+    "modules/common/widgets/ContentPage.qml",
+    "modules/imi/sessionScreen/SessionScreen.qml",
+    "modules/imi/editMode/EditModeDrawer.qml",
+}
+
+# The other half of that ratchet: a surface that adopted a wave, was judged on
+# screen, and had it taken back off. Without this the register only ever grows -
+# the next agent reads "a group arrives in sequence" in the guidelines, sees a
+# column of independent cards, and re-adopts the one surface where that was
+# tried and refused. A refusal is invisible in the source, exactly like the
+# adoption it mirrors.
+#
+# The right sidebar is the entry. 9e10b8a9c ("feat(sidebar): the right
+# sidebar's sections arrive in sequence") gave it one and the user rejected it:
+# "I don't like the cascading animation effect in the sidebar... This one feels
+# slow. There's a frame drop the moment it opens and the moment it closes."
+# Two properties of THIS surface are why, and neither is a tuning. Its
+# container is a layer surface the compositor slides, so there is no progress
+# to gate on and the head start can only be a guessed `leadIn` - which put the
+# last member's landing 180ms past the end of `sidebarSlideEnter`. And the
+# surface is DESTROYED by the gesture the wave rides: `PanelWindow.visible`
+# follows the open state, layer-shell forbids window reuse, so the wave's
+# frames land on a surface the compositor is still bringing up and its exit
+# animates a window that has already been asked to leave - measured at a median
+# of 30 rendered frames per open against 5 without it, and 13 per close against
+# zero. The frame drop the report names is that teardown-and-rebuild and NOT
+# the wave; see AGENT.md's design-language section, which carries the numbers
+# and the two suspects they eliminate. Re-adopting is a decision to be argued,
+# not a line to be copied.
+STAGGER_DECLINED = {
+    "modules/imi/sidebarRight/SidebarRightContent.qml",
+}
 
 # A cascade whose rank is bounded by the shape of its own model rather than by
 # a clamp, and whose step is deliberately tighter than a group entrance's. The
@@ -172,25 +216,107 @@ def test_the_speed_slider_cannot_reach_the_floor():
         "and then lies about the setting for the rest of the session (#158).")
 
 
-def test_the_two_group_cascades_share_one_spelling():
-    for path in (EXPANDABLE_PANEL, CAROUSEL):
-        text = path.read_text(encoding="utf-8")
-        relative = path.relative_to(ROOT).as_posix()
-        assert "Appearance.animation.staggerDelay(" in text, (
-            f"{relative} no longer reaches the shared stagger policy. The two "
-            f"cascades in this shell disagreed about the clamp and about the "
-            f"step before they were joined - one clamped at ten members and "
-            f"the other not at all - which is exactly the drift one spelling "
-            f"exists to stop.")
+def test_the_group_cascades_share_one_runner():
+    wave = STAGGER_WAVE.read_text(encoding="utf-8")
+    for call in ("Appearance.animation.staggerRanks(",
+                 "Appearance.animation.staggerDelay(",
+                 "Appearance.animation.scale("):
+        assert call in wave, (
+            f"StaggerWave no longer reaches {call}. It is the one runner every "
+            f"container in this shell asks for a group entrance, so a clamp, a "
+            f"rank or a scaling missing here is missing everywhere at once.")
+    # The RANK LIST, not the whole of enter(): the deferral guard beside it
+    # also reads `visible`, so a check scoped to the function passes on a
+    # runner that has stopped ranking - planted and confirmed.
+    ranking = wave[wave.index("const included = []"):wave.index("const ranks =")]
+    assert ".visible" in ranking, (
+        "StaggerWave's rank list no longer consults `visible`, so the ranks it "
+        "hands the policy are positions in `children` again - and a member "
+        "that is not on screen leaves a hole one step wide in the wave.")
 
-    panel = EXPANDABLE_PANEL.read_text(encoding="utf-8")
-    assert "Appearance.animation.staggerRanks(" in panel, (
-        "ExpandablePanel no longer ranks by visible position. A hidden child "
-        "that spends a slot leaves a hole one step wide in the middle of the "
-        "cascade, and nothing downstream compensates.")
-    assert ".visible" in panel[panel.index("function runStagger"):], (
-        "ExpandablePanel's rank list no longer consults `visible`, so the "
-        "ranks it hands the policy are model positions again.")
+    assert "Appearance.animation.staggerDelay(" in CAROUSEL.read_text(encoding="utf-8"), (
+        "Carousel no longer reaches the shared stagger policy. Its rank stays "
+        "the model index because a delegate cannot see its siblings, but the "
+        "clamp and the scaled step are still the policy's - which is the half "
+        "that was wrong when the two cascades were separate.")
+
+
+def test_nothing_else_ranks_its_own_wave():
+    """One runner. A second is how the first two cascades came to disagree."""
+    offenders = []
+    for relative, path in qml_files():
+        if relative == STAGGER_WAVE.relative_to(ROOT).as_posix():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if "Appearance.animation.staggerRanks(" in text:
+            offenders.append(relative)
+    assert not offenders, (
+        f"{offenders} rank a wave of their own. Ranking, clamping, scaling and "
+        f"cancelling a group entrance live in StaggerWave - declare one and "
+        f"call enter()/leave() instead of spelling a second copy, which is how "
+        f"ExpandablePanel and Carousel came to disagree about both the clamp "
+        f"and the step.")
+
+
+def test_the_stagger_is_adopted_where_a_group_arrives():
+    """A ratchet on adoption, because adoption is the thing that decayed.
+
+    It runs in both directions: a surface that stops staggering reddens, and so
+    does one that starts again after being refused. The second half exists
+    because the first half only ever pushes one way - a register of adopters
+    reads as a target, and the surface a user has already turned down is
+    exactly the one a later sweep would put back.
+    """
+    declared = {relative for relative, path in qml_files()
+                if "StaggerWave {" in path.read_text(encoding="utf-8", errors="ignore")}
+    missing = STAGGER_ADOPTERS - declared
+    assert not missing, (
+        f"{sorted(missing)} no longer declare a StaggerWave. Each of these is a "
+        f"surface whose members arrive as a GROUP; without one they arrive in a "
+        f"single frame again, which is invisible in the source and reads on "
+        f"screen as the shell being flat rather than as a bug.")
+
+    # A file that moved or was renamed would empty the declined register
+    # silently, and a register that sweeps nothing is greener than one that is
+    # wrong.
+    for relative in STAGGER_DECLINED:
+        assert (ROOT / relative).is_file(), (
+            f"{relative} is in STAGGER_DECLINED and is not on disk. Point the "
+            f"entry at wherever the surface moved to, or drop it with the same "
+            f"argument that put it there - a register naming nothing passes.")
+
+    readopted = STAGGER_DECLINED & declared
+    assert not readopted, (
+        f"{sorted(readopted)} declare a StaggerWave again. Each of these had "
+        f"one, was looked at on screen, and had it removed - see "
+        f"STAGGER_DECLINED for the reasoning and AGENT.md's design-language "
+        f"section for what it cost. Re-adopting needs that argument answered, "
+        f"not a line copied from a sibling surface.")
+
+    assert not STAGGER_ADOPTERS & STAGGER_DECLINED, (
+        "a surface is in both registers, so one of the two checks above can "
+        "never pass.")
+
+
+def test_the_drawer_gates_its_wave_on_the_container_it_lands_in():
+    """The one adopter whose container has a progress to gate on.
+
+    Every other adopter's container is animated by something QML has no scalar
+    for - a settings page cross-fade, a layer surface the compositor slides -
+    so `StaggerWave.leadIn` stands in for the head start. Edit Mode's drawer
+    reveal IS `GlobalStates.editDrawerProgress`, so it can ask the real
+    question instead of guessing at a delay: the wave is not started until the
+    container has actually arrived. Without the gate it races the reveal it is
+    meant to land in, which is what makes a staggered group read as loose.
+    """
+    drawer = EDIT_MODE_DRAWER.read_text(encoding="utf-8")
+    assert "Appearance.animation.contentsArrived(" in drawer, (
+        "Edit Mode's drawer no longer gates its contents on the container's "
+        "own progress.")
+    assert not re.search(r"^\s*leadIn:", drawer, re.MULTILINE), (
+        "the drawer's wave carries a lead-in as well as the gate. Two waits in "
+        "front of one wave, and only one of them is answerable from the "
+        "container's own motion.")
 
 
 def test_nothing_else_computes_a_ranked_wait():

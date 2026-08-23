@@ -19,6 +19,10 @@ StyledPopup {
         Layout.rightMargin: -Appearance.spacing.space100
 
         Rectangle {
+            // Named so WeatherPopupHeroRuntimeTest.qml can ask whether this is
+            // still the section the card unrolls from, rather than asking
+            // whether the first child is the first child.
+            objectName: "weatherHero"
             Layout.fillWidth: true
             Layout.preferredHeight: 125
 
@@ -128,6 +132,17 @@ StyledPopup {
             }
         }
 
+
+        // Deliberately not the first child: BarPopupOverlay unrolls the card
+        // from the height of the content's first DRAWN section, so a row that
+        // comes and goes would keep changing what the popup opens at - and a
+        // 99px strip is not the section this card should be legible at on
+        // frame one. The hero stays first, at 141 of the card's 431.
+        WeatherHourlyChart {
+            charted: root.popupVisible
+            Layout.leftMargin: Appearance.spacing.space25
+            Layout.rightMargin: Appearance.spacing.space25
+        }
 
         GridLayout {
             id: gridLayout

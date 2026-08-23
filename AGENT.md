@@ -461,7 +461,11 @@ modules/common/             Shared, feature-agnostic building blocks
                               PopupToolTip, StyledPopup, GroupedList, ConfigSwitch/ConfigSpinBox/
                               ConfigSelectionArray (settings-page form controls), DockIconMotion
                               (M3E feedback-motion wrapper for dock icons), SchemePaletteCircle
-                              (a colour scheme drawn as its own palette), etc.
+                              (a colour scheme drawn as its own palette), MarqueeText
+                              (a label that scrolls only while it overflows),
+                              CatalogueRow (one entry of a catalogue drawn: icon,
+                              name, description, affordance - not interactive, so
+                              the call site keeps the gesture), etc.
   functions/, models/, utils/, panels/   Supporting JS logic, list models, window-panel base classes
 
 modules/imi/                 The "imi" (Immaterial Impulse) panel family - one directory per feature:
@@ -559,7 +563,10 @@ services/                  Singletons wrapping external state/processes - one pe
                               `busctl --json=short` Process calls (the shell has no D-Bus
                               binding) - backend detection from the bus name list, one
                               normalized device/battery model for both daemons, ring/ping/
-                              clipboard actions. Its parser logic is kept byte-for-byte in
+                              clipboard actions. KDE Connect's changes arrive as SIGNALS
+                              (`busctl monitor`, see the streaming note below); Valent's
+                              still arrive on the poll, which stays on for both as the
+                              reconcile. Its parser logic is kept byte-for-byte in
                               sync with a logic-only test double
                               (tests/test_phone_connect_contract.py enforces it)
   SchemePreview.qml            Per-scheme swatches for the scheme pickers: one venv run of
@@ -1103,6 +1110,64 @@ Two non-obvious behaviors have bitten this codebase before and are worth knowing
   per-surface rather than per-region and nothing in-tree had done it before.
   (d29cd6e45 ("feat(bar): add the static overlay surface the popup card will live on"),
   b22a923a5 ("refactor(bar): delete the per-popup layer surface").)
+- **That card runs on ONE scalar, and the properties that used to be assigned are derived from
+  it — including the coordinate the assignment existed to protect.** `card.openProgress` is a
+  `real` 0 → 1 with a single `Behavior` on it; the fade *is* that number, and the height is a plain
+  binding on it through `modules/imi/bar/bar_popup_unroll.js`. Four things about the arrangement
+  are not obvious.
+  1. **The hero-height unroll is why it is worth doing.** The card opens at the height of the
+     content's **first drawn section** and unfurls to the full height along the same progress the
+     fade rides, so the top edge never moves and the primary content is legible on frame one. The
+     section is measured at its **drawn** height: a `Layout` child states its size through
+     `Layout.preferredHeight` and carries no implicit height, so `implicitHeight` answers 0 for
+     exactly the popups whose first section is a card. Measured on the real compositor with a
+     125/100/75 stack at `contentPadding` 8 — hero 141, open 316, height tracking progress exactly.
+  2. **A derived height is what finally lets the bar-adjacent coordinate be a binding.** On the
+     bottom and right edges that coordinate is a function of the animating size, which is why
+     `card.x`/`card.y` were *assigned* — two `Behavior`s easing a position and a size apart put the
+     card's edge where its content is not. Deriving the coordinate from the size the driver already
+     produces cannot drift from it, and neither side carries a `Behavior`, so it is not
+     b710ef731's moving target. Measured: a bottom bar holds its card's bottom edge at 1390.0 on
+     every frame of the open, the overshoot and the exit; a right bar holds 5064.0. Only the
+     coordinate *along* the bar still travels.
+  3. **The window's own `visible` predicate must read the card's INPUTS, never its derived
+     height or opacity.** Reading the derived ones closes a circle through `visible` itself — the
+     card's across-the-bar coordinate is derived from the window's size — and logs
+     `Binding loop detected for property "visible"` twice per window on a live compositor, where
+     the same probe against the old assigned geometry logged nothing. `openProgress`, `width` and
+     `openHeight` are the safe three, and they are also what "collapse to 0x0 when idle" means
+     now: a zero open height answers 0 at every progress, which is what empties the input region.
+  4. **The content sits in a slot held at the settled height, not centred in the host.** A host
+     that is shrinking centres what it holds, so the band on screen while the card is short would
+     be the *middle* of the content — the first section, the one the card opens at the height of,
+     would be the one thing not visible. Pinning it to the top of the host also keeps a leaving
+     block still instead of reflowing it through every intermediate size.
+
+  One tier serves both directions deliberately. Qt refuses a second write to a `Behavior`'s
+  `animation`, so a directional pair would have to be a duration and a curve written onto a bare
+  `NumberAnimation` — half a tier, and silently `Easing.Linear` the day someone drops the curve.
+  The created animations are named properties so `morphing` can still ask whether the card is
+  travelling, which the focus grab needs in order not to arm on a parked square.
+  `tests/lint_bar_popup_overlay_static.py` refuses a second `Behavior` on the driver, any
+  `Behavior` on `height`/`opacity`/`x`/`y`, an inline animation inside a `Behavior`, and a hero
+  height that is a literal rather than a measurement.
+  cd607d416 ("feat(bar): the popup card runs on one driver, and unrolls from its first section"),
+  d01879f4c ("test(lint): hold the popup card to one driver, and its unroll to a measured hero").
+- **A section added to a popup's content changes what the card opens at, and the hero is decided
+  by the BUILT tree rather than by source order.** `heroSectionHeight` walks the content root's
+  children and takes the first one that is drawn and taller than zero, so a row declared above the
+  hero card becomes the hero — the weather popup would open as a 99px strip with the temperature,
+  the city and the condition below the fold, which renders and looks deliberate. It also means a
+  section that comes and goes cannot be first: `Weather.hourly` is empty until a forecast parses,
+  and a hero that is a different section before and after the first fetch is a popup that opens two
+  different ways. The hourly row therefore sits between the hero card and the metrics grid, and the
+  measurement is checked on the built tree rather than in the source: hero 141 (the 125px hero card
+  at `contentPadding` 8) against an open height of 431, unchanged by the row's 99.
+  `tests/test_weather_popup_hero_runtime.py` parents the real popup's content into a window the way
+  the overlay parents it into the card and measures both;
+  `tests/test_weather_forecast_contract.py` holds the source order, which is the half a reviewer
+  can see. feat(bar): draw the weather popup's hourly row, growing from the axis,
+  test(weather): drive the popup's hero and the bars' growth in a real window.
 - **Moving content between windows is already how popups work here, and it has two traps.**
   `StyledPopup` reparented its content into its window at completion long before the overlay
   existed; the overlay does the same thing, one popup at a time, and never has more than two
@@ -1179,6 +1244,49 @@ Two non-obvious behaviors have bitten this codebase before and are worth knowing
   blanked, nothing leaks — a `zwp_idle_inhibitor` is destroyed with the `wl_surface` it was created
   on, and a client's surfaces die with its Wayland connection. 83544dedb ("feat(idle): a
   deliberately blanked monitor holds the keep-awake").
+- **An exclusive zone that has to animate belongs on a surface of its own, and
+  `exclusionMode: ExclusionMode.Ignore` is not in force while an `exclusiveZone`
+  sits beside it.** A zone is a protocol value on the surface, so every write is
+  a `set_exclusive_zone` plus a commit plus a compositor-wide re-arrange —
+  animating one in place reconfigures the surface its own contents are being
+  drawn on, once per frame. The bar therefore slid on a margin `Behavior` while
+  its zone snapped between two integers, and the windows behind it jumped at the
+  two ends of a gesture the bar spends 200ms on.
+  `modules/imi/bar/BarExclusiveZoneReserver.qml` is where that animation lives
+  instead: one `PanelWindow` per bar, one pixel thick, `color: "transparent"`,
+  `mask: Region {}`, painting nothing, so a per-frame reconfigure costs a
+  re-arrange and no repaint. **Both bars use the one component** — the zone is
+  exactly the kind of decision the two have drifted on before. Five things about
+  it are worth not re-deriving. Writing `exclusiveZone` at *any* value calls
+  `WlrLayershell::setExclusiveZone`, which forces `exclusionMode` to `Normal`,
+  and a `Normal` surface is placed inside what other surfaces reserve — so both
+  bars had been in `Normal` all along despite declaring `Ignore`, and a bar
+  keeping `exclusiveZone: 0` after this split would be pushed off the screen
+  edge by its own reserver. Hyprland adds the anchored-edge **margin** to a live
+  zone (measured: the bar's 40px zone under its 5px top margin reserves 45), and
+  that margin is folded into the animated value rather than onto the reserver's
+  own `margins`, or the last frame of a hide is a jump from the margin to zero.
+  The namespace is the visible bar's, **passed in rather than minted**, for the
+  reason `BarPopupOverlay` reuses `quickshell:popup`: a new one falls through
+  the catch-all `ignore_alpha = 0.05` and asks the compositor to blur behind a
+  surface that paints nothing — and since both bars' namespaces already carry
+  `blur = false`, borrowing needs no `rules.lua` entry at all, which matters
+  because that file ships separately and the two halves would otherwise come
+  apart on any machine that updated one and not the other. The layer is `Top`
+  and does **not** follow the bar's fullscreen+special promotion: an `Overlay`
+  surface holds the fullscreen fast path shut whatever its size, the promotion
+  exists to stop the bar's *pixels* being buried, and the reserved area is the
+  same on every layer. And the zone must take the **same motion tier** as the
+  bar's own slide — a different one disagrees with the bar for the whole gesture
+  rather than only at its ends. None of this is reachable from the suite:
+  `qmltestrunner` cannot construct the window and weston implements no
+  wlr-layer-shell, so `tests/test_bar_exclusive_zone_reserver.py` pins the
+  source shape and `tests/run_bar_exclusive_zone_probe.sh` reads the reserved
+  area back out of a **nested Hyprland** while the zone animates (45 27 4 1 0
+  through a hide, against 45 0 before). Design taken from
+  `docs/p3drovfx-animation-research-2026-08-16.md` §3.4.
+  97689e338 ("feat(bar): give the bar's exclusive zone a surface of its own"),
+  7b703fc42 ("feat(bar): both bars hand their exclusive zone to the one reserver").
 
 ## State propagation is reactive, or it is a bug waiting
 
@@ -1397,6 +1505,24 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   an engine context. Found by rendering the widget and reading the labels; the whole of it is
   invisible from the source. fix(weather): a forecast card is named for its weekday, not for its
   date.
+- **Both weather providers already return an hourly forecast in a response the shell has fetched,
+  and OpenWeatherMap's `dt_txt` is UTC while its `dt` is the instant.** The bar popup's hourly row
+  cost no new request: `/data/2.5/forecast`, fetched since the day cards landed, IS a three-hourly
+  list, and wttr.in's `weather[].hourly[]` arrives inside the one response the current conditions
+  come from. Before adding an endpoint for weather data, read what the existing responses carry —
+  `tests/test_weather_forecast_contract.py` pins the endpoint list and the fetcher count so a third
+  request has to be argued for rather than typed. The trap inside that data is the timestamp:
+  `dailyFromOwm` groups by the `dt_txt` DATE, which is fine a day at a time, but an hour label read
+  off the same field is the user's own clock wrong by their whole UTC offset — and right on a UTC
+  runner, which is CI and was also every fixture anyone would write. `weatherHourly.js` reads `dt`
+  and takes the local hour and the local date off it, and the contract test re-runs
+  `tst_weather_hourly.qml` at UTC+14 and UTC-11 for the same reason it already re-runs the daily
+  one. Planted: `getHours()` → `getUTCHours()` passes at UTC and fails at UTC+14.
+  A third thing about that module generalises past weather: `Number(null)` is 0 and `isFinite(0)`
+  is true, so the obvious "convert and test" guard reads an absent reading as a confident zero
+  degrees — a bar at the floor and a window range dragged down to it, with nothing in any log.
+  feat(weather): the hourly row's decisions, as arithmetic beside the daily ones,
+  feat(weather): publish the three-hourly slots both providers already return.
 - **`FileView` (`Quickshell.Io`) loads asynchronously - `.text()` right after calling `.reload()`
   is not guaranteed to return the new content.** The correct pattern (used throughout this codebase
   - `MaterialSymbolsSearch.qml`, `Notifications.qml`, `Emojis.qml`, `Profile.qml`) is to read
@@ -1432,6 +1558,61 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   merges (clock, battery) because `plugins.enabled` in the shared config was empty the whole time -
   the manifests were validated and rendered structurally, but never with `Appearance.colors.*`/
   `Appearance.rounding.*` bindings actually resolving against a real running instance.
+- **A `RowLayout` rounds every item's width UP, so a fractional implicit width is drift rather
+  than a fraction — and the repair is arithmetic that lands on whole pixels, not a `Math.round` at
+  the call site.** The on-screen keyboard's rows are a grid of keys measured in keycap units, and
+  a key spanning `u` of them has to cover the `u - 1` gaps it swallows or the rows come out
+  different widths for the same span. At the old 45px key the pitch was 53, so a quarter-unit
+  spacer was 18.5px wide and drawn at 19: the function row, which pads itself out with fourteen of
+  them, came out **seven pixels** wider than the row below it, and every cluster to the right of
+  the main block sat somewhere different on every row. Nothing errors, every row is still a
+  perfectly good row, and the only way to see it is to print the drawn widths
+  (`tests/run_osk_layout_probe.sh` does). Rounding at the call site would have kept the drift and
+  merely made it consistent; a 44px key makes the pitch 52, and every quarter unit is then a whole
+  number of pixels with nothing left to round. The sibling rule from the same file: a
+  `Layout.fillWidth` item decides where every item *after* it goes, because what it absorbs is that
+  row's own leftover — which is invisible while the fill item is last in the row and is why the
+  keyboard's rows agreed before there was anything to the right of the spacebar.
+  afd3bf661 ("fix(osk): make the key pitch a multiple of four, so a quarter unit is whole pixels"),
+  e119c7b1d ("refactor(osk): no key fills the row any more").
+- **A keyboard is a LATTICE, not a stack of rows, and a `GridLayout` does not
+  hand out equal columns on its own.** The numpad's `+` and its Enter are one
+  key two rows tall, which a `RowLayout` cannot say — so each of them shipped
+  as two keys carrying one keycode, and the pad drew two Enters. The tool for
+  it is `Layout.rowSpan`, and reaching it needs a column: every width in
+  `modules/imi/onScreenKeyboard/key_shapes.js` is a multiple of 0.25u, so the
+  quarter unit is the column, 1u is four of them and a row is 92.
+  `osk_lattice.js` is the walk that turns the row-major layout data into cells
+  — a key takes the next free columns in its row, a key taller than one unit
+  claims the cells beneath it, and the row below steps over the claim — kept
+  pure because nothing about a drawn key is reachable from `qmltestrunner`.
+  The **layouts carry no coordinates**, which is what keeps a new key a line of
+  data rather than a re-numbering.
+  Three things about the grid are not obvious and all three were measured
+  rather than reasoned about. **The engine spreads a multi-column item's width
+  over the columns it spans and arrives at columns of different widths**: on
+  the real component with nothing pinning them, the keyboard comes out 1197px
+  wide against the 1188 its units buy, with a 13px gap before Backspace where
+  every other gap is 8 — which is afd3bf661's drift arriving from the other
+  side, and it is visible in a screenshot and in nothing else. A **declared
+  lattice** fixes it: one zero-height item per column asking for exactly one
+  column's width (`Lattice.columnWidth`, the pitch's quarter minus the spacing
+  that follows it) puts every key back on a multiple of 13. It needs a **row of
+  its own** — `QGridLayoutEngine::addItem` refuses a second item in a cell that
+  is taken, so a ruler spanning the key rows is dropped with a console warning
+  — and that row costs one `rowSpacing` which `OskContent` reports off its
+  implicit height rather than resizing the grid to hide (a grid given less
+  height than it asked for takes the difference out of a row of keys; a
+  negative `Layout.bottomMargin` to cancel the spacing is clamped away).
+  The ISO Enter is the one key that stays two: 1.5u on the top row against
+  1.25u on the bottom, offset by the wider Caps, so it is an L and no cell of a
+  rectangular lattice has that shape. `tst_osk_layouts.qml` allows a repeated
+  keycode for that one alone, and counts a row's width off the lattice rather
+  than by summing the row's own keys — the row under a double-height key does
+  not declare the columns that key already took, so the old arithmetic reports
+  the home row four units short.
+  fix(osk): the numpad's + and its Enter become one key two rows tall,
+  feat(osk): draw the keyboard on one grid, with the lattice declared.
 - **Never `anchors.fill: parent` a `Loader` whose *own* size is meant to be derived from the loaded
   item's implicit size.** `Loader` forces the loaded item to match the Loader's size whenever the
   Loader itself has an explicit size (anchors count as explicit sizing) - but if the wrapping
@@ -1571,6 +1752,47 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   every mutation of the motion. fa1e2a8b5 ("feat(plugins): animate a resizable widget's size
   between its offered spans"), 4e33a332a ("test(widgets): score a span change as in flight, not
   as a snap").
+- **The third member of that family: where the layout writes the target, the motion is INVERTED
+  from a measurement rather than eased onto the value.** A bar widget sits in a `Repeater` of
+  `BarGroup`s inside a `RowLayout`, so its `x` is the layout's to write - a `Behavior` on it is
+  handed a target that moves on every reflow, which is b710ef731 again. `modules/imi/bar/
+  BarGroup.qml` therefore animates a `Translate` toward zero, set from the offset back to where
+  the slot was drawn, which is FLIP (First, Last, Invert, Play); the arithmetic is
+  `modules/imi/bar/bar_flip.js` because nothing about the rendered bar is reachable from
+  `qmltestrunner`. Four things about it are worth not re-deriving.
+  **The "First" cannot live on the slot.** Measured with a `qml6` probe: a `Repeater` whose model
+  is a JS array answers a reassignment by destroying EVERY delegate and building the replacements,
+  in one turn of the event loop - so the widget about to slide is not the object that was standing
+  there, and a naive `onXChanged` inverse would start it from `x: 0`.
+  `modules/imi/bar/BarFlipRegistry.qml` is one deposit-and-recall per bar, keyed on the widget id
+  and expiring at the end of that turn: one per content tree rather than a singleton, because the
+  ids are identical on every screen and the positions are not, and expiring because a widget
+  switched back on ten minutes later has no honest position to fly in from.
+  **What is measured is not what moves.** The survey's source watches the widget's own `x`. That is
+  right in a near-edge bucket and wrong in a far-edge one: the section is sized by its row and
+  anchored to the screen's edge, so removing a widget moves the SECTION and leaves the first slot
+  at row-local zero - it travels the whole width of what left while its own `x` never changes, and
+  the last slot's `x` changes while it does not move at all. Each slot sums its ancestors' x/y up
+  to the registry's frame and watches every one of them. Deliberately a sum and never `mapToItem`,
+  which composes transforms: measured through that, a slot part-way through its own reposition
+  reports where it is DRAWN and the next invert comes off a number that is still moving.
+  **It is inert outside a reflow**, because a bar widget's content changes width constantly - the
+  clock every minute - and a running animation is a repaint of the whole output.
+  **And it stands down for a reorder drag**, whose `layout_ops.dropTarget` centres are read through
+  a `mapToItem` that composes exactly this transform; the drop's own reflow still animates, because
+  `BarEditController` clears `editBarDragActive` before the layout pass that follows it. The popup
+  overlay's card is unaffected for a different reason - its target is read only by its own
+  `retarget()`, which a reposition never calls.
+  Checked from both sides, because a settled position passes identically on the teleport this
+  replaced: `tests/test_bar_flip_contract.py` holds the source shape (one registry per tree on the
+  tree's own root, six delegate wirings each, no `Behavior` on a layout-written coordinate, no
+  `mapToItem`) and `BarFlipRuntimeTest.qml` samples where each slot is DRAWN 40ms in. That sample
+  is early on purpose - the spatial tier is front-loaded, so by 80ms a correct reposition and one
+  started on the mirror side of its destination are both ~90% of the way there. Design taken from
+  `docs/p3drovfx-animation-research-2026-08-16.md` §3.5.
+  b155851422 ("feat(bar): a bar widget slides to its new slot instead of teleporting"),
+  2bc474d53a ("feat(bar): bar_flip.js, a slot's reposition as arithmetic"),
+  bd60b78a31 ("test(bar): the harness stops rescuing the idiom it exists to fail").
 - **A sweep over ordered PAIRS is not a walk, and a trail's floor is in the trail's own units.**
   Two ways a span-motion harness reports confidently about a transition it never ran.
   `WeatherTreeMotionProbe` drives a list of `[from, to]` pairs but only ever committed `to` — so
@@ -2150,6 +2372,44 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   0bc44f475 ("fix(dock): a dragged icon moves to where it was dropped, it does not swap"),
   52da8b43e ("fix(quickToggles): a dropped toggle moves into place instead of swapping"),
   893bfc31a ("test(lint): fail on a reorder spelled out beside a DragHandler").
+- **A drag can only be ANIMATED by a model that moves a delegate, and a row of delegates is not
+  something a model can move one between.** The Android quick toggles are the case: the panel drew a
+  `Column` of row containers, each with a plain array model, deliberately — 81379796b
+  ("fix(sidebar): choose a delegate for the toggle each row entry now holds") reset the row because
+  `DelegateChooser` picks a component when a delegate is *created* and never re-picks for one that
+  survives, so an entry that changed identity in place kept the previous toggle's icon, name and
+  action. That fix is correct and its cost is the delegate: a reorder that rebuilds every tile
+  cannot animate, because there is nothing left to move. Rows repack on nearly every edit (they are
+  packed by toggle size), so an entry crossing a row boundary left one row's model and landed in
+  another's at an index some other toggle held, which is not a move in either.
+  `modules/common/functions/quick_toggle_layout.js` answers both at once: `pack` gives every entry a
+  stable id, its toggle TYPE, a row and a slot, and `syncPlan` diffs one packed list against another
+  into the ops a `ListModel` applies. A reorder comes out as a `move`, so the delegate survives; an
+  id is derived from the type, so the role the chooser reads can never change under a surviving row;
+  and the ops the plan may emit against a live row are the PAYLOAD roles only, so no spelling in
+  `StableQuickToggleModel.qml` can retype one. A row is a coordinate now, not a container — one flat
+  `Item` per section, each tile placed at its own slot from the SETTLED pack (a placement keyed on
+  anything the press bounce moves is b710ef731's frozen `Behavior` again, so the press growth is
+  centred with a `transform` instead). The list edits the plan is simulated against are
+  `layout_ops.js`'s, for the reason the entry above gives.
+  **The half that had to be measured: a live `list<var>` notifies per ELEMENT written.** One
+  `layout_ops.moveInPlace` on the stored toggle list — the splice-out and splice-in a drop commits —
+  was observed in *nine* intermediate states, each a list with a toggle duplicated or missing, and
+  each one a plan that rebuilds rows rather than moving them. So a model synced straight from the
+  observer destroys most of the grid in the middle of the one gesture the delegates exist to
+  survive, and the panel is correct only because the sync is deferred to the end of the turn with
+  `Qt.callLater`. This was invisible until the delegates mattered: the old panel rebuilt the row on
+  every notification anyway, so it paid ten rebuilds per drop and looked right. Anything else here
+  that observes a `Config` array someone mutates in place has the same question to answer.
+  The panel is also why the observation is a SIGNATURE rather than the array: the toggles mutate
+  the live array on purpose (26b625905), so its identity never changes.
+  `tests/tst_quick_toggle_layout.qml` scores the plan's ops rather than the list they produce (a
+  rebuild produces exactly the right list), `tests/test_quick_toggle_model_contract.py` is the half
+  CI can see, and `QuickTogglesLayoutRuntimeTest.qml` compares the delegate by identity across a
+  reorder and samples its position 80ms in — a settled position is the same number whether the tile
+  animated or teleported. 8930baa3c ("feat(quickToggles): the grid's packing and its keyed diff as
+  arithmetic"), b1074b3c1 ("refactor(quickToggles): one flat keyed grid per section, placed by
+  arithmetic"), cb24f9046 ("test(quickToggles): drive the reorder the way a drop spells it").
 - **`MouseArea.drag` cannot accurately drag a target the MouseArea itself follows.** QQuickDrag
   rebases its press origin when the grab is established, silently swallowing the arming move's
   delta — a few threshold pixels under a real pointer, invisible behind the widget lattice's 12px
@@ -2195,8 +2455,13 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   place of the native glyphs; without `enabled: false` on that overlay's `Loader`, clicking the
   field just fed the click to the Flickable instead, so the field never focused and typing appeared
   to do nothing. This only surfaces where focus is obtained by clicking - `LockSurface.qml`'s
-  password box uses the identical overlay structure but never hit this, since it
+  password box used the identical overlay structure and never hit this, since it
   `forceActiveFocus()`s itself programmatically instead of depending on a click.
+  That asymmetry is why the overlay is not a call site's business any more:
+  `modules/common/widgets/PasswordField.qml` owns it, carries the `enabled: false`, and is what
+  both of the shell's password prompts are - see the entry on it under
+  [Design language](#design-language). `ConfigTextArea` keeps its own copy, because a `TextArea`
+  has no `echoMode` and masks by a different mechanism entirely.
 - **`Item.visible` reads back EFFECTIVE visibility, so a container that hides
   itself from its child's `visible` latches.** The sibling of the `enabled`
   trap below, and it bites the other way round: `visible` is the item's own flag
@@ -2711,6 +2976,175 @@ mode is built out of are worth not re-deriving:
   state. (feat(editMode): the drawer's travel, rectangle and drop point as
   arithmetic; feat(editMode): the drawer, fed by the plugin catalogue, and
   add-at-pointer.)
+- **The drawer's reveal is the one place a clamp was a defect, and its
+  contents are the one place this tree had no cascade.** Two separate
+  findings, both measured through `EditModeMotionProbe.qml` (the mode has
+  no IPC handler, so nothing outside the shell can drive it).
+  `GlobalStates.editDrawerProgress` runs on `elementMove`, whose
+  `expressiveDefaultSpatial` curve leaves the unit box - it peaks at
+  1.0139 at 280ms and only comes back inside 1 at the end of its 500ms.
+  The desktop's own travel is that scalar times `drawerTravel`,
+  unclamped, so it overshoots and settles; `drawerRect` clamped the same
+  scalar with `Math.min(1, ...)`, so the panel arrived at 226ms and then
+  stood perfectly still for the remaining 271ms - 55% of one gesture with
+  its two halves running different motions, and nothing in the source
+  shows it. The floor stays, because the same curve run backwards
+  undershoots to -0.0139 and a negative width is a rect the input mask
+  cannot build. **A `Math.min` on a scalar animated by an overshooting
+  tier is a freeze, not a guard** - ask what the tier's curve does past 1
+  before clamping one.
+  The second finding is that the duration was never the complaint: the
+  reveal's travel is 96% done at 128ms and 100% at 226ms, so 500ms is a
+  226ms reveal plus a settle. What was missing is that everything inside
+  the panel arrived with it, which is
+  `docs/p3drovfx-motion-measured-2026-08-22.md` §4.2's finding about
+  adoption. The column's members now arrive individually, at their final
+  positions, on the three properties §3 measured - opacity, a scale, and
+  a small rise - all driven by one `appear` scalar so they cannot land on
+  different schedules. The wave itself is a `StaggerWave` declared beside
+  the column it walks, so the ranking, the clamp, the scaled step and the
+  cancellation are the shared runner's and this file decides only WHEN.
+  Three things about doing that are not obvious.
+  **This is the one adopter whose container has a progress to gate on**,
+  and it therefore carries NO `leadIn`. Every other container's motion is
+  something QML has no scalar for - a settings page's cross-fade, a layer
+  surface the compositor slides - so a fixed head start is the best
+  available guess at "the container is there now"; the drawer's reveal IS
+  `GlobalStates.editDrawerProgress`, so
+  `Appearance.animation.contentsArrived` asks the real question and the
+  wave is simply not started until it answers. A lead-in as well would be
+  two waits in front of one wave, only one of them answerable.
+  **Ranking by VISIBLE position matters more here than anywhere else that
+  staggers**, because only one of the four sections is drawn at a time -
+  most of the column is hidden on any given open, and an unranked wave
+  would spend most of its clamped slots on nothing while the one list the
+  user is looking at arrived last. Measured through the probe, the
+  Widgets section's four members and the Lock section's six land on the
+  same frame ladder for the ranks they share, which is the check that the
+  ranks are visible positions rather than indices in `children`.
+  **Arming and running are two events** - the first version reset the
+  members at the gate, so they were drawn at full strength through the
+  whole run up to it and then blinked out to cascade back in; the park
+  hangs off the intent flag and the wave off the container's progress.
+  That parked state is `StaggerWave.park()`, shared with the runner's own
+  wait-for-an-unmapped-container branch rather than spelled twice.
+  A correction worth keeping, because it was written down before it was
+  measured: the lock section's two re-link rows are **not** left out of
+  the wave. They are `RippleButton`s, and a `RippleButton` declares
+  `appear` itself and folds it into its own opacity and a 6px rise - so
+  they ride the wave through exactly the property the runner writes, one
+  and two ranks behind the list above them. What they must not do is take
+  the drawer's own three-channel dressing: `scale` is the interaction
+  model's and that same opacity binding carries the disabled dim, so a
+  second writer of either REPLACES the control's binding rather than
+  composing with it, which is what `lint_interaction_motion_double.py`
+  and `lint_disabled_opacity.py` exist to fail on. The earlier wording
+  ("the one member that takes no entrance") was true of the drawer's
+  dressing and false of the wave, and nothing distinguished the two until
+  the probe was pointed at the section those rows are in.
+  (fix(editMode): the drawer's reveal rides the curve the desktop rides;
+  feat(editMode): the drawer arrives as a surface and then fills;
+  test(editMode): a probe that samples the drawer's motion per frame;
+  test(editMode): point the motion probe at the section the rows moved to.)
+- **The drawer's drag has two directions and ONE rectangle, and the two halves
+  live in different windows.** A row dragged out of the drawer lands on the
+  desktop; a widget dragged back over the drawer and let go there is REMOVED —
+  and a release back over the drawer from the *outward* gesture is still an
+  abandon, which is the same rectangle answering a third question.
+  `edit_mode.js`'s `pointInDrawerReveal` is the one predicate all three ask; a
+  closed drawer needs no "is it open" term, because `drawerRect` animates the
+  WIDTH and an empty rect is the same answer. Four things about wiring it up:
+  - **The rect is PUBLISHED, not re-derived on the desktop's side.** Everything
+    else in the mode is re-derived on both surfaces (see the chrome-surface
+    entry above), but `test_the_drawer_reaches_the_desktops_x_and_nothing_else`
+    counts `GlobalStates.editDrawerProgress` in `Background.qml` and admits
+    exactly one occurrence — the shift — so a second derivation there is a
+    contract failure rather than a style choice, and rightly: the check exists
+    because the drawer's *state* reaching the geometry rescales every widget
+    mid-drag. `EditModeChromeSurface` writes its own `chrome.drawer` into
+    `GlobalStates.editDrawerReveals` keyed by screen, the `clockDepthViewports`
+    shape, and drops the entry on destruction so the map is always "the screens
+    whose drawer exists".
+  - **A subclass cannot get in front of a base class's `onReleased`.** Signal
+    handlers declared at two levels of one component BOTH run, base first —
+    probed with `qml6` rather than reasoned about (`base;mid;leaf;` for three
+    levels, with the mid level's call to an overridden function reaching the
+    leaf's version). So a second `onReleased` on `PluginWidget` arrives *after*
+    `AbstractBackgroundWidget` has already committed the placement. The
+    decision is therefore an overridable predicate the one release handler
+    asks — `releaseRemovesWidget(mouseX, mouseY)`, false in the base — and the
+    subclass overriding it is what the base's handler resolves.
+  - **...and the same ordering makes a subclass's `mouse.x/y` the WRONG
+    coordinates in `onPositionChanged`.** `AbstractWidget`'s handler maps the
+    event out into the parent frame and then moves the widget to follow the
+    pointer, so by the time a subclass's handler runs, the item those local
+    coordinates are relative to has travelled: mapping them out a second time
+    lands at `pointer + this event's delta`. On a drag that crosses the desktop
+    in one move that is most of a screen, and the failure is silent — the drop
+    hint simply never lit up while the release, whose handler moves nothing,
+    was exact. `AbstractWidget.dragPointerParentX/Y` is the pointer as the drag
+    itself read it, recorded before it moves anything; anything answering a
+    question about WHERE a drag is reads that, and only a release may map its
+    own event.
+  - **The drop commits NO position, and that is what makes undo correct.** The
+    store still holds where the widget was, so the undo entry — the whole
+    `plugins.enabled` list from before, exactly the menu's Remove — brings it
+    back where it stood rather than under the panel it was dropped on. A commit
+    on the way out would store the drawer's own coordinates as a placement the
+    user never chose, which is 705e9006d's defect arriving through a new door.
+  - **The hint asks the WRITE's question, membership included.**
+    `EditModeDrawerDrop` declines an id that is not in `plugins.enabled`, and a
+    widget can be on screen, hit-testable and draggable without being in that
+    list: `PluginWidget.lockOnlyWidget` is exactly one — drawn on the Lockscreen
+    tab, and still a live `MouseArea` at `opacity: 0` on the Desktop tab. With
+    `dropWouldRemoveAt` asking only about the rectangle, the drawer lit up, the
+    release swallowed its own commit on the strength of that, and the removal
+    was then declined: one gesture, a panel promising a removal, and no change
+    anywhere — the quiet failure the "not gated on which section" decision above
+    exists to avoid, arriving through the other door. Both halves of it are
+    driven (`EditModeRuntimeTest`: the hint stays dark AND the drop commits the
+    move), because "nothing was removed" is also what a release that never fires
+    reports.
+    (fix(editMode): the drop hint asks the same question the write does.)
+  - **The write is one `QtObject` beside the chrome, not a method on the
+    surface.** `plugins.enabled` is one global list drawn on every monitor, so a
+    listener per chrome surface answers one drop once per screen and spends an
+    undo entry on each; and the surface is a `PanelWindow`, which weston cannot
+    build, so a write put there is a write no harness can drive — the reason
+    `EditWidgetMenuContent` owns its own Remove. `EditModeDrawerDrop.qml` is
+    declared once in `EditModeChrome.qml` and the runtime harness builds it
+    directly. The FEEDBACK crosses the same boundary the other way
+    (`GlobalStates.editDrawerDropScreen`): the widget being carried is drawn on
+    the surface BELOW the chrome, so it passes under the panel and cannot show
+    anything itself — the drawer paints its own row-press tint on its body
+    instead, which is the vocabulary its rows already use for "the pointer is
+    down on me".
+  (feat(editMode): one predicate for both directions of the drawer's drop;
+  feat(editMode): publish the drawer's reveal to the surface that owns the desktop;
+  feat(editMode): a widget dragged back into the drawer leaves the desktop;
+  feat(editMode): the drawer says a drop will remove, in its rows' own tint;
+  fix(widgetCanvas): the drop hint reads the pointer before the drag moves the widget.)
+- **The sidebars are closed on entry and refused for the length of the mode,
+  and that is a decision about what the mode EDITS rather than about layers.**
+  Both sidebars are `WlrLayer.Top` and the chrome is `Overlay`, so the widget
+  drawer — which shares the right sidebar's edge — is painted straight over an
+  open one. Neither sidebar is editable in the mode: no drawer section, no
+  remove badge, no reorder the mode drives, and no key in
+  `lint_edit_mode_scope.py`'s allowlist (the quick toggles' own drag is the
+  sidebar's gesture and works with the mode off). So it is a panel covering the
+  thing being edited, which is exactly what `activeBarPopup` beside it already
+  answers by closing. Two alternatives lose. Dropping the chrome *under* the
+  sidebar leaves the drawer half unusable while one is open, and
+  `EditModeChromeSurface.underneath` — the mode's one layer trick — exists for
+  a special workspace covering the WHOLE desktop, where being as invisible as
+  the desktop is the point; a panel on one edge is not that case. And closing
+  on entry alone is half a fix: the screen corners, the bar's buttons and the
+  IPC handlers can all open one again while the mode is on, so the refusal
+  lives on the flag in `GlobalStates` — the one gate every path shares, the
+  same argument `StyledPopup.claimSlot` records for refusing there. It sits
+  BEFORE the notification sweep in `onSidebarRightOpenChanged`, or a refused
+  open marks as read what it never showed.
+  (fix(editMode): the sidebars close for the mode and stay closed.)
 - **What the mode may write is a failing check now**
   (`tests/lint_edit_mode_scope.py`): a write from any file under the edit-mode
   directories to a `Config.options.*` path outside spec §7.1's placement and
@@ -2915,6 +3349,34 @@ mode is built out of are worth not re-deriving:
   (feat(plugins): layout_surfaces.js - two widget layouts, one store, fork on first edit;
   feat(editMode): every position and span write captures its surface into its undo;
   test(editMode): the fork is driven through the real drag and the real grip.)
+- **PRESENCE forks under that same rule, and the setting it grew out of became the master
+  gate rather than being superseded.** `lock.showWidgets` ("show every desktop widget while
+  locked") was one all-or-nothing boolean beside a layout that had already forked, so a widget
+  could not be on the desktop and off the lock. `lockPresence` in the same store answers "which":
+  **null** while the lock follows the desktop's `plugins.enabled`, a MAP once the first pick on
+  the Lockscreen tab snapshots that set — and absence is a null rather than a `{}` precisely
+  because an empty map is a legitimate forked state, a lock screen with no widgets on it. It is
+  **not per screen** while the layout is: `plugins.enabled` is one global list drawn on every
+  monitor (the reason the mode's Remove row removes everywhere), and a per-screen presence store
+  would invent a capability the desktop has not got. The desktop's set lives in `Config`, which
+  the pure module cannot see, so it arrives as an argument — and both the map check and the
+  membership walk go by `length` and indices, since a `list<string>` that crossed into a
+  `.pragma library` is `typeof "object"` and fails `Array.isArray` (109e6d897).
+  Three consequences worth not re-deriving. **The gate keeps the upgrade silent**: off, nothing
+  shows, as before; on with the choice still following, all of them do, as before — superseding
+  it instead would have needed a migration to turn `showWidgets: false` into a forked empty set,
+  in a key every preset already carries. **A lock-only pick costs two edits**, because the host
+  builds a widget or it does not: `Background.qml`'s loader gate is the UNION of the two choices,
+  and `AbstractBackgroundWidget` gained `visibleOnDesktop` beside `visibleWhenLocked` so one
+  expression asks which surface is on screen and then that surface's own filter. And
+  `PluginWidget.lockOnlyWidget` is deliberately **narrower than "not in `plugins.enabled`"** — a
+  widget being removed from BOTH is in neither list, and hiding it from the widget's own opacity
+  would race the loader's exit fade to zero and cut that transition short. No migration entry
+  accompanies the field, for the reason `lockPositions` needed none (2262040bc): its absence IS
+  the correct upgrade state.
+  (feat(plugins): layout_surfaces.js - the lock's widget choice forks too;
+  feat(plugins): a widget's presence is asked per surface, not once;
+  feat(editMode): the Lock section picks which widgets the lock screen shows.)
 - **A dragged widget holds a neighbour's edge through a Schmitt trigger, and
   both thresholds read the SHADOW — stage 10, spec §6.**
   `modules/common/functions/edge_snap.js` owns the arithmetic: four relations
@@ -2997,6 +3459,29 @@ mode is built out of are worth not re-deriving:
   feat(editMode): Ctrl+Z reverses the last committed mutation, on the surface the keyboard reaches;
   test(editMode): drive undo's record, reverse and gate, and pin its shape;
   fix(editMode): a group release is one undo entry, and undoing a first commit leaves no null behind.)
+- **An undo BATCH replays backwards, and a keyboard step moves the PLACEMENT
+  coordinate rather than the drawn one.** Both were found building the arrow-key
+  nudge, and both are traps the mouse could never spring. A batch is one
+  gesture's commits, so reversing it means walking from the end: three arrow
+  steps on one widget push "back to 36", "back to 48", "back to 60", and
+  replaying those in order leaves the widget where the second press left it —
+  Ctrl+Z appearing to move it *forward*. The group drag that introduced batches
+  could not show it, because its entries are one per widget and independent, so
+  any order looks right. And `x` is the DRAWN coordinate, carrying a position
+  Behavior: a step that assigned to it and committed in the same turn read the
+  value the animation had not reached yet and stored that back, so the widget
+  returned to where it started — measured as three presses with `x` unchanged at
+  36, the keys reading as completely inert. `AbstractWidget.moveTargetBy` moves
+  `targetX`/`targetY` and `PluginWidget.commitPlacement` — the tail of
+  `commitPosition`, shared rather than copied — writes the store from them, so a
+  translation needs no conversion (the parallax cancellation is constant across
+  the step) and the two ways of moving a widget cannot disagree about what is
+  persisted. The lattice for the step comes from the CANVAS: `PluginWidget`
+  shadows `gridSize` with its component-grid span, so one read off a widget from
+  the canvas is an object and every step is silently NaN (8a534a7da).
+  (feat(widgetCanvas): widget_nudge.js, a keyboard step as arithmetic;
+  feat(widgetCanvas): arrow keys move a selected widget one lattice cell;
+  fix(editMode): an undo batch replays its entries backwards.)
 (feat(editMode): shrink the desktop into a viewport on the background surface,
 feat(editMode): stand the per-widget frost down for the mode,
 feat(editMode): draw the shrunk desktop as a card, not as a cropped screenshot,
@@ -3404,6 +3889,52 @@ test that seeds a real config directory. Reset only the switches - a tuned numbe
 preference and usually cannot disable the feature by itself.
 (fix(config): revive the parallax switches every stored config turned off.)
 
+**`busctl monitor` is how a Process streams D-Bus signals here, and the sender filter has to live
+in the match rule because the output does not carry one you can use.** `services/PhoneConnect.qml`
+is the case (`services/Clight.qml` is the sibling that only calls). Measured against a live KDE
+Connect daemon on systemd 261: a monitored signal's `sender` is the **unique** name it arrived on
+(`:1.55`), never the well-known name, so a QML-side check for "is this the daemon" has nothing to
+compare against — `--match=type='signal',sender='org.kde.kdeconnect.daemon',path_namespace='…'` is
+the only place the daemon can be named, and dbus-daemon resolves that well-known name for you
+across daemon restarts. Four more things about that path, each of which cost a measurement:
+
+- **A `SERVICE` argument to `busctl monitor` does not narrow it the way it reads.** Run as
+  `busctl --user --json=short monitor org.kde.kdeconnect.daemon`, the capture came back full of
+  other clients' traffic (an unrelated `name.giacomofurlan.ArctisManager` call, portal `Get`s).
+  `--match=` did narrow it, to zero lines over ten seconds on the same bus. Filter with the match
+  rule, not the positional argument.
+- **The output is one JSON document per line and it is flushed per message**, so a `SplitParser` on
+  `stdout` sees a signal as it happens — checked by watching the redirect file grow while the
+  process was still running, not by reading it after the exit.
+- **An instant exit is the normal failure, which is why CONTRIBUTING.md's backoff rule bites
+  here specifically.** A match rule the bus rejects fails with `Call to
+  org.freedesktop.DBus.Monitoring.BecomeMonitor failed: Invalid match rule` and exit 1, in
+  milliseconds. A `running:` binding on that Process is a tight respawn loop. `PhoneConnect`
+  starts it imperatively, restarts only through `monitorExitPlan` (capped exponential backoff, a
+  ceiling of five per **daemon appearance**, and a healthy-run reset so one daemon restart in a
+  long session does not spend the ceiling) and falls back to the poll past the ceiling. The poll
+  is never removed: nothing announces a daemon *appearing* — there is no monitor running to hear
+  it on — and a daemon that dies without a parting signal would otherwise freeze the model.
+- **Signals arrive in bursts, so a signal drives a coalesced re-read rather than a sweep.** One
+  device leaving the network emitted **seven** signals within a millisecond
+  (`statusIconNameChanged`, `deviceRemoved`, `deviceListChanged`, `reachableChanged`,
+  `linksChanged`, `deviceAdded`, `deviceListChanged`), and each re-read is a chain of `busctl`
+  spawns. The settle timer also has to **re-arm** rather than fire while a sweep is in flight,
+  because the sweep declines then and firing would drop the change that asked for it.
+
+The gate deciding whether to start it was first written as a `readonly property bool` derived from
+`backend` and read from `onBackendChanged` — the change-handler trap under
+[State propagation is reactive](#state-propagation-is-reactive-or-it-is-a-bug-waiting) — so it
+answered with the *previous* backend, the monitor never started, and nothing showed it because the
+poll kept the model correct the whole time. Only `tests/test_phone_connect_monitor_runtime.py`
+could see it: a source contract reads a gate that is spelled correctly, and `qmltestrunner` cannot
+construct the `Process` the gate guards. That harness is also where the *lifetime* is pinned, and
+it asserts the spawn **timestamps** as well as the count — "it stopped after six spawns" is equally
+true of six spawns in six milliseconds, which is the bug.
+(feat(phoneConnect): drive updates from the daemon's signals, not from the poll,
+fix(phoneConnect): the monitor's gate is a function, because a handler cannot read its own binding,
+test(phoneConnect): drive the monitor's start, its stream, its backoff and its ceiling.)
+
 **A player on the MPRIS bus may be a proxy for another player, and every field you would match on
 is the borrowed one.** `playerctld` is `playerctl`'s daemon, not a player: it re-publishes whichever
 player it considers *current* — and current means last **interacted with**, not playing — so it sits
@@ -3476,6 +4007,31 @@ box. Derive the growing axis too, but compute it *arithmetically* from the input
 child layout's `implicitWidth`: the content is anchored to this item's width, so reading its implicit
 size back would bind width to itself. Cap the result and let the grid wrap instead of growing forever.
 
+**A Wayland client is never told about keys aimed at something else, so the OSK's
+physical-key highlight reads /dev/input — and its LIFETIME is the safeguard, not
+a promise in a comment.** `scripts/keyboard/key_monitor.py` needs membership of
+the `input` group and nothing more (no root, no setuid), and reports evdev
+keycodes - the same codes the OSK's keys already carry for ydotool, so a code off
+the wire matches a drawn key with no table in between. Three properties are
+structural rather than documented, because a program that reads every key on the
+machine has to be answerable for it: it carries **keycodes, never characters**
+(there is no keymap and no modifier state in it, so `30` is a position whether
+the user typed `a`, `A` or a password's first letter - and
+`test_key_monitor.py` pins the output's SHAPE, since a later "make this
+readable" change is what would turn a position report into a transcript); it
+**keeps nothing** (no file writes, and the shell's side holds only what is
+down); and `KeyMonitor.watching` is **`readonly` and bound to the OSK's own open
+state**, so no second writer can extend it - measured on the live shell as zero
+readers at rest, one while the keyboard is up, zero after it closes. Two smaller
+findings: a single keyboard appears under several `by-path` names (this machine's
+shows up twice), and two descriptors on one device report every press twice with
+the second's release clearing a key the first still holds - so devices are
+deduplicated by `realpath`; and ydotool's own synthetic keys are NOT seen,
+because it creates its uinput device after the scan, which is why a synthetic
+press cannot be used as evidence that this works and why the OSK's own taps do
+not echo back at it.
+(feat(osk): light a key while the physical keyboard holds it.)
+
 ## Design language
 
 The shell follows **Material 3 / Material 3 Expressive**. `Appearance.qml` is the single source of
@@ -3529,18 +4085,64 @@ below in the same file**, and 8d81d7471 ("fix(editMode): take the motion tiers w
 of one each") found the resize grip doing it after every grip in the shell had faded linearly since
 the file was written. Both fixes repaired the sites someone had noticed.
 
-The tree carries **40** of these across 17 files, and they are deliberately **not** fixed — the
-register in that file holds a count per file, for the reason `docs/M3_GUIDELINES.md` §3 already
-gives for this whole class: a curve shape is visually perceptible and cannot be verified from a
-test, so forty unverified visual changes in one branch is worse than forty known ones written down.
-It is a **ratchet**, not an allowlist: a file outside it may have none, a registered file may not
-grow, and a registered file that *shrinks* also fails, so fixing one forces the number down and the
-register cannot rot into something nobody rechecks. Two things it deliberately ignores, with the
-reasoning in the file: an easing that is present but generic (§3's separate register — a curve
-somebody chose, where this is a curve nobody chose), and a duration paired with a curve read
-straight out of `animationCurves` (a drift risk, not a live defect, and it would triple the register
-for no bug). 1c728dd6a ("test(lint): fail on an animation that takes a tier's duration and leaves
-its curve").
+The tree carried **40** of these across 17 files, deliberately **not** fixed at first — the register
+in that file held a count per file, for the reason `docs/M3_GUIDELINES.md` §3 already gives for this
+whole class: a curve shape is visually perceptible and cannot be verified from a test, so forty
+unverified visual changes in one branch is worse than forty known ones written down. It is a
+**ratchet**, not an allowlist: a file outside it may have none, a registered file may not grow, and
+a registered file that *shrinks* also fails, so fixing one forces the number down and the register
+cannot rot into something nobody rechecks. Two things it deliberately ignores, with the reasoning in
+the file: an easing that is present but generic (§3's separate register — a curve somebody chose,
+where this is a curve nobody chose), and a duration paired with a curve read straight out of
+`animationCurves` (a drift risk, not a live defect, and it would triple the register for no bug).
+1c728dd6a ("test(lint): fail on an animation that takes a tier's duration and leaves its curve").
+
+**The register is empty now, and how it emptied is the part worth carrying.** All 40 were taken
+whole, one coherent group at a time, each group deciding its tier against what the same gesture
+already does elsewhere in the shell rather than against a pattern — the desktop widgets' own hover
+handles adopted the spelling `PluginWidget`'s resize grip already used, the settings chevron adopted
+the four sibling chevrons', and the niri overview's window rects kept `elementMoveFast` precisely
+because `OverviewWidget.qml` animates the same thumbnails for the same gesture on it, so retiering
+one of the two overview styles to fix a curve would have made them disagree. Nothing was retiered by
+rule: a colour or an opacity already on an effects tier stayed there, and the five span-morph ink
+colours stayed on `elementMove` because the colour is a term of the morph rather than an independent
+effect — those five are also the only ones written out rather than taken from a factory, and for a
+plain reason, which is that `elementMove` publishes a `numberAnimation` and no `colorAnimation`. Do
+not re-open the register to land a new one: an entry is a promise somebody comes back, that promise
+has been kept once, and a second register growing from zero is an allowlist.
+(fix(widgets): a span morph's ink colour eases with the morph, not linearly,
+fix(overview): the niri overview's window rects and fades take their tier whole,
+test(lint): the motion tier register is empty, and the header says why.)
+
+**`alwaysRunToEnd` is inert inside a `Behavior`, which is most of where this shell reaches for a
+tier's factory.** The guideline's carve-out — write the three properties out where the factory's
+`alwaysRunToEnd` would change the behaviour — reads as covering every reversible transition, and a
+reversible transition here is usually a `Behavior on color`/`opacity`/`x`. It does not:
+`QQuickBehavior::write` stops the animation *instance* when the target moves, and `alwaysRunToEnd` is
+only consulted on the declarative `running`/`stop()` path. Measured with a `qml6` probe, a 400ms
+linear Behavior reversed at t=200 reads **37.4 at t=320 and 0.0 at t=700 with and without the flag**,
+while the same pair as *started* animations `stop()`ed at t=200 diverge exactly as advertised — 80.0
+then 100.0 against 52.0 then 52.0. So the carve-out is about an animation something calls `start()`
+on, and a `Behavior` may take any tier's factory whatever the flag says. This branch's first cut wrote
+`ConfigTextArea`'s three focus Behaviors out on the belief that `numberAnimation` (which carries the
+flag) and `colorAnimation` (which does not) would resolve its border width and its border colour
+differently on an interrupted hover; they do not, and it takes both factories now. Note what this does
+*not* license: `elementMoveEnter`/`elementMoveExit` are still the wrong tiers for something the user
+reverses, because their curves are directional — that argument survives, the `alwaysRunToEnd` half of
+it does not.
+(fix(widgets): four shared widgets take their effects tier whole.)
+
+**Its one blind spot, measured while emptying it: `easing.type: Easing.BezierSpline` with no
+`bezierCurve` beside it satisfies the check and is Linear.** The lint asks whether an easing is
+present, not whether it resolves — which is the right question for §3's "a curve somebody chose", and
+the wrong one here. Probed with `qml6`: a 400ms animation declared `Easing.BezierSpline` with an empty
+curve and one declared `Easing.Linear` read 52.00 at the same sample, and nothing is logged either
+way. `NiriOverview`'s `scrollAnim` had been that since it was written — `elementMoveExit`'s duration
+beside `elementMove`'s type — so the overview's scroll-to-workspace was linear while every other
+scrolling surface here eased on `Appearance.animation.scroll`, whose duration, type and bezierCurve
+both `StyledFlickable`s and both `StyledListView`s already write out. Naming two tiers in one
+animation is the tell.
+(fix(overview): the niri overview scrolls on the scroll tier, whole.)
 
 **...and the sibling defect is the one that lint deliberately waved through: a duration read out
 of `animationCurves` is the tier's BASE, and the speed multiplier is not in it.**
@@ -3687,6 +4289,137 @@ numbers were literals. Three rules live in the policy now:
   consumes it scales it once; scaling it in `Appearance` as well would apply the multiplier twice
   and a wave would run at the square of the setting.
 
+**...and a wave with no gate races the reveal it is supposed to land in.**
+`Appearance.animation.contentGate` / `contentsArrived(progress, opening)` is the
+fourth rule, and it is the one item in
+`docs/p3drovfx-motion-measured-2026-08-22.md` §4.1's cross-reference table this
+tree had nothing at all for. It is not an M3 rule: M3 says a group enters in
+sequence and says nothing about what the group's own container is doing while it
+happens, so a group here animated while its container was still growing.
+Measured off the sibling fork, their container is at 90% by 133ms and its first
+child does not reach 50% until 233ms — container, then fill.
+
+Three things about the predicate. **The two directions are deliberately
+different and the asymmetry IS the rule**: on the way in the contents wait for
+the gate; on the way out they do not leave at all, they stay drawn and ride the
+container off as one rigid transform, so the closing branch holds until the
+container has nothing left and the reset happens there, off screen. **`opening`
+is the caller's own intent flag**, never a direction inferred from the progress —
+an intent flips at the click and the progress follows, so the two branches are
+entered by different events and there is no ordering to get wrong. And **the
+gate is unitless and unscaled**, because it is a fraction of the container's own
+progress: the speed slider and the reduce-motion floor already reach it through
+whatever tier that scalar animates on, and a second gate would be the
+double-scaling the stagger step exists to avoid.
+`EditModeDrawer.qml` is the first adopter; `test_motion_policy_contract.py`
+holds it, `ExpandablePanel` and `Carousel` to one spelling.
+(feat(motion): a container-progress gate, so contents wait for their container,
+feat(editMode): the drawer arrives as a surface and then fills.)
+
+**A start value written through an animated property is not a start value — it
+is an animation the next write cancels.** The idiom reads as "put it where it
+comes from, then send it home":
+
+```qml
+function slideIn() {
+    content.y = -content.height;             // the start
+    Qt.callLater(() => { content.y = 0; });  // the end
+}
+```
+
+and it does nothing at all. `y` carries a `Behavior`, so the first write does not
+set a value — it STARTS an animation toward one. `Qt.callLater` runs in the same
+turn of the event loop, before a frame is drawn, so that animation has advanced
+~0ms when the second retargets it *from where the property already is*, and the
+result is an animation from A to A: no motion, no warning, and QML that reads
+exactly like an entrance. Measured on a 60fps capture of the wallpaper selector
+against a control pair of frames differing by 0.0000, the panel's drawn bottom
+edge went from off screen to 99.6% of its final position in ONE frame — 690px in
+17ms — for the whole life of the feature, while its exit (whose write has no
+deferred partner) animated correctly. The asymmetry read as a broken exit rather
+than as a missing entrance, and the first repair fixed the exit's curve.
+
+Declare the start state instead of writing it: `property real openProgress: 0`,
+or `scale: 0.85` as `DesktopMenu` and `EditWidgetMenu` already spell it. A
+declared initial value is not a write, so no Behavior swallows it.
+`tests/lint_animated_start_write.py` fails the suite on a body that writes an
+animated property and also defers a write to the same one; it is scoped to that
+combination because two writes alone are ordinarily an if/else.
+(fix(wallpapers): the selector arrives and dissolves instead of flying.)
+
+**And the tier a surface takes is a claim about what KIND of surface it is.**
+The wallpaper selector travelled its own full height on `sidebarSlideEnter` /
+`sidebarSlideExit`. Those exist for a sidebar — a panel fastened to a screen
+edge, whose travel IS its own extent, so a full-extent slide reads as the panel
+coming out of the edge it lives on. The selector is a floating sheet with a
+margin on all four sides, and moving it 690px in 250ms is the largest single
+motion in this shell on the surface with the most content in it. It arrives in
+place now (opacity and a scale from 0.85 on one scalar,
+`transformOrigin: Item.Top`), which is `docs/M3_GUIDELINES.md` §2's Component
+Entrance and Exit and what §2.1 of the survey measured: zero displacement on
+every frame of the entrance.
+
+Two decisions from that worth not re-deriving. **A surface's lifetime belongs to
+its exit animation, never to a Timer at the exit tier's duration** — a Behavior's
+animation starts a frame after the write that triggers it, and an accelerating
+curve carries most of its distance in its last frames, so the old Timer tore the
+window down with 14% of the exit still undrawn. That also forces the animations
+to be *started* rather than declarative, since a `Behavior` never raises
+`finished` at any duration. And **`elementMoveExit` is the wrong tier for a fade
+in place**: `emphasizedAccel` is shaped for something leaving the screen, and at
+its own 200ms it spends 46% of the transition in its last two frames — measured
+on an opacity, a panel that sits above 45% for two thirds of the exit and then
+blinks out (14, 23, 57, 100 percent gone across the last four frames).
+`elementMoveFast` at the same 200ms measured 100, 95, 76, 55, 34, 18, 9, 1.
+Where the exit is really an opacity with a scale nudge on it, the effects tier is
+the honest one — which is also what §"Expandable Content" of the guidelines
+already pairs with a spatial exit.
+(fix(wallpapers): the selector arrives and dissolves instead of flying.)
+
+**Two decisions that are each correct can add up to a surface that cannot animate at all, and neither
+one is where you would look.** The overview appeared and vanished on a single frame at both ends.
+`rules.lua` turns the compositor's own map animation off for `quickshell:overview` - which is right,
+because a map animation on a screen-sized surface animates the *surface*, and that reads as the
+desktop lurching rather than as a card opening - and the window's `visible` followed
+`GlobalStates.overviewOpen`, which is how nearly every panel here is written. Layer-shell forbids
+window reuse, so between the two the window was created on the frame the flag rose and destroyed on
+the frame it fell, and there was nothing left that *could* animate either end. The repair is the
+wallpaper selector's `reallyOpen` shape above; it is now written twice, so it is pinned rather than
+described - `tests/test_exit_owned_surface_contract.py` holds both sites to it.
+
+Four things from it worth not re-deriving:
+
+- **Everything else gated on the open flag has to move onto the lifetime flag too, or the exit is
+  half a panel leaving.** The overview grid's `Loader.active` read `GlobalStates.overviewOpen`, so
+  the grid was destroyed on frame one of the exit and the search bar dissolved on its own. Gating on
+  the gesture's flag inside the surface is invisible until the surface outlives the gesture.
+- **A blur region is not part of the card it sits behind.** The compositor frosts that rectangle
+  whether or not anything is drawn over it, so a region gated on the open flag arrives a whole
+  entrance before the card and stays a whole exit after it - a frosted ghost of a card that is not
+  there. A region is on or off and cannot be faded, so the step goes where the card is the least
+  transparent thing it can be while it happens: the half way point of the card's own opacity.
+- **The card does not travel, and that is geometry rather than taste.** The sibling fork drops this
+  card in from above the screen edge and pays for the room with a negative margin on all four sides
+  of its surface; ours is anchored to the top of a surface that stops at the bar's exclusive zone, so
+  a rise is drawn outside the window and clipped - the same constraint the selector's entry states
+  from the other end. `transformOrigin: Item.Top` says which edge the card comes out of without
+  needing the room. The entrance takes `elementMoveSmall` for its CURVE as well as its duration:
+  `expressiveFastSpatial` overshoots by construction (its second control point is 1.67), so the
+  bounce is the scale settling past 1 - and the overshoot is clamped off the opacity, where a card
+  fading past opaque and back is a flicker.
+- **The lifetime is measurable without looking at a single pixel, and it needs a control in the same
+  run.** `hyprctl layers` polled straight after a close: `quickshell:overview` survives **196-202ms**
+  across three runs, against `elementMoveFast`'s own 200ms, while `quickshell:sidebarRight` - whose
+  surface still follows its flag - is gone in **4-5ms**, which is the instrument's floor. On its own
+  200ms is a number that could be sampling lag; with the second one it is the exit animation.
+
+And the check's own first draft walked past the plant it exists for, which is the reusable half:
+it swept the whole file for a `visible:` line mentioning `reallyOpen`, and putting the *window* back
+on the gesture flag leaves the card inside it still matching. A gate is read at the declaration that
+maps the surface - located by the `WlrLayershell.namespace` under it - never anywhere in the file.
+c837f589e ("feat(overview): the overview arrives and dissolves instead of snapping"),
+3e2143eae ("fix(test): read the surface gate at the declaration that maps it").
+
 A delegate cannot see its siblings, so `Carousel`'s rank stays the model index — the clamp and the
 scaled step still come from the policy, which was the half that was wrong. And a wave is a
 **cancellable** list rather than loose animations: `expanded` flipping twice inside the first wave's
@@ -3699,6 +4432,122 @@ our staggered surfaces are `FlowButtonGroup`s whose contents are fixed for the l
 owns them, and a Docker refresh destroys the whole `ExpandablePanel` rather than recycling anything
 under it. fb92b4f5d ("fix(widgets): rank a stagger by visible position, clamp it, and let a wave be
 cancelled").
+
+**...and the RUNNER is one component too, because the policy being shared is not the same as the
+wave being shared.** `modules/common/widgets/StaggerWave.qml` owns the ranking, the zeroing, the
+scaling and the cancellation; `ExpandablePanel` declares one rather than carrying the only copy, and
+so does every surface that has adopted a group entrance since. It is a `QtObject`, not an `Item`: a
+wave declared inside the container it walks must not become a member of it, and only Items land in
+`children` (its animation `Component` is a declared property for the `QtObject`-has-no-`data` reason
+under [Dynamic/data-driven QML gotchas](#dynamicdata-driven-qml-gotchas)). A member opts in by
+declaring `property real appear: 1` and folding it into its own opacity — `RippleButton` has done
+that since the stagger was written, which is why the session screen's nine buttons needed no change
+at all. `step` and `leadIn` arrive in BASE milliseconds and are scaled inside, once: handing either
+an already-scaled `Appearance.animation.*.duration` applies the multiplier twice. `leadIn` is a
+GUESS at when the container has arrived, and an adopter whose container animates on a scalar QML can
+read should gate on that instead and pass no lead-in at all — Edit Mode's drawer is the one that
+can, and its entry above (`GlobalStates.editDrawerProgress` through
+`Appearance.animation.contentsArrived`) says what that costs and buys.
+`park()` is the entrance's start state, called both by the runner's own wait for an unmapped
+container and by an adopter that learns its gesture has begun before it learns its container has
+arrived.
+("feat(widgets): StaggerWave, the one runner for a group's arrival";
+"feat(editMode): the drawer arrives as a surface and then fills").
+
+**A wave asked for while its container is off screen writes nothing, and leaves the surface blank
+for ever.** Ranking asks each member whether it is on screen, and `visible` is EFFECTIVE visibility
+(see the `GroupedList` entry under
+[Dynamic/data-driven QML gotchas](#dynamicdata-driven-qml-gotchas)) — so a container that is not
+mapped yet answers `false` for every member, every rank comes back `-1`, the wave is empty, and the
+members keep whatever `appear` the last exit left them at, which is zero. Nothing errors, nothing
+logs, and the QML reads correctly. That is precisely what a trigger hung on the state that *asks*
+for a panel produces: `GlobalStates.sidebarRightOpen` flips a beat before the compositor maps the
+layer surface, and four consecutive opens of the right sidebar came up as an empty panel body
+(measured with a temporary print: `included=[false x7]`). `StaggerWave` therefore holds an entrance
+until its target is visible rather than trusting whatever announced the open — in the runner, not at
+the call site, because the next adopter has the same beat to get wrong and the same silence to debug.
+A surface whose trigger is already the container's own `visible` (`ContentPage`, which follows the
+settings window's page switch) never showed it.
+("fix(widgets): a wave waits for its container to be on screen").
+
+**The adoption is the thing that decays, so the adoption is what is pinned.**
+`docs/p3drovfx-motion-measured-2026-08-22.md` §4.2 measured the sibling fork's motion off screen and
+found our arithmetic correct, our guideline written, and the wiring at **three** files against their
+twenty — a missing capability nowhere, and every surface arriving all at once because nothing asked
+it not to. `tests/test_motion_policy_contract.py` now carries a `STAGGER_ADOPTERS` ratchet (a
+surface that stops declaring a `StaggerWave` reddens; a new adopter is a line) and fails the suite on
+a second file calling `staggerRanks`, which is the only way a second runner can exist. Two surfaces
+were assessed and deliberately **not** taken, and the reasoning is the reusable part: the launcher's
+results are a list the user is about to type into and that rebuilds on every keystroke, so a wave
+there is latency on the one thing being waited for and restarts before it finishes; and the bar
+popups' content wants the container-progress gate (§5.1 item 2) rather than a lead-in — its card
+unrolls from the height of its first drawn section precisely so that section is legible on frame
+one, and its content is reparented between windows with a stale implicit size for a frame.
+("test(motion): ratchet the surfaces that stagger, and scope the rank check").
+
+**...and that ratchet needed a second half, because a surface can be adopted, looked at, and
+REFUSED — and a register that only grows is a target.** 9e10b8a9c ("feat(sidebar): the right
+sidebar's sections arrive in sequence") gave the right sidebar a wave; the user's verdict was *"I
+don't like the cascading animation effect in the sidebar… This one feels slow. There's a frame drop
+the moment it opens and the moment it closes."* It is off that surface again, and
+`STAGGER_DECLINED` in `tests/test_motion_policy_contract.py` reddens if it comes back. Take the
+reasoning rather than the removal, because both halves of the complaint were right and only one of
+them was the wave's:
+
+- **A `leadIn` is a guess, and on a layer surface it is the only option there is** — which is why
+  this surface could not be tuned out of the "feels slow" half. `staggerStep` is 40ms base,
+  the sidebar's `leadIn` was `staggerStep * 3` = 120ms, each member fades over
+  `elementMoveFast.duration` = 200ms, and `STAGGER_MAX_RANK` is 5. On the panel 9e10b8a9c measured
+  (ranks `[0,-1,1,2,-1,3,4]`) the last member starts at 120 + 4×40 = 280ms and lands at 480ms;
+  with all seven sections on screen the clamp puts it at 320ms and 520ms. `sidebarSlideEnter` is
+  **300ms**. So the group finished arriving 180–220ms after the container had stopped moving, and
+  the fix for that is `Appearance.animation.contentsArrived` — which needs a progress scalar the
+  compositor's own slide does not give QML. Edit Mode's drawer is the adopter that has one; this
+  one never could.
+- **The frame drop is NOT the wave, and it is not any of the three obvious suspects.** Measured in
+  a nested Hyprland (1920x1080@60, its own `XDG_RUNTIME_DIR`), 12 open/close cycles per run, three
+  runs of the wave-removed build as a control against two of the wave build, scored off
+  `QSG_RENDER_TIMING`'s own per-frame numbers plus a 1ms heartbeat measuring how long the GUI
+  thread was unavailable. **`polish` is 0ms in all 36 control gestures, IQR 0–0**, so the GUI
+  thread does no measurable work at either end: it is blocked in `polishAndSync` for a median of
+  69.5/76/78ms per open (IQR 66.5–72, 74.5–78.5, 76–84) waiting for the render thread, which is
+  waiting on the compositor. What it is waiting for is the surface: `quickshell:sidebarRight`
+  appears and disappears from `hyprctl layers` **24 times over 12 cycles**, because
+  `PanelWindow.visible` follows `GlobalStates.sidebarRightOpen` and layer-shell forbids window
+  reuse — the same teardown-and-rebuild the `hideWhenFullscreen` note under
+  [Layer-shell gotchas](#layer-shell-wlr-layer-shell-gotchas) records. It costs that with the wave
+  and without it.
+- **What the wave added was FRAMES, not a longer block.** Per open, rendered frames go from a
+  median of 5 (IQR 5–5 in every control run) to 30, at unchanged per-frame render cost (median
+  15–16.5ms in both arms), and the blocked total stays inside the control's own band (79/72ms
+  against 69.5–78). Per close the control renders **zero** frames — the surface is gone the same
+  frame — while the wave renders a median of 13, every one of them with `render=0`: the exit fade
+  keeps the window committing frames for 200ms after the panel has been asked to close, drawing
+  nothing. A wave on a surface whose container is torn down by the same gesture is animating
+  something that is already leaving.
+- **The two cheap suspects are eliminated with numbers rather than by argument.** `StaggerWave`'s
+  per-member `createObject`/`destroy` pair costs **55µs** for five members and **80µs** for seven
+  (offscreen `qml6`, 2000 repetitions, against a control pass running the same loop without the
+  objects) — 1.3% of one frame at 240Hz — and it would show up in `polish`, which is zero. And
+  `mediaPlayerLoader`, whose `active` is bound to the open state, never fires for the reporter at
+  all: `sidebar.mediaPlayer` is off in their config.
+- **Which of the surfaces that still stagger share the mechanism**: `ContentPage` and
+  `ExpandablePanel` have no window of their own, and `EditModeDrawer`'s surface exists for the
+  length of the mode rather than per drawer open. `SessionScreen` does — it is a `PanelWindow`
+  whose `visible` follows its `LazyLoader`, so its wave rides a surface the same gesture creates.
+  That is unmeasured here and is a modal opened rarely rather than a panel opened all day, so it
+  is named, not changed.
+
+What generalises past the sidebar: **`polish` is where a group entrance's own cost would appear,
+and if it is zero the stall is the surface, not the QML.** Before attributing a hitch at a panel's
+edge to whatever animation was most recently added there, take one control run with that animation
+removed and read `polish` against `blockedForSync`. Two limits of what was measured, stated because
+neither is closed: the nested compositor's vsync period is 16.7ms against the reporter's 4.17ms, so
+the absolute milliseconds are inflated and only the arm-against-arm comparison carries; and
+Hyprland publishes no per-frame present statistics, so the compositor's own timeline — the thing
+the user is actually looking at — is inferred from the client's stall rather than observed.
+7a7c1b794 ("revert(sidebar): the right sidebar's sections stop cascading"),
+1b8d4ac52 ("test(motion): the stagger ratchet runs in both directions").
 
 **`Behavior on <non-animatable>` with a trailing bare `PropertyAction {}` defers a write instead of
 animating it.** A `Loader.source` is a `url`, which QML cannot interpolate, so the `Behavior` cannot
@@ -3750,9 +4599,131 @@ the per-popup layer surface")), `StyledRectangularShadow`, `DockIconMotion` (wra
 press-squish / launch-bounce / appear-pop feedback, driven by `services/DockLaunchTracker`; the
 lift and the bounce are magnitudes travelling along `dock_geometry.js`'s inward vector, not a
 negative y),
+`ToolbarTextField` (the shell's text field: a filled pill, from the launcher's search box to the
+lock screen's password box - see the note above on why `MaterialTextField` is not this),
+`PasswordField` (that field masked: the shell's ONE password prompt, drawing a Material shape per
+character through `PasswordChars` - reach for this rather than an `echoMode`, and read the entry
+above before adding a third call site),
 `SchemePaletteCircle` (an Android 12-style palette circle for a colour scheme, fed from
 `services/SchemePreview`, with the scheme's glyph as the fallback while the colour venv has not
-answered). All in `modules/common/widgets/`.
+answered),
+`MarqueeText` (a single-line label that scrolls only while it overflows its box, over the overflow
+and back, at a distance-proportional speed with a floor — see the entry below before adopting one),
+`CatalogueRow` (one entry of a catalogue, drawn — see the entry below before building a list row).
+All in `modules/common/widgets/`.
+
+**A catalogue's rows are one component, and it is deliberately not a control.** Edit Mode's drawer,
+every settings row and the widget store's cards all draw the same thing — a leading icon, a name, a
+description under it, and an affordance saying what acting on the entry does — and each had spelled
+it out for itself: the drawer five times over (desktop widgets, bar widgets, dock apps, the lock
+islands, the lock layout row), `ConfigSwitch` a sixth and the store card a seventh. They had drifted
+in ways nobody chose: the same plugin's description wraps in one, elides in another and is absent
+from the third, and the byline sits beside the title in the settings card and under it in the store's.
+`modules/common/widgets/CatalogueRow.qml` is the one shape now, with the differences as properties
+(`titleFillsWidth` and `titleElides` — two questions, not one, and folding them
+together cost the store card the elide it has always had — `descriptionWraps`, the colours,
+`rowSpacing`), four content slots (`titleContent`
+on the title's own line, `trailingContent` before the affordance, `affordance` for the terminal
+control, `detailContent` full-width beneath) and an `iconComponent` escape hatch for a leading visual
+that is not a Material Symbol — a dock app's own icon — so the shared row never learns what a dock
+app is.
+
+Three things about it are not obvious.
+
+- **It has no `MouseArea`, no `Button` root and no hover state, and it must not grow one.** Edit
+  Mode's drawer rows are pointer areas BY CONSTRUCTION (65602708e): a drag out of the clipped drawer
+  needs the implicit grab of the press to keep delivering events after the pointer leaves the row,
+  and `test_edit_mode_contract.py` names the drawer as the deliberate exception to its no-`MouseArea`
+  sweep for that reason. Every other call site is a `RippleButton`. So the interactive surface stays
+  with the call site and this draws inside it — which is also why the affordance is a slot rather
+  than a built-in control, and why `trailingContent` and `affordance` are two slots: `ConfigSwitch`
+  owns the second (its switch) while still offering the first to its own 159 callers. The rule is a
+  failing check, because the failure is silent — drag-to-place simply stops carrying anything out,
+  on a gesture nothing in the suite drives.
+- **The row's height is decided by its labels and its affordance, never by its leading glyph.** The
+  icon sits in a wrapper reporting width only — `OptionalMaterialSymbol`'s own shape, kept rather
+  than repaired, because every settings row in the shell was already sized that way and a
+  decorative 23px store glyph would otherwise stretch a list whose text is 15px.
+- **Both of its rows state `Layout.fillHeight`.** A Layout nested in a Layout defaults to `true`, so
+  the main row and the (usually empty) detail row would SPLIT whatever height the row is given beyond
+  its implicit one. That is invisible in a settings page, where the control's height IS its implicit
+  height, and it is exactly what a fixed-height list row hands it — the same defect
+  `EditModeDrawerLayoutProbe` exists for, one component down.
+
+- **Every row body in the drawer is that component, checked per BODY rather than per file.** The
+  first version of the check asked only whether `CatalogueRow` appeared in `EditModeDrawer.qml` at
+  all, which is true of a drawer where five rows share it and a sixth is spelled out beside them —
+  and that is precisely the state two branches arrive in when one extracts the component while the
+  other grows a row. The Lock section's widget-choice re-link was written as a hand-rolled
+  icon/label/label/glyph `RowLayout` on a branch that never saw the extraction, and a textual merge
+  keeps it: one row in the drawer free to drift from the other six, in the file the extraction
+  exists to keep from drifting. A row body here is a `contentItem:`, so the rule is that every
+  `contentItem:` in that file names the shared row.
+
+Adopting it must not move a settings row: 159 call sites, and a page that reflows is the failure.
+Measured before and after against a real window under headless weston — `ConfigSwitch`'s
+implicitHeight 31 / 44 / 62 / 44 for a plain row, an icon+wrapping-description row, an
+info+trailing+byline+badge row and a disabled one, `contentItem.implicitHeight` 23 / 36 / 54 / 36,
+and the disabled row still dimmed exactly once at 0.400.
+("feat(widgets): CatalogueRow, the entry shape four surfaces each spelled out",
+"refactor(widgets): ConfigSwitch draws its row through CatalogueRow",
+"refactor(editMode): the drawer's five row shapes become one",
+"refactor(store): a store card's identity is the shared catalogue row",
+"test(editMode): hold every drawer row body to the shared catalogue row").
+
+**A marquee is the answer for an IDENTITY, and where it may run is as much of the design as how it
+moves.** `MarqueeText` exists because every long label in this shell elides, which is honest about
+the truncation and useless about the content: a router that names its two bands and its guest
+network off one prefix produces list rows whose elided forms are byte-identical, so the list offers
+a choice it does not let the user make. It is *not* a general replacement for `elide`, and the four
+call sites it has (the dock's window-preview title, and the SSID, Bluetooth device name and audio
+stream name in the right sidebar) are a reviewed register in
+`tests/test_marquee_text_contract.py` rather than a starting point for a sweep. Two questions have
+to be answered before a fifth joins them, and neither is checkable from a pattern.
+
+- **Is the elided string something the user cannot recover from anything else on that row?** A
+  status line, a button label or a settings caption is a string this repo wrote; truncating one
+  loses nothing. A name a device or a network advertises for itself is the whole of what the row
+  is for.
+- **Is the surface hidden when idle?** This is an animation with `loops: Animation.Infinite` on a
+  label, i.e. exactly the class that took a fullscreen game from 94 fps to 52 — see the
+  infinite-animation entry above. Its `running` is `overflows && visible`, and `visible` is
+  effective visibility, which is the right question on the right sidebar (a `PanelWindow` whose
+  `visible` follows the sidebar's open state) and on the dock's preview (an xdg-popup that does not
+  exist while it is not shown). It is the *wrong* question on the bar, which sits on `WlrLayer.Top`
+  and stays `visible` while a fullscreen window covers it (53d1ff893 ("fix(bar): drop the cava
+  claim while a fullscreen window covers the bar")) — a marquee there is the performance bug
+  wearing the fix's clothes, so it is refused by the register rather than by a comment.
+
+Three things about its motion do not generalise from a tier and are pinned for that reason.
+
+- **The duration is distance-proportional rather than catalogued** (`modules/common/functions/
+  marquee.js`, 28ms per pixel of overflow with a 3500ms floor). What has to be held constant is the
+  speed the text passes the eye: one tier would run a three-word overrun and a whole sentence on
+  the same clock, so one of the two is unreadable. The floor is the same argument from the other
+  end — a six-pixel overflow twitches, and a movement that resolves before it can be looked at is
+  worse than the truncation.
+- **The travel goes through `Appearance.animation.scale()` and the dwell at each end deliberately
+  does not.** The travel is motion, so the speed slider retimes it and the reduce-motion floor
+  collapses it to zero — which is a *snap* between the two ends, and is how reduce motion still
+  leaves the whole string readable rather than permanently cut off. The dwell is reading time, and
+  it is the half that keeps that floor from being a strobe: with the traverse at zero the dwell is
+  the entire cycle, so a scaled dwell would swap a label's two ends every frame. `dwell()` takes
+  `reduceMotion` and gets **longer**; getting that direction backwards is invisible from either
+  constant on its own, which is why it is a test rather than a comment.
+- **The curve is `Easing.Linear`, spelled out.** An eased scroll reads at a speed that changes
+  under the eye, which is the whole thing a constant ms-per-pixel exists to hold still. This is a
+  curve somebody chose, not the one `lint_motion_tier_partial.py` exists to catch nobody choosing.
+
+Nothing about the rendered result is reachable from `qmltestrunner` — it can build neither a
+`StyledText` nor a laid-out box — so every decision lives in `marquee.js` and
+`tests/lint_infinite_animation_visibility.py`'s general gate rule is supplemented by the contract
+above, which checks the term that lint cannot see (`overflows`) and refuses to let the widget join
+that lint's ratchet.
+62da34c1b ("feat(widgets): marquee.js, what a label that does not fit costs to read"),
+d7e90dac8 ("feat(widgets): MarqueeText, a label that scrolls only when it overflows"),
+91d7f5fab ("feat(sidebar): three names the right sidebar used to cut in half now scroll"),
+281ca292c ("test(widgets): pin the marquee's gate, its two durations, and where it may run").
 
 **A colour scheme is shown as its colours, not as a glyph.** The desktop menu's nine scheme
 presets were nine abstract Material Symbols sitting directly above a list of transition
@@ -3761,6 +4732,170 @@ animations drawn the same way, so the grid read as more animations
 known without running the quantize — that is what `SchemePreview` is for — so the glyph stays as
 the fallback rather than as the design.
 (782be8329 ("feat(desktopMenu): draw each scheme preset as the palette it produces").)
+
+**`MaterialTextField`/`MaterialTextArea` are not "the shell's text field", and the name is the
+whole trap.** Both set `Material.containerStyle: Material.Outlined`, so what they draw is QtQuick
+Controls' own outlined container - a boxed border with the placeholder floating in a notch cut
+through its top edge. Nothing else in this shell looks like that. Every field the user actually
+meets is a filled surface: `ToolbarTextField` (a pill on `colLayer1`, used by the launcher's search
+box, the wallpaper selector, the screen translator, the fps limiter - and by the lock screen's own
+password box) or `ConfigTextArea`'s bordered field (the settings-row form control). The polkit
+authentication dialog had reached for `MaterialTextField`, which meant the shell's **two password
+prompts were two different controls**; `tests/test_polkit_dialog_contract.py` now derives the
+control from `LockSurface` rather than naming a type, so the two cannot drift again. This is the
+same failure shape as the `colLayer0`/`colLayer1` note below - "it uses a real shared widget" is not
+"it uses the right shared widget for this position". The four remaining call sites are unreviewed
+rather than sanctioned; `modules/imi/sidebarRight/wifiNetworks/WifiNetworkItem.qml` is the next one
+of them that is a password prompt.
+f957d9e59 ("fix(polkit): give the auth prompt the field the rest of the shell uses").
+
+**...and the same two prompts then drifted again in the half a type name does not carry, which is
+why the masking is a control now.** Both were `ToolbarTextField`s, so the check above was green,
+and only one of them drew the shell's masked characters: the lock screen paints a `PasswordChars`
+overlay - one `MaterialShape` per character, each animating in as it is typed - while the polkit
+dialog set `echoMode: TextInput.Password` and got the system's flat bullets. Masking is not one
+property, which is the whole reason a second call site gets it wrong: it is a transparent glyph
+colour, a transparent selection PAIR, an overlay `Loader` anchored inside the field's own padding,
+that overlay's `enabled: false`, and `Config.options.lock.materialShapeChars` gating all of it.
+`modules/common/widgets/PasswordField.qml` is the one control that owns those five, and both
+prompts are one. Two things about adopting it. The unmasked glyph colour has to stay a property
+(`colText`) rather than being folded in - the lock screen's field sits on layer 1 and the dialog's
+on layer 4, and it is still what the field falls back to when the switch is off. And `masked` is a
+property rather than a constant, because a polkit flow may ask for a VISIBLE response
+(`flow.responseVisible`), where a row of shapes standing in for characters the user is supposed to
+read is worse than no masking at all. `tests/test_polkit_dialog_contract.py` derives the control
+from the lock screen's own field (anchored on `root.passwordField = `, not on a masking property -
+every one of those now names the shared file rather than the call site) and refuses a
+`PasswordChars` instantiated anywhere outside `modules/common/widgets/`.
+("feat(widgets): PasswordField, the masked field both password prompts share"),
+("fix(polkit): the auth prompt draws the animated glyphs the lock screen has").
+
+**A confirming action in a dialog carries a FILLED container; the dismissing one stays flat.**
+`DialogButton` defaults to a fully transparent background (`transparentize(colLayer3)` with the
+default 100%), which is right for Cancel and wrong for the button the dialog exists to offer - two
+flat buttons side by side say nothing about which is which. Set `colBackground`/`colBackgroundHover`/
+`colRipple` on the primary role and `colEnabled: colOnPrimary` (not `colText`, which is *bound* to
+`enabled ? colEnabled : colDisabled` and would lose that binding to an assignment). No disabled
+branch is needed: `RippleButton.buttonColor` already transparentizes the fill while `enabled` is
+false. The reasoning is `EditModeChromeContent.qml`'s `doneButton` verbatim, arrived at from the
+other end.
+e8cd6bd04 ("fix(polkit): the confirming action carries a filled primary container").
+
+**...and the other end of that pair is a rule the row derives, not something each Cancel
+declares.** Filling the confirm answered "which of these two is what you came here to do" from one
+side and left the other open: a bare label beside a filled container reads as a link rather than as
+the second half of a choice, which is 283ada440 ("fix(editmode): the toolbar's title stops reading
+as a button") arriving from the opposite direction - there the thing that was *not* pressable
+looked like it was. **In a dialog whose confirming action is filled, the dismissing action is
+outlined; a dialog whose actions are all flat stays flat.** `WindowDialogButtonRow` publishes
+`hasFilledAction` (it is the smallest thing that can see both actions) and `DialogButton.outlined`
+is derived from it, so the ten dialogs whose actions are all flat are untouched and the next dialog
+that grows a filled confirm gets the edge without anyone remembering to. Four things about it:
+
+- **"Filled" is read off `colBackground`, not declared.** The one thing a call site does to make a
+  button the dialog's confirming action stays "give it a container". `colBackground` and never
+  `buttonColor`, because the latter is transparentized while the button is disabled - a filled
+  action would stop counting as one exactly while it waits for the response it submitted.
+- **The predicate is `dialogActionFilled`, and the name is the load-bearing part.** The row asks
+  every child duck-typed - it has to, since an action row holds spacers, captions and switches as
+  well as buttons - so a name another widget answers to is a false positive with a border on it.
+  `ConfigTextArea` declares `property bool filled: true` as its own filled-vs-outlined switch, and
+  the first spelling of this collided with it: planted, a `ConfigTextArea` in an all-flat action row
+  outlined **both** of that row's buttons. Anything else asking a heterogeneous row a duck-typed
+  question has the same name to choose.
+- **The edge is `colOutline`, not the `colOutlineVariant` `RippleButton` defaults to.** Measured
+  against the card's own `m3surfaceContainerHigh` fill, the variant stands off it by **32/255** and
+  `colOutline` by **106** - and `docs/M3_GUIDELINES.md` §1 documents the variant as a *subtle*
+  boundary, which is the thing that failed here. It is also the tone `WindowDialogSeparator` already
+  draws in, so the card carries one outline colour rather than two. A source check for that role
+  cannot be a substring test: `colOutlineVariant` **contains** `colOutline`, so the first draft of
+  the check passed on the exact token it exists to refuse.
+- **The gap between the actions is measured between DRAWN edges.** The row was `space50` (4), M3
+  asks for 8, and 4 read fine while the dismissing action was a bare label: the filled OK's
+  container sat 4px from Cancel's invisible box and **20px** from the nearest pixel Cancel painted,
+  its label. An outline moves that edge out by the button's own 16px padding, so the separation
+  collapses to the row's spacing alone. `space100` now, re-measured at 8/24.
+- **A call site may not spell the rule for itself.** `tests/test_polkit_dialog_contract.py` refuses
+  an `outlined:` outside `modules/common/widgets/` - a rule re-stated per Cancel is a rule the
+  fourteenth Cancel gets wrong - and asserts it found DialogButton call sites first.
+
+04f66b498 ("feat(widgets): a dialog's dismissing action carries an outline"),
+9803a7734 ("fix(widgets): a dialog's two actions sit 8dp apart"),
+3ce984a99 ("test(polkit): the outline-role check stops passing on the role it refuses"),
+70a6beec5 ("fix(widgets): the filled-action predicate gets a name no other widget answers to").
+
+**A dialog's content padding is a spacing decision now, and it used to be its corner radius.**
+`WindowDialog` spelled the padding twice and both times as `dialogBackground.radius`: the content
+column took `margins: dialogBackground.radius`, and the card derived `implicitHeight:
+contentColumn.implicitHeight + dialogBackground.radius * 2`. So the padding was 23px because
+`Appearance.rounding.large` is 23 - restyling the corner restyled the padding, and changing one of
+the two spellings without the other leaves the card a different height from what is in it (planted:
+the harness's four-paddings check reads 32/32/32/**14**). There is one `WindowDialog.contentPadding`
+now and both come off it. Three things:
+
+- **Everything that BLEEDS had the same coupling from the other side.** `WindowDialogSeparator` and
+  eight call sites across the Wi-Fi, Bluetooth, Tailscale, Phone Connect and Volume dialogs cancel
+  that padding with `Layout.leftMargin: -Appearance.rounding.large` so a rule or a list reaches the
+  card's edge - which is only true for as long as the radius and the padding happen to be equal.
+  The content column publishes `contentPadding` for its direct children; `VolumeDialogContent` is a
+  grandchild and takes it as a **required** property, so a missing wiring there is loud rather than
+  a list that quietly stops bleeding.
+- **The value is `Appearance.spacing.space400` (32), one step ABOVE M3's 24dp basic-dialog padding,
+  deliberately.** The maintainer asked for more room; `space300` is a *one pixel* change from the 23
+  it replaces and would not read as anything. Do not "correct" it back to M3's number - the property
+  says so in place.
+- **The check is the drawn inset against the token**, not against itself. The four-paddings check
+  beside it is satisfied by any number applied consistently, the old radius included.
+
+4fb2a7f02 ("refactor(widgets): a dialog's content padding gets a name of its own"),
+1cb34eaa8 ("fix(widgets): a dialog's card pads its content on the 8dp grid").
+
+**`WindowDialog` freezes its card's height at the moment `show` flips, and that is load-bearing for
+how a dialog is built.** `onShowChanged` *assigns* `dialogBackground.implicitHeight`, which destroys
+the binding to `contentColumn.implicitHeight` - so the card is whatever the content measured at that
+instant, for the rest of its life. Note what this is NOT: wrapping is fine at completion, because
+`dialogBackground.implicitWidth` is the caller's `backgroundWidth` constant rather than anything
+derived from the surface, so a `StyledText` already knows its width and its wrapped height when
+`show` flips. Measured - a three-line paragraph declared inline sizes its card correctly. What
+breaks is content that arrives or changes *after* that: measured with a probe that assigned the
+polkit message once the dialog was already up, the card stayed at the one-line height and the button
+row drew 21px BELOW its bottom edge, on the scrim. It is not a live defect, because every dialog
+here is built by a `Loader` whose gate is the thing that supplies the content
+(`PolkitService.active`, `PluginManager.pendingUninstallId`), so the text exists before the component
+does. Anything that wants a dialog to *grow* - a message that changes mid-flow, a field that appears
+on a second step - has to repair the binding rather than assume it resizes.
+15541101a ("fix(polkit): the dialog's own numbers come off the grid the rest of it uses").
+
+**A dialog's action row is the one child of its content column that used to leave it, and where the
+bleed shows depends entirely on what is above it.** `WindowDialogButtonRow` carried
+`Layout.margins: -Appearance.spacing.space100` with a comment calling the alternative "a terrible
+waste of space" - 8px pulled off three sides of the row, so the actions sat 8px outside the box
+every other row in the dialog lines up with. Nine dialogs draw that row and eight of them put text
+or a list above it, where a button container hanging 8px wider reads as nothing at all; the polkit
+prompt is the one with a FULL-WIDTH field directly over the actions, and there it is a visible
+misalignment. Measured on the real prompt in `PolkitDialogRuntimeTest.qml`: the card's four
+paddings read 23/23/23/**15**, and the confirming button's right edge sat 8px past the password
+field's. The margins are gone; the row is a plain `RowLayout` with the shared button spacing, and
+the harness scores the four paddings against each other and the row's edges against the field's
+rather than against numbers someone typed. Note which half of the geometry the source shows: that
+the row is a `Layout` child of the content column is visible, that it leaves the column is not.
+("fix(widgets): a dialog's actions sit in the dialog's own content box").
+
+**The polkit prompt's LAYER surface is out of reach from any harness, and it is worth knowing
+before writing one.** `FullscreenPolkitWindow`'s gate is `PolkitService.active`, a read-only alias
+onto Quickshell's `PolkitAgent`, and the only thing that raises it is a real authentication
+request - which needs the agent registered, and `polkit_agent_listener_register` refuses a second
+agent for a session that already has one ("An authentication agent already exists for the given
+subject", measured against the running shell). So a harness can build the dialog's CONTENT tree in
+a window of its own - which is what `PolkitDialogRuntimeTest.qml` does, and it reaches the layout,
+the hover feedback and the masked glyphs - and can say nothing about the surface's input region,
+its layer or its keyboard focus. A nested Hyprland does not help: driving it with
+`hyprctl dispatch movecursor` delivered no pointer to the client at all, its own in-surface control
+`MouseArea` reporting `containsMouse=false` throughout - the family of process-targeting and
+input-synthesising traps under [Hyprland integration](#hyprland-integration), arriving in a new
+place. That run says nothing about the surface either way, and a harness with no positive control
+in it would have reported the silence as a finding.
+("test(polkit): build the real prompt and read its layout, hover and glyphs back").
 
 `ConfigTextArea` is the text-entry counterpart to `ConfigSwitch` (icon + label/description on the
 left, a bordered `TextArea` field on the right) and is the standard single-line settings field -

@@ -123,6 +123,54 @@ fi
 # default, Easing.Linear - the generic curve M3_GUIDELINES §2 forbids - and
 # nothing about the source or the log shows it. Two fixes in two days each
 # repaired the sites someone had noticed and left more in the same file.
+# Static lint: every mirror symlink under tests/imports resolves. A link there
+# outlives a deleted target silently - nothing fails until a test imports that
+# exact type, which for an untested singleton is never.
+# Contract: one logical-pixel multiplier, reading 1, with the reason attached.
+# It looks like dead compatibility plumbing and is not - 629 sites read it and
+# it multiplies the widget grid - so both "delete it" and "make it a zoom knob"
+# are mistakes this pins the shape against.
+echo "Running effective scale contract tests..."
+if ! python3 "$SCRIPT_DIR/test_effective_scale_contract.py"; then
+    echo "Effective scale contract tests failed."
+    exit 1
+fi
+
+# Static lint: every workflow job declares a timeout. A job with no ceiling
+# runs until GitHub's six-hour limit when a step wedges, holding the only
+# runner while every other PR queues behind it - measured on the 0.27.0
+# release run, which spent six hours inside apt.
+# The one thing in this shell that reads every key on the machine: what it
+# emits (keycodes, never characters), what it keeps (nothing), and when it is
+# allowed to run at all (only while the on-screen keyboard is open).
+# Static lint: a harness that launches qs brings its own compositor. Without
+# it, `qs -p` maps on the session's display and a suite run opens and closes
+# real windows over whatever the user is doing - and a layer surface there
+# covers their screen outright.
+echo "Running display isolation lint..."
+if ! python3 "$SCRIPT_DIR/lint_display_isolation.py"; then
+    echo "Display isolation lint failed."
+    exit 1
+fi
+
+echo "Running key monitor tests..."
+if ! python3 "$SCRIPT_DIR/test_key_monitor.py"; then
+    echo "Key monitor tests failed."
+    exit 1
+fi
+
+echo "Running workflow timeout lint..."
+if ! python3 "$SCRIPT_DIR/lint_workflow_timeouts.py"; then
+    echo "Workflow timeout lint failed."
+    exit 1
+fi
+
+echo "Running test import symlink lint..."
+if ! python3 "$SCRIPT_DIR/lint_test_import_symlinks.py"; then
+    echo "Test import symlink lint failed."
+    exit 1
+fi
+
 echo "Running motion tier lint..."
 if ! python3 "$SCRIPT_DIR/lint_motion_tier_partial.py"; then
     echo "Motion tier lint failed."
@@ -267,6 +315,55 @@ if ! python3 "$SCRIPT_DIR/lint_blur_region_pairing.py"; then
     exit 1
 fi
 
+# Static lint: a Behavior whose duration/easing branch on the same flag whose
+# change handler writes the animated property. The animation latches its tier
+# when it starts and nothing orders the binding update first, so a close can run
+# the entrance curve - visible only frame by frame.
+echo "Running behavior tier race lint..."
+if ! python3 "$SCRIPT_DIR/lint_behavior_tier_race.py"; then
+    echo "Behavior tier race lint failed."
+    exit 1
+fi
+
+# Static lint: a handler that writes an animated property and then defers a
+# second write to it has written a start value the retarget swallows, so the
+# animation runs from its destination to its destination. Measured, that is why
+# the wallpaper selector's entrance never animated once: 99.6% of its travel
+# landed in a single frame.
+echo "Running animated start-write lint..."
+if ! python3 "$SCRIPT_DIR/lint_animated_start_write.py"; then
+    echo "Animated start-write lint failed."
+    exit 1
+fi
+
+# Static lint: a toolbar title written as an icon beside a label IS
+# IconAndTextToolbarButton's construction, so it renders as an unfilled button.
+# Nothing errors and no frame comparison can see it; it is only wrong to a
+# person deciding what to click.
+echo "Running toolbar title lint..."
+if ! python3 "$SCRIPT_DIR/lint_toolbar_title_is_not_a_button.py"; then
+    echo "Toolbar title lint failed."
+    exit 1
+fi
+
+# Static lint: Edit Mode's chrome band is asymmetric, so a piece still centred
+# in it with `/ 2`, or a call site that forgets `bandFraction` and takes the
+# 0.5 default, renders off its gap without erroring.
+echo "Running edit mode band fraction lint..."
+if ! python3 "$SCRIPT_DIR/lint_edit_mode_band_fraction.py"; then
+    echo "Edit mode band fraction lint failed."
+    exit 1
+fi
+
+# Static lint: a `command -v` capability probe that only runs from inside the
+# feature it gates leaves its flag at the default, and the UI reads that flag
+# before the feature is switched on.
+echo "Running capability probe gating lint..."
+if ! python3 "$SCRIPT_DIR/lint_capability_probe_gating.py"; then
+    echo "Capability probe gating lint failed."
+    exit 1
+fi
+
 # Static lint: a window's clear colour must be a literal. One that reaches alpha
 # 255 makes Qt declare the Wayland surface opaque, and nothing ever retracts
 # that, so the window loses its compositor blur for the rest of the process.
@@ -292,6 +389,48 @@ fi
 echo "Running rich text opt-in lint..."
 if ! python3 "$SCRIPT_DIR/lint_rich_text_optin.py"; then
     echo "Rich text opt-in lint failed."
+    exit 1
+fi
+
+# The one marquee in the shell is an infinite animation sitting on a label, so
+# WHERE it may run is as much of the contract as how it runs: the gate has to
+# ask whether the text overflows as well as whether it is on screen, the travel
+# is scaled by the motion policy and the dwell deliberately is not, and every
+# adoption is reviewed against a surface that is hidden when idle.
+echo "Running marquee text contract tests..."
+if ! python3 "$SCRIPT_DIR/test_marquee_text_contract.py"; then
+    echo "Marquee text contract tests failed."
+    exit 1
+fi
+
+# A surface that animates on its way out is owned by that animation, not by the
+# flag the user's gesture sets: layer-shell forbids window reuse, so a window
+# whose `visible` follows the flag is destroyed on the frame the exit starts.
+# The shape is written twice now - the wallpaper selector and the overview - and
+# it is the adoption that decays.
+echo "Running exit-owned surface contract tests..."
+if ! python3 "$SCRIPT_DIR/test_exit_owned_surface_contract.py"; then
+    echo "Exit-owned surface contract tests failed."
+    exit 1
+fi
+
+# The shell has two password prompts - the lock screen and the polkit dialog -
+# and they were two different text fields, one of them Material's outlined
+# container with the prompt floating in a notch. The check derives the control
+# from the LOCK screen rather than naming a type, so the two cannot drift. It
+# also holds the dialog to exactly one filled button, the confirming one.
+echo "Running polkit dialog contract tests..."
+if ! python3 "$SCRIPT_DIR/test_polkit_dialog_contract.py"; then
+    echo "Polkit dialog contract tests failed."
+    exit 1
+fi
+
+# ...and the half the source cannot state: where the action row lands in the
+# card, whether the two buttons answer a real pointer, and whether the field
+# draws one Material shape per typed character. Brings its own headless weston.
+echo "Running polkit dialog runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_polkit_dialog_runtime.py"; then
+    echo "Polkit dialog runtime tests failed."
     exit 1
 fi
 
@@ -461,6 +600,26 @@ fi
 echo "Running bar edit runtime tests..."
 if ! python3 "$SCRIPT_DIR/test_bar_edit_runtime.py"; then
     echo "Bar edit runtime tests failed."
+    exit 1
+fi
+
+# The bar's reposition: one registry per bar wired into every bucket delegate
+# of both trees, animating a transform rather than a coordinate the layout
+# writes. Source-only, because the runtime half below skips wherever weston is
+# missing - which is CI, which is where a divergence between the two bars would
+# go unseen.
+echo "Running bar reposition contract tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_flip_contract.py"; then
+    echo "Bar reposition contract tests failed."
+    exit 1
+fi
+
+# ...and the half that can tell the reposition from the teleport it replaces:
+# it samples where each slot is DRAWN mid-reflow, at three bucket anchorings
+# and both orientations. Brings its own headless weston and its own session bus.
+echo "Running bar reposition runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_flip_runtime.py"; then
+    echo "Bar reposition runtime tests failed."
     exit 1
 fi
 
@@ -843,6 +1002,17 @@ if ! python3 "$SCRIPT_DIR/test_bar_geometry_contract.py"; then
     exit 1
 fi
 
+# The bar's exclusive zone lives on an invisible reserver window so the
+# compositor's reflow can ride the same curve as the bar's slide. Nothing about
+# a layer surface's exclusive zone is observable from qmltestrunner or from
+# headless weston, so this is the source contract; the measurement lives in
+# tests/run_bar_exclusive_zone_probe.sh, which needs a nested Hyprland.
+echo "Running bar exclusive zone reserver contract tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_exclusive_zone_reserver.py"; then
+    echo "Bar exclusive zone reserver contract tests failed."
+    exit 1
+fi
+
 echo "Running dock motion contract tests..."
 if ! python3 "$SCRIPT_DIR/test_dock_motion.py"; then
     echo "Dock motion contract tests failed."
@@ -896,6 +1066,14 @@ fi
 echo "Running SDDM theme source tests..."
 if ! python3 "$SCRIPT_DIR/test_sddm_theme_source.py"; then
     echo "SDDM theme source tests failed."
+    exit 1
+fi
+
+# The CI-visible half of the quick toggle grid's delegate rules: the runtime
+# harness below needs a Wayland session and skips where these would be undone.
+echo "Running quick toggle model contract tests..."
+if ! python3 "$SCRIPT_DIR/test_quick_toggle_model_contract.py"; then
+    echo "Quick toggle model contract tests failed."
     exit 1
 fi
 
@@ -1105,6 +1283,16 @@ if ! python3 "$SCRIPT_DIR/test_weather_forecast_contract.py"; then
     exit 1
 fi
 
+# Brings its own headless weston and its own bus. The card unrolls from the
+# content's first DRAWN section, so a section added to a popup silently changes
+# what that popup opens at - and a settled bar is the same height whether it
+# grew or teleported, so the bars are sampled in flight.
+echo "Running weather popup hero runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_weather_popup_hero_runtime.py"; then
+    echo "Weather popup hero runtime tests failed."
+    exit 1
+fi
+
 echo "Running currency service safety tests..."
 if ! python3 "$SCRIPT_DIR/test_currency_service_contract.py"; then
     echo "Currency service safety tests failed."
@@ -1245,6 +1433,17 @@ if ! python3 "$SCRIPT_DIR/test_phone_connect_contract.py"; then
     exit 1
 fi
 
+# The stream's process lifetime, which no source check and no unit test can
+# reach: a real shell, a fake busctl whose monitor verb streams one signal in
+# one case and exits instantly in the other, and the spawn TIMESTAMPS read
+# back - because "it stopped after six spawns" is also true of six spawns in
+# six milliseconds, which is the starvation bug itself.
+echo "Running Phone Connect monitor runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_connect_monitor_runtime.py"; then
+    echo "Phone Connect monitor runtime tests failed."
+    exit 1
+fi
+
 echo "Running registry entry validator tests..."
 if ! python3 "$SCRIPT_DIR/test_registry_validate.py"; then
     echo "Registry entry validator tests failed."
@@ -1260,6 +1459,17 @@ fi
 echo "Running media layout contract tests..."
 if ! python3 "$SCRIPT_DIR/test_media_layouts_contract.py"; then
     echo "Media layout contract tests failed."
+    exit 1
+fi
+
+# Contract: what turns an on-screen keyboard key's span into pixels. The
+# layouts themselves are data and are checked by tst_osk_layouts.qml; this is
+# the conversion, which the data cannot see - a second shape table, a key gap
+# that is not the row's gap, or a key that fills the row and so decides where
+# every key after it goes.
+echo "Running on-screen keyboard key contract tests..."
+if ! python3 "$SCRIPT_DIR/test_osk_key_contract.py"; then
+    echo "On-screen keyboard key contract tests failed."
     exit 1
 fi
 

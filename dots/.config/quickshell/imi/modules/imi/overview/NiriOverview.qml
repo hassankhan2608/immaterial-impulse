@@ -225,8 +225,9 @@ Item {
         id: scrollAnim
         target: flickable
         property: "contentY"
-        duration: Appearance.animation.elementMoveExit.duration
-        easing.type: Appearance.animation.elementMove.type
+        duration: Appearance.animation.scroll.duration
+        easing.type: Appearance.animation.scroll.type
+        easing.bezierCurve: Appearance.animation.scroll.bezierCurve
     }
 
     Item {
@@ -374,10 +375,10 @@ Item {
                         border.width: Appearance.borderWidth.emphasis
                         border.color: Appearance.colors.colSecondary
                         z: 10
-                        Behavior on x { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
-                        Behavior on y { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
-                        Behavior on width { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
-                        Behavior on height { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        Behavior on x { animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this) }
+                        Behavior on y { animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this) }
+                        Behavior on width { animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this) }
+                        Behavior on height { animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this) }
                     }
 
                     // Highlight drop target
@@ -411,22 +412,22 @@ Item {
                             z: 1
 
                             opacity: isBeingDragged ? 0.15 : 1.0
-                            Behavior on opacity { NumberAnimation { duration: Appearance.animation.elementMoveFaster.duration } }
+                            Behavior on opacity { animation: Appearance.animation.elementMoveFaster.numberAnimation.createObject(this) }
                             Behavior on x {
                                 enabled: !isBeingDragged
-                                NumberAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                             }
                             Behavior on y {
                                 enabled: !isBeingDragged
-                                NumberAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                             }
                             Behavior on width {
                                 enabled: !isBeingDragged
-                                NumberAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                             }
                             Behavior on height {
                                 enabled: !isBeingDragged
-                                NumberAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                             }
 
                             OverviewWindow {
@@ -448,7 +449,7 @@ Item {
                                 bottomRightRadius: Appearance.rounding.normal
 
                                 Behavior on opacity {
-                                    NumberAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                                    animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                                 }
                             }
 

@@ -177,6 +177,13 @@ hl.layer_rule({ match = { namespace = "quickshell:lockWindowPusher" }, no_anim =
 hl.layer_rule({ match = { namespace = "quickshell:notificationPopup" }, animation = "fade"})
 hl.layer_rule({ match = { namespace = "quickshell:overlay" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:overlay" }, ignore_alpha = 1})
+-- The overview owns its own entrance and exit in QML (Overview.qml: the
+-- card unfurls from its top edge on one scalar, and the window outlives
+-- the open flag by exactly that exit animation). A compositor map
+-- animation on top of it would animate the whole screen-sized surface
+-- underneath the card that is already animating, so the layerrule stays
+-- off. Removing this line does not give the overview an animation - it
+-- gives it two, one of them the desktop lurching.
 hl.layer_rule({ match = { namespace = "quickshell:overview" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:osk" }, animation = "slide bottom"})
 hl.layer_rule({ match = { namespace = "quickshell:polkit" }, no_anim = true})
@@ -228,6 +235,13 @@ hl.layer_rule({ match = { namespace = "quickshell:cheatsheet" }, blur = false})
 -- instead, leaving the gaps between them unblurred. See WindowBlurRegion in
 -- NotificationPopup.qml.
 hl.layer_rule({ match = { namespace = "quickshell:notificationPopup" }, blur = false})
+-- The on-screen keyboard and the wallpaper selector were the last two panels
+-- still frosting their own shadow: both draw a StyledRectangularShadow inside
+-- an elevation margin, and the catch-all blur above takes every pixel over
+-- ignore_alpha (0.05), which a shadow clears easily. See WindowBlurRegion in
+-- OnScreenKeyboard.qml / WallpaperSelector.qml.
+hl.layer_rule({ match = { namespace = "quickshell:osk" }, blur = false})
+hl.layer_rule({ match = { namespace = "quickshell:wallpaperSelector" }, blur = false})
 -- The popups those surfaces open (the tray menu, the dock's context menu, the
 -- drag-apps sheet, every tooltip) draw shadows too, and blur_popups above
 -- frosts them the same way. The fix above does not reach them: an

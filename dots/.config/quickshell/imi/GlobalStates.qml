@@ -155,6 +155,29 @@ Singleton {
         animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
     }
 
+    // The drawer's REVEAL, in screen coordinates, keyed by screen name and
+    // published by each chrome surface. The two halves of the drawer's drag
+    // live on different layer surfaces - the panel and its rectangle are on
+    // `quickshell:editMode`, the widget being carried back into it and the
+    // pointer deciding where the drop lands are on the background surface -
+    // and a layer surface cannot read another window's items. So the rect is
+    // published rather than derived a second time on the desktop's side, the
+    // shape `clockDepthViewports` above already uses; the entry is removed
+    // when a chrome surface goes, so the map's contents are always "the
+    // screens whose drawer exists".
+    property var editDrawerReveals: ({})
+    // The screen whose drawer a dragged desktop widget is currently over, ""
+    // for none - what the drawer paints its own row-press tint from. It has to
+    // come from here for the same reason: the widget being carried passes
+    // UNDER the chrome surface, so it cannot say on its own behalf that the
+    // release will remove rather than move.
+    property string editDrawerDropScreen: ""
+    // ...and the drop itself, announced for the chrome side to answer. A
+    // signal rather than a property pair, because dropping the same widget on
+    // the drawer twice is two gestures and a property that did not change
+    // announces nothing.
+    signal editWidgetDroppedOnDrawer(string pluginId)
+
     // The per-widget context menu - Edit Mode's right-click on a widget
     // (spec §4.1: Remove / Pin / Size). Session state like the mode itself,
     // and shaped like the desktop menu's quad: which screen, where on it, and
@@ -227,8 +250,15 @@ Singleton {
             root.editUndoStack = EditMode.undoPush(root.editUndoStack, entries[0]);
             return;
         }
+        // BACKWARDS. A batch of one gesture's commits is a sequence, and
+        // reversing a sequence means walking it from the end: three arrow-key
+        // steps on one widget push "back to 36", "back to 48", "back to 60",
+        // and replaying those in order leaves it at 60 - the last entry wins
+        // and the undo appears to move the widget forward. The group drag that
+        // introduced batches never showed it, because its entries are one per
+        // widget and independent, so any order looks right.
         root.editUndoStack = EditMode.undoPush(root.editUndoStack, () => {
-            for (const entry of entries) entry();
+            for (let index = entries.length - 1; index >= 0; index--) entries[index]();
         });
     }
     function editUndoPush(entry) {
@@ -274,6 +304,25 @@ Singleton {
             // is the popup already holding the card when the mode opens, whose
             // card would otherwise sit over the bar being edited.
             root.activeBarPopup = null;
+            // ...and the same argument, one layer up. Both sidebars are
+            // `WlrLayer.Top` and the mode's chrome is `Overlay`, so an open
+            // right sidebar is painted over by the widget drawer that shares
+            // its edge - reported as the drawer drawing through the sidebar.
+            // Neither sidebar is EDITABLE in the mode: its surfaces have no
+            // drawer section, no remove badge, no reorder the mode drives, and
+            // no key in lint_edit_mode_scope.py's allowlist. So it is a panel
+            // covering the thing being edited, and the answer is the one the
+            // bar popup above already gets.
+            //
+            // Not a layer change, on either side: dropping the chrome under
+            // the sidebar leaves the drawer half unusable while it is open,
+            // and the mode already spends its one layer trick on
+            // `EditModeChromeSurface.underneath` - which exists because
+            // REMOVING the chrome popped it out of existence, and is aimed at
+            // a special workspace covering the whole desktop rather than at a
+            // panel on one edge of it.
+            root.sidebarLeftOpen = false;
+            root.sidebarRightOpen = false;
         }
         // The open flag does not outlive the mode: a drawer left latched open
         // would greet the NEXT entry mid-slide, with the desktop already
@@ -294,11 +343,32 @@ Singleton {
             // gesture is still in flight.
             root.editBarDragActive = false;
             root.editLockDragActive = false;
+            // The drop hint is the mode's too - a drag cut short by Done never
+            // reaches the widget's own release, and a latched screen name
+            // would light the next entry's drawer for a gesture nobody made.
+            root.editDrawerDropScreen = "";
         }
     }
     onClockDepthSelectOpenChanged: if (root.clockDepthSelectOpen) root.editMode = false
 
+    // ...and closing them on entry is only half of it: the corners, the bar's
+    // buttons and the IPC handlers can all open a sidebar again while the mode
+    // is on. The refusal lives on the flag rather than at those call sites for
+    // the reason `StyledPopup.claimSlot` gives for refusing there - it is the
+    // one gate every path already shares, and a rule spelled at six call sites
+    // is a rule the seventh does not carry.
+    onSidebarLeftOpenChanged: {
+        if (root.sidebarLeftOpen && root.editMode)
+            root.sidebarLeftOpen = false;
+    }
+
     onSidebarRightOpenChanged: {
+        // Before the notification sweep, not after: a refused open must not
+        // count as the user having read what it would have shown them.
+        if (root.sidebarRightOpen && root.editMode) {
+            root.sidebarRightOpen = false;
+            return;
+        }
         if (GlobalStates.sidebarRightOpen) {
             Notifications.timeoutAll();
             Notifications.markAllRead();

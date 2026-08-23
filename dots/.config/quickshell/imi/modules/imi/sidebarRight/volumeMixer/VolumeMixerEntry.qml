@@ -60,14 +60,10 @@ Item {
                 opacity: root.node?.audio.muted ? 0.4 : 1.0
 
                 Behavior on opacity {
-                    NumberAnimation {
-                        duration: Appearance.animation.elementMoveFaster.duration
-                    }
+                    animation: Appearance.animation.elementMoveFaster.numberAnimation.createObject(this)
                 }
                 Behavior on desaturation {
-                    NumberAnimation {
-                        duration: Appearance.animation.elementMoveFaster.duration
-                    }
+                    animation: Appearance.animation.elementMoveFaster.numberAnimation.createObject(this)
                 }
             }
 
@@ -84,11 +80,15 @@ Item {
             Layout.fillWidth: true
             spacing: -Appearance.spacing.space50
 
-            StyledText {
+            // The half that identifies the stream is the media name, and it is
+            // the half on the far side of the separator - so elision here
+            // reliably removes exactly the part the user is looking for. Two
+            // browser tabs are one row apiece reading "Firefox • ..." with
+            // nothing after it.
+            MarqueeText {
                 Layout.fillWidth: true
                 font.pixelSize: Appearance.font.pixelSize.small
                 color: Appearance.colors.colSubtext
-                elide: Text.ElideRight
                 text: {
                     // application.name -> description -> name
                     const app = Audio.appNodeDisplayName(root.node);

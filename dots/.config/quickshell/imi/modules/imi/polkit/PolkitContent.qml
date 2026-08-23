@@ -49,9 +49,12 @@ Item {
             show = true
         }
 
+        // 24, not 26: M3's dialog hero icon is 24dp, and
+        // docs/M3_GUIDELINES.md's dimension rule puts a size on the 4dp grid
+        // even where there is no token for it.
         MaterialSymbol {
             Layout.alignment: Qt.AlignHCenter
-            iconSize: 26
+            iconSize: 24
             text: "security"
             color: Appearance.colors.colSecondary
         }
@@ -63,19 +66,38 @@ Item {
             text: Translation.tr("Authentication")
         }
 
+        // Centred, because the dialog has a hero icon: M3 centres the headline
+        // and the supporting text together when one is present, and a centred
+        // icon over a centred headline over a left-ragged paragraph reads as a
+        // layout that changed its mind half way down.
         WindowDialogParagraph {
             Layout.fillWidth: true
-            horizontalAlignment: Text.AlignLeft
+            horizontalAlignment: Text.AlignHCenter
             text: PolkitService.cleanMessage
         }
 
-        MaterialTextField {
+        // The shell's own masked field, the one the lock screen's password box
+        // is. The two password prompts in this shell are one interaction and
+        // must be one control: this was a bare `ToolbarTextField` with an
+        // `echoMode`, so it drew flat system bullets where the lock screen
+        // draws a Material shape per character, each animating in as it is
+        // typed. `PasswordField` owns that masking, and both surfaces take it.
+        //
+        // The fill is `colLayer4` because the dialog's body is `WindowDialog`'s
+        // `m3surfaceContainerHigh`, i.e. layer 3 - a field nested in it is the
+        // tier above, and `colLayer4` is that tier already composited over
+        // layer 3. `colLayer1`, the widget's own default, is a tier BELOW the
+        // card it would be sitting on and reads as a hole in it.
+        PasswordField {
             id: inputField
             Layout.fillWidth: true
+            Layout.fillHeight: false
             focus: true
             enabled: PolkitService.interactionAvailable
             placeholderText: PolkitService.cleanPrompt
-            echoMode: root.usePasswordChars ? TextInput.Password : TextInput.Normal
+            masked: root.usePasswordChars
+            colBackground: Appearance.colors.colLayer4
+            colText: Appearance.colors.colOnLayer4
             onAccepted: root.submit();
 
             Keys.onPressed: event => { // Esc to close
@@ -86,17 +108,33 @@ Item {
         }
 
         WindowDialogButtonRow {
-            Layout.bottomMargin: Appearance.spacing.space150 // I honestly don't know why this is necessary
             Item {
                 Layout.fillWidth: true
             }
             DialogButton {
+                id: cancelButton
                 buttonText: Translation.tr("Cancel")
                 onClicked: PolkitService.cancel();
             }
+            // FILLED, on the primary role, for the reason
+            // `EditModeChromeContent`'s `doneButton` records: rendered flat
+            // beside a second flat button there is nothing to say which of the
+            // two the dialog is asking for. Cancel stays flat - a dialog with
+            // two filled buttons has the same problem from the other side.
+            //
+            // No disabled branch on the container: `RippleButton.buttonColor`
+            // already transparentizes the fill while `enabled` is false, so
+            // while a submitted response is in flight the button drops back to
+            // a dimmed label rather than sitting there as a bright primary
+            // container that does nothing.
             DialogButton {
+                id: confirmButton
                 enabled: PolkitService.interactionAvailable
                 buttonText: Translation.tr("OK")
+                colBackground: Appearance.colors.colPrimary
+                colBackgroundHover: Appearance.colors.colPrimaryHover
+                colRipple: Appearance.colors.colPrimaryActive
+                colEnabled: Appearance.colors.colOnPrimary
                 onClicked: root.submit();
             }
         }

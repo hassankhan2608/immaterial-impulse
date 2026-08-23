@@ -10,6 +10,18 @@ import Quickshell.Services.Pipewire
 ColumnLayout {
     id: root
     required property bool isSink
+    // The lists below run to the edge of whatever pads this block, and it is a
+    // grandchild of that padding rather than a child of it - so the number is
+    // handed in rather than read off a parent.
+    //
+    // NOT `required`, and the default is the answer for every surface that is
+    // not a dialog card: the overlay volume mixer builds this inside its own
+    // padded Item, where there is no card edge to reach and the question does
+    // not arise. Declared required, that call site could not answer it and the
+    // component failed to build there - a break the suite never saw, because
+    // it constructs this through the dialog and the overlay's own window is
+    // what surfaced it.
+    property real contentPadding: 0
     readonly property list<var> appPwNodes: isSink ? Audio.outputAppNodes : Audio.inputAppNodes
     readonly property list<var> devices: isSink ? Audio.outputDevices : Audio.inputDevices
     readonly property bool hasApps: appPwNodes.length > 0
@@ -66,8 +78,8 @@ ColumnLayout {
         Layout.fillWidth: true
         Layout.topMargin: -Appearance.spacing.space300
         Layout.bottomMargin: -Appearance.spacing.space200
-        Layout.leftMargin: -Appearance.rounding.large
-        Layout.rightMargin: -Appearance.rounding.large
+        Layout.leftMargin: -root.contentPadding
+        Layout.rightMargin: -root.contentPadding
         topMargin: Appearance.spacing.space150
         bottomMargin: Appearance.spacing.space150
         leftMargin: Appearance.spacing.space250

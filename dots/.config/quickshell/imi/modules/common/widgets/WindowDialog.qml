@@ -13,6 +13,22 @@ Rectangle {
     property real backgroundHeight: dialogBackground.implicitHeight
     property real backgroundWidth: 350
     property real backgroundAnimationMovementDistance: 60
+
+    // The card holds its content in ONE padding, and the two things that have
+    // to agree about it - the margin the content column takes, and the height
+    // the card derives from the column - both come off this property.
+    //
+    // They used to be two separate spellings of `dialogBackground.radius`, so
+    // the padding was 23px because the corner is 23px round rather than
+    // because anyone chose 23 as a spacing value: restyling the corner
+    // restyled the padding, and changing either spelling alone left the card a
+    // different height from its content.
+    //
+    // M3's basic dialog pads its content 24dp. This is one step ABOVE that, on
+    // purpose and at the maintainer's request - 24 is a single pixel off the
+    // 23 it replaces and would not read as anything at all. Do not "correct"
+    // it back to `space300`.
+    property real contentPadding: Appearance.spacing.space400
     
     signal dismiss()
     Keys.onPressed: (event) => {
@@ -42,6 +58,16 @@ Rectangle {
         onPressed: root.dismiss()
     }
 
+    // Every other floating body in this shell casts one - StyledPopup, the
+    // toolbars, the tray menu, the notification cards - and the dialog card was
+    // the one surface that sat on a scrim with nothing under it, so its edge
+    // was a tonal step against the scrim and nothing else. Declared BEFORE the
+    // card so it draws under it, and anchored to the card so it follows the
+    // open animation's height rather than needing a gate of its own.
+    StyledRectangularShadow {
+        target: dialogBackground
+    }
+
     Rectangle {
         id: dialogBackground
         anchors.horizontalCenter: parent.horizontalCenter
@@ -51,7 +77,7 @@ Rectangle {
         property real targetY: root.height / 2 - root.backgroundHeight / 2
         y: root.show ? targetY : (targetY - root.backgroundAnimationMovementDistance)
         implicitWidth: root.backgroundWidth
-        implicitHeight: contentColumn.implicitHeight + dialogBackground.radius * 2
+        implicitHeight: contentColumn.implicitHeight + root.contentPadding * 2
         Behavior on implicitHeight {
             NumberAnimation {
                 id: dialogBackgroundHeightAnimation
@@ -76,9 +102,15 @@ Rectangle {
 
         ColumnLayout {
             id: contentColumn
+            // Published for the children that BLEED. A separator, a list or a
+            // progress bar that runs to the card's edge cancels exactly this
+            // padding, and every one of those call sites spelled it
+            // `-Appearance.rounding.large` for the same reason the padding
+            // itself did.
+            readonly property real contentPadding: root.contentPadding
             anchors {
                 fill: parent
-                margins: dialogBackground.radius
+                margins: root.contentPadding
             }
             spacing: Appearance.spacing.space200
             opacity: root.show ? 1 : 0

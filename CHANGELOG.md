@@ -13,6 +13,251 @@ own repo; the installer pins which revision it builds.
 ## [Unreleased]
 
 ### Added
+- **You can put a widget away by dragging it back into Edit Mode's drawer.**
+  Dragging a widget out of the drawer has always placed it on the desktop; the
+  other direction did nothing. Now letting a widget go over the open drawer
+  takes it off the desktop, and the drawer lights up while you are over it so
+  you can see the drop will remove rather than move. Ctrl+Z brings the widget
+  back exactly where it was, not at some default spot — the drag never writes a
+  new position on its way out. Which section the drawer happens to be showing
+  makes no difference; the panel is the target, not the list on it.
+- **You can choose which widgets the lock screen shows.** "Show desktop widgets
+  while locked" was all or nothing: every widget on your desktop, or none of
+  them. Edit Mode's Lock section now lists your widgets under that switch, and
+  clicking one adds or removes it from the lock screen alone — including a
+  widget you want *only* while locked, which no arrangement of one setting
+  could express. It works the way the arrangement already does: the lock screen
+  follows your desktop's widgets until the first pick, and the drawer says
+  which of the two it is doing and offers "Click to show the desktop's widgets
+  again" to go back. Nothing changes until you pick something, and the switch
+  above still decides whether the lock screen shows desktop widgets at all.
+  Your presets carry the choice.
+
+### Changed
+- **The session screen and the settings pages now arrive in sequence instead of
+  all at once.** The session screen's nine action buttons and a settings page's
+  sections each fade in one after the other, a few hundredths of a second
+  apart, so a panel reads as content arriving rather than as a picture
+  switching on. The wave is bounded, so a long list never cascades for seconds,
+  and anything hidden in the group is skipped rather than leaving a gap in the
+  middle of it. Both the animation speed slider and the reduce-motion switch
+  reach it: with reduced motion the whole thing is gone and everything is
+  simply there. The right sidebar was given the same treatment during this
+  cycle and has had it taken back off — it opens in one frame with its own
+  slide, the way it always did.
+
+### Fixed
+- **The overview opens and closes with an animation instead of snapping.** It
+  appeared and vanished on a single frame at both ends. Now the search bar and
+  the workspace grid grow out of the top of the screen together and settle with
+  a small bounce, and on the way out they shrink and fade — the window stays on
+  screen for as long as that takes rather than being torn down the instant you
+  press the key, which is what left nothing to animate before. The frosted
+  backdrop behind the cards no longer appears before them or lingers after them.
+- **The password box in the authentication prompt draws the same animated
+  characters as the lock screen.** Both are the shell asking for your password,
+  and only one of them showed the shell's own masked characters — a Material
+  shape per letter, each popping in as you type it. The prompt showed plain
+  system dots. It is one control now, so the two cannot drift apart again, and
+  clicking the box focuses it whichever prompt you are looking at.
+- **A dialog's buttons line up with the dialog.** Every dialog's action row sat
+  eight pixels outside the box the rest of its content lines up with, which
+  also left less space under the buttons than above the title. It shows most in
+  the authentication prompt, where the OK button hung past the right edge of
+  the password box directly above it.
+- **Every dialog gives its content more room.** A dialog card held its content
+  23 pixels in from its edge, and 23 was not a spacing choice — it is the size
+  of the card's rounded corner, which the padding had been quietly spelled as.
+  It is 32 now, on the same 8-pixel rhythm everything else in the shell lays out
+  on. All ten dialogs still fit what is in them, and lists and rules that run to
+  the card's edge still reach it.
+- **Cancel now looks like a button.** In the authentication prompt, OK carries a
+  filled accent container and Cancel was a bare word beside it, which reads as a
+  link rather than as the other half of a choice. It has an outline now, and the
+  two sit a little further apart so both edges are legible. The rule is general:
+  wherever a dialog's confirming action is filled, its dismissing action is
+  outlined — a dialog whose buttons are all flat is unchanged.
+- **Edit Mode's widget drawer stops drawing over an open sidebar.** The drawer
+  shares the right sidebar's edge and sits on a layer above it, so a sidebar
+  left open was painted through by the panel. Entering Edit Mode now closes both
+  sidebars, and they stay closed for as long as the mode is on — the same thing
+  the mode already does to a bar popup that would sit over the bar it is
+  editing. Nothing about the sidebars changes outside the mode, and they are not
+  reopened for you when you press Done.
+- **The wallpaper selector now leaves the way it should.** Closing it ran the
+  *entrance* curve: the panel lurched a third of the way off screen in a single
+  frame and then coasted, instead of easing away. Measured off a 60fps capture —
+  659px of travel whose first frame took 32% of it, matching the entrance curve's
+  predicted 32.6% against the exit curve's 1.3%.
+- **...and it now arrives instead of appearing.** It had no entrance animation at
+  all — measured, 99.6% of its 690px of travel landed in a single frame, so the
+  panel popped in and slid out. It also vanished with a seventh of its exit still
+  undrawn. It now grows and fades into place under the bar and dissolves the same
+  way, which is what the rest of the shell's menus already do; nothing travels the
+  height of the screen any more.
+- **Edit Mode's widget drawer stops freezing half way through its own
+  animation.** The panel reached its full width 226ms into a 500ms transition
+  and then stood perfectly still for the remaining 271ms, while the desktop it
+  pushes aside carried on drifting and settling. One gesture, two halves, two
+  different motions. The panel now rides the same curve the desktop does, all
+  the way to the settle.
+- **Edit Mode's widget drawer fills instead of arriving fully furnished.** The
+  panel and everything in it slid in as one solid block, so a 500ms reveal had
+  nothing happening in it after the first fifth. The panel now arrives as a
+  surface and its contents follow it in — the heading, the section chips, the
+  hint and the list, each landing where it will sit rather than sliding there.
+  Closing is unchanged on purpose: the contents stay drawn and ride the panel
+  off in one piece.
+- **Forty animations across the shell stopped moving at a constant speed.** Each
+  one asked for a motion tier's timing and never picked up its curve, so it slid
+  linearly instead of easing — the util buttons in the bar, the settings fields
+  and navigation chevron, the session screen's boot entries, the volume mixer's
+  mute fade, the desktop widgets' resize and toggle handles, the media transport
+  and Discord voice ring, the display arrangement's monitor tiles, and every
+  window and highlight in the niri-style overview. They now move the way their
+  neighbours already did.
+- **The niri-style overview scrolls smoothly to the workspace you switch to.**
+  Its scroll had asked for one tier's timing and another's curve, which resolved
+  to no curve at all.
+- **Edit Mode no longer draws on top of a scratchpad.** Summoning a special
+  workspace while editing left the toolbar, the tab bar and the widget drawer
+  painted over the window, with the desktop they belong to hidden underneath
+  it — so the mode was not merely untidy, it was unusable: the widgets being
+  arranged could not be seen at all. The chrome now drops to the desktop's own
+  layer while a special workspace is up, so the compositor blurs and dims both
+  halves of the mode together instead.
+- **Settings no longer claims grim is missing when it is installed.** The
+  "Only while fullscreen" row under Wallpaper & Colors read a capability flag
+  that was only ever probed when the ambient RGB loop was switched on — so with
+  that loop off, the row reported grim as not found on a machine where it was
+  installed and working.
+- **Edit Mode's widget drawer no longer sits flush on the screen edge.** The
+  panel's rounded right corner met the edge of the display with nothing between
+  them, while its other side had a full margin against the desktop. It now
+  keeps a gap on the side it opens against.
+- **Edit Mode's desktop preview got bigger.** The toolbar and the tab bar each
+  reserved a full margin of air between themselves and the edge of the screen,
+  on the axis that decides how far the desktop shrinks — so both came straight
+  off the preview. The outer gap is now half the inner one, and on a 5120x1440
+  display the preview grows from 4380x1232 to 4466x1256.
+- **"Edit layout" no longer looks like a button you can press.** It was an icon
+  beside a label sitting flat in a row of controls, which is exactly how the
+  toolbar draws an unfilled button. It now reads as the title it is, with a
+  rule separating it from the buttons.
+- **The password prompt looks like the rest of the shell.** The dialog that
+  asks for your password when something needs administrator rights was drawn
+  out of Qt's own parts rather than the shell's: a boxed, outlined text field
+  with the word "Password" floating in a notch cut through its border — a shape
+  that appears nowhere else here — and two flat text buttons, so nothing said
+  which of Cancel and OK the dialog was actually asking for. The field is now
+  the same filled pill the lock screen asks for your password in, OK carries a
+  filled accent, and the dialog card casts a shadow like every other floating
+  panel in the shell. Every dialog gets that shadow, not just this one.
+- **Running the test suite no longer opens windows over what you are doing.**
+  Five test harnesses started the shell on the session's own display, so a
+  suite run flashed real windows across the screen — and a harness that draws a
+  panel there covers it outright. They bring their own headless compositor now,
+  like the rest already did.
+
+## [0.29.0] — 2026-08-20
+
+The on-screen keyboard becomes a real keyboard: every key a full-size board
+has, the key you are holding lit up on it, and Caps and Num showing their
+locks. Its shadow — and the wallpaper selector's — stops being frosted by
+the compositor.
+
+### Added
+- **The on-screen keyboard is a full-size keyboard.** It was missing Caps
+  Lock (the home row started at `a`), both Super keys, Scroll Lock, Pause, the
+  navigation cluster (Insert, Home, PgUp, Delete, End, PgDn), the arrow keys
+  and the entire numpad. All of them are there now, in all three layouts — a
+  keyboard layout decides what the letters spell, not whether the board has a
+  numpad — and laid out on real keycap proportions, so the numpad's columns
+  line up and the arrows form the usual inverted T. The numpad's `+` and
+  `Enter` are one key two rows tall, as they are on the board beside you. The
+  German layout's Enter stays two keys, because an ISO Enter is an L rather
+  than a taller rectangle.
+- **The on-screen keyboard lights up the key you press on the real one.** Hold a
+  key and its twin on the OSK is highlighted for as long as you hold it, which
+  is what makes the keyboard usable as a key tester or a screencast overlay
+  rather than only as an input. It reads the keyboard device directly — the
+  compositor never tells a window about keys aimed elsewhere — so three things
+  are worth knowing: it runs **only while the on-screen keyboard is open** and
+  is stopped the moment it closes, it knows key *positions* and not letters
+  (nothing it handles can say what you typed), and it writes nothing down.
+  Caps Lock and Num Lock show their **lock** rather than the press, so they
+  stay lit while the lock is on.
+  Turn it off with `osk.showPhysicalKeys`. On a machine whose user cannot read
+  input devices it simply does not highlight, and asks for nothing.
+
+### Fixed
+- **The on-screen keyboard and the wallpaper selector stop frosting their own
+  shadow.** Both were still asking the compositor to blur their whole surface,
+  which takes the drop shadow with it — so what should have been a shadow under
+  the panel read as a smudge. They now blur only the panel body, the way the
+  bars, the dock, the OSDs, the overview, the cheatsheet and the notification
+  popups already do.
+- **The Menu key does something.** It was sending an evdev code that nothing
+  in a normal session listens to, in every layout, silently.
+- **A key's label no longer paints over the keys either side of it.** Longer
+  labels shrink to fit their cap instead.
+
+## [0.28.0] — 2026-08-20
+
+Desktop widgets can be moved from the keyboard, and an undo that reversed a
+multi-step gesture stopped landing halfway through it.
+
+### Added
+- **Arrow keys move a selected desktop widget.** Click a widget — or drag a
+  marquee over several — and each arrow press moves the selection one grid
+  cell, on the plain desktop as well as in Edit Mode. A widget sitting off the
+  grid is put back on it by the first press, so a widget placed by keyboard
+  ends up on the same lattice as one placed by mouse, and a group travels as a
+  block, stopping when its first member reaches the screen edge rather than
+  spreading out against it. Holding a key down is one undo, not fifty.
+
+### Fixed
+- **Undoing a multi-step gesture no longer stops halfway.** A gesture that
+  moved one widget several times in a row undid to the second-to-last step
+  instead of the start, because the steps were replayed in the order they were
+  made. Group drags were never affected.
+
+## [0.27.0] — 2026-08-19
+
+The shell's motion catches up with itself: bar widgets travel instead of
+teleporting, popups unroll out of what they are about to show, and the speed
+slider finally reaches every animation there is. Clock depth learns live
+wallpapers, the weather popup grows an hourly forecast, and your phone stops
+being ten seconds behind.
+
+### Added
+- **Bar widgets slide to their new place instead of teleporting.** When the
+  system tray empties, a plugin's bar widget is switched off, or the layouts
+  are reordered, every widget after it used to be drawn somewhere else on the
+  very next frame. They now travel there. Both bars, every corner style, and
+  the widget that returns still appears where it belongs rather than flying in
+  from wherever it last sat; a reorder drag in Edit Mode is left alone while it
+  is in flight.
+- **Long names scroll instead of being cut off.** Four places showed a name you
+  did not write and cannot look up anywhere else on the row, and cut it off with
+  an ellipsis: the dock's window preview — where the title is the only thing
+  telling several windows of one application apart — and the Wi-Fi network,
+  Bluetooth device and audio stream lists in the right sidebar. Those now scroll
+  to the end of the text and back whenever it does not fit, so a router that
+  names its two bands and its guest network off one prefix stops producing rows
+  that read identically. Everything the shell wrote itself — status lines,
+  buttons, settings captions — still elides. The scroll stops the moment the
+  panel it is on closes, its speed follows the motion speed setting, and with
+  reduce motion on it holds each end for three seconds and switches between them
+  rather than scrolling, so the whole name is still readable.
+- **The bar's weather popup has an hourly forecast.** Five three-hourly slots
+  under the current conditions, each a bar grown from the axis with its
+  temperature above it and its own condition glyph and hour below — night-aware
+  on the hour it describes rather than on the time you opened the popup, and
+  labelled with the weekday where the window crosses midnight. It follows the
+  clock format you already set, and it costs no extra request: both providers
+  were already returning this data in responses the shell fetches. A provider
+  that answers with nothing hourly leaves no empty row behind.
 - **Clock depth works on a live Wallpaper Engine scene.** The depth picker
   segments the still the shell already photographs of the active project, keyed
   on the project rather than on the still (which is re-grabbed every session),
@@ -22,7 +267,39 @@ own repo; the installer pins which revision it builds.
   never lands on a live scene, and a project's mask never lands on the static
   fallback the desktop shows when the renderer gives up.
 
+### Changed
+- **Your phone's battery and connection state update the moment they change.**
+  The phone panel and its quick toggle used to redraw on a timer, so a phone
+  going out of range, coming back, or charging showed up in the shell up to ten
+  seconds late. With KDE Connect the shell now listens to the daemon instead of
+  asking it, and the change appears as it happens. Valent still updates on the
+  timer, unchanged: its signals could not be checked against a running Valent
+  daemon, and guessing at them would have been worse than the wait. If the
+  listener cannot stay up, the shell quietly goes back to asking on a timer
+  rather than showing nothing.
+- **Dragging a quick toggle moves it instead of redrawing the grid.** The tiles
+  the dragged one passes now slide into their new places when you drop it,
+  rather than the whole panel being rebuilt at the new order. Nothing about the
+  layout, the sizes or where a drop lands has changed — and a row now fills the
+  panel's width evenly instead of giving the leftover to whichever toggle
+  happened to be first in it.
+- **A bar popup unrolls out of its own first card.** Hovering a bar widget used
+  to grow a card from a dot into its full height; it now appears already the
+  height of the first thing inside it — the weather hero, the calendar's month
+  header — and unfurls to reveal the rest, with the fade riding the same
+  motion. The top edge never moves, so what you came to read is legible on the
+  frame the popup appears rather than once it settles. On a bottom or a side
+  bar it is the bar-adjacent edge that stays put, and it stays put exactly, on
+  every frame of the open and the close.
+
 ### Fixed
+- **Spinners and pulses stop when nothing can see them.** Seven animations
+  looped forever regardless of whether the thing they animate was on screen —
+  the bar's update spinner turned for the whole session whether or not it was
+  shown, and the world map's location ping ran on a settings page that spends
+  most of its life closed. Each one keeps the compositor repainting the whole
+  screen while it runs, which is what halved a fullscreen game's frame rate
+  once already.
 - **The motion speed slider and reduce motion now reach every animation.** Nine
   places read a motion tier's base duration instead of the scaled one, so they
   ignored both settings — the settings-page scroll settle and its rubber band,
@@ -37,6 +314,12 @@ own repo; the installer pins which revision it builds.
   boundary at that size, so the outline is about a pixel wide instead of a
   five-pixel ramp. Same cost per run; re-run a wallpaper's models in the depth
   picker to get the new mask.
+- **Windows now follow the auto-hidden bar instead of jumping.** The bar has
+  always slid in and out over ~200ms while the space it reserves changed in one
+  step, so everything behind it snapped a whole bar height at one end of the
+  gesture. The reserved space is animated on the same curve as the bar now, on
+  both the horizontal and the vertical bar. Nothing about where the bar sits at
+  rest changes.
 
 ## [0.26.0] — 2026-08-19
 

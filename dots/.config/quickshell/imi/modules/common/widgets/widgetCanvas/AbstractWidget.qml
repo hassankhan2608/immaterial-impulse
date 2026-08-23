@@ -146,9 +146,22 @@ MouseArea {
                 && Math.abs(deltaX) < drag.threshold && Math.abs(deltaY) < drag.threshold)
             return
         root.dragActive = true
+        root.dragPointerParentX = p.x
+        root.dragPointerParentY = p.y
         dragProxy.x = root.dragStartX + deltaX
         dragProxy.y = root.dragStartY + deltaY
     }
+    // Where the pointer is, in the parent's frame, recorded before the two
+    // lines above move the widget under it.
+    //
+    // A subclass reading `mouse.x`/`mouse.y` from its own `onPositionChanged`
+    // is one handler too late: a base class's handlers run first, so by then
+    // this one has already moved the item those coordinates are relative to,
+    // and mapping them back out overshoots the pointer by exactly that event's
+    // delta. Measured through Edit Mode's drop-on-the-drawer hint - it never
+    // lit up, while the RELEASE, whose handler moves nothing, was exact.
+    property real dragPointerParentX: 0
+    property real dragPointerParentY: 0
     // dragActive drops BEFORE the canvas is told: widgetDragEnded resets the
     // group clamp bounds, and doing that under a still-active drag Binding
     // re-evaluates it without the clamp - the leader jumps past the edge for
@@ -223,6 +236,22 @@ MouseArea {
     // object from out there. Nothing warns.
     property real snapOffsetX: 0
     property real snapOffsetY: 0
+    // Move by a delta without a gesture: the keyboard's step.
+    //
+    // It writes targetX/targetY - the coordinate the widget is PLACED at -
+    // rather than `x`, which is the drawn one and carries a position Behavior.
+    // Assigning the drawn coordinate and committing in the same turn reads the
+    // value the animation has not reached yet and stores it back, so the widget
+    // returns to where it started and the keys look inert (measured: three
+    // presses, x unchanged at 36). A translation is the same delta in both
+    // frames, so nothing has to be converted here - the parallax cancellation
+    // is a constant across the step.
+    function moveTargetBy(dx, dy) {
+        root.targetX = root.clampX(root.targetX + dx)
+        root.targetY = root.clampY(root.targetY + dy)
+        root.restoreXYBinding()
+    }
+
     function snapX(value) { return root.snap(value - root.snapOffsetX) + root.snapOffsetX }
     function snapY(value) { return root.snap(value - root.snapOffsetY) + root.snapOffsetY }
 

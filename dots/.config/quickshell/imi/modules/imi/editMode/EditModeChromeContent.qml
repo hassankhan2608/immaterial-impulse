@@ -72,7 +72,16 @@ Item {
     signal barWidgetAddRequested(string widgetId, string bucket)
     signal dockAppToggleRequested(string appId)
     signal lockIslandToggleRequested(string key)
+    signal lockWidgetToggleRequested(string pluginId)
     signal lockLayoutResetRequested()
+    signal lockPresenceResetRequested()
+
+    // Where in its band each chrome piece sits, as a fraction of the band's
+    // slack - `edit_mode.js`'s `chromeBandFraction`, which is 0.5 exactly when
+    // the two margins that bound the band are equal. Defaults to 0.5 so an
+    // unconnected instance centres its chrome the way it did before the band
+    // was told apart into an outer gap and an inner one.
+    property real bandFraction: 0.5
 
     // The screen this chrome belongs to, for the drawer's fork question.
     property string screenName: ""
@@ -92,26 +101,51 @@ Item {
         // point today and stop being one the moment stage 5's drawer
         // translates the desktop, and the chrome belongs to the desktop.
         x: root.card.x + (root.card.width - width) / 2
-        // Centred in the band between the usable area's top edge and the card's
+        // Placed in the band between the usable area's top edge and the card's
         // - the screen's top edge only while nothing is on that edge. The
-        // viewport reserves `margin + toolbarHeight + margin` there, so this
-        // lands with a margin above and below it and cannot reach the bar.
-        y: root.area.y + (root.card.y - root.area.y - height) / 2
+        // viewport reserves `edgeMargin + toolbarHeight + margin` there, and
+        // `bandFraction` is the split, so this lands with the tight gap above
+        // it and the generous one below and cannot reach the bar. A fraction
+        // rather than `area.y + edgeMargin`, because the band has no height at
+        // progress 0 and the piece has to be parked off the edge there.
+        y: root.area.y + (root.card.y - root.area.y - height) * root.bandFraction
         spacing: Appearance.spacing.space150
 
-        MaterialSymbol {
+        // The toolbar's title, and every part of this is about it NOT reading
+        // as a control.
+        //
+        // It used to be a `MaterialSymbol { text: "edit" }` followed by a
+        // `StyledText`, which is not merely similar to a button - it is the
+        // exact construction of `IconAndTextToolbarButton`, an icon and a label
+        // in a row. Sat flat between two real buttons it was an unfilled
+        // icon-and-text button with nothing behind it, so the one question the
+        // toolbar has to answer, "which of these can I press", had a wrong
+        // answer sitting first in the row. `doneButton` below records the
+        // mirror of this failure: Done rendered flat read as a second label.
+        //
+        // So the icon goes (an icon beside a word is the button shape here),
+        // the type drops to the label tier in the variant role, and a rule
+        // stands between the title and the controls - which is the structural
+        // half, and the half a restyle cannot undo by accident.
+        StyledText {
             Layout.alignment: Qt.AlignVCenter
-            Layout.leftMargin: Appearance.spacing.space75
-            text: "edit"
-            iconSize: 22
+            Layout.leftMargin: Appearance.spacing.space100
+            text: Translation.tr("Edit layout")
+            font.pixelSize: Appearance.font.pixelSize.small
+            font.weight: Font.Medium
             color: Appearance.colors.colOnSurfaceVariant
         }
 
-        StyledText {
+        Rectangle {
             Layout.alignment: Qt.AlignVCenter
-            text: Translation.tr("Edit layout")
-            font.pixelSize: Appearance.font.pixelSize.normal
-            color: Appearance.colors.colOnSurface
+            Layout.leftMargin: Appearance.spacing.space50
+            Layout.rightMargin: Appearance.spacing.space50
+            implicitWidth: 1
+            // Short of the toolbar's own height on purpose: a rule that ran the
+            // full height would read as the toolbar being split into two
+            // containers rather than as one container with a title on it.
+            implicitHeight: Math.round(Appearance.sizes.toolbarHeight * 0.4)
+            color: Appearance.colors.colOutlineVariant
         }
 
         // The drawer's toggle, drawn as state rather than as a verb: the
@@ -175,9 +209,13 @@ Item {
         // area's. The card is centred in that area, so the two bands are the
         // same height and the two pieces travel by the same amount - which is
         // true with a bar on one edge and a dock on the other, and was true
-        // before only because neither was accounted for.
+        // before only because neither was accounted for. Mirrored means
+        // `1 - bandFraction` as well as the other edge: measured from the
+        // card, the bottom band spends the generous margin first and the tight
+        // edge gap last.
         y: root.card.y + root.card.height
-            + (root.area.y + root.area.height - root.card.y - root.card.height - height) / 2
+            + (root.area.y + root.area.height - root.card.y - root.card.height - height)
+                * (1 - root.bandFraction)
 
         // The mode's two tabs (spec §1.4): the tab is a FILTER on what the
         // viewport draws, so the bar's index and `GlobalStates.editTab` must
@@ -233,7 +271,9 @@ Item {
         onBarAddRequested: (widgetId, bucket) => root.barWidgetAddRequested(widgetId, bucket)
         onDockToggleRequested: (appId) => root.dockAppToggleRequested(appId)
         onLockToggleRequested: (key) => root.lockIslandToggleRequested(key)
+        onLockWidgetToggleRequested: (pluginId) => root.lockWidgetToggleRequested(pluginId)
         onLockLayoutResetRequested: root.lockLayoutResetRequested()
+        onLockPresenceResetRequested: root.lockPresenceResetRequested()
         screenName: root.screenName
     }
 }

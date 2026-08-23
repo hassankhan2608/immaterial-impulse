@@ -89,21 +89,24 @@ TestCase {
     }
 
     readonly property var wide: EditMode.viewportGeometry({
-        screenWidth: 5120, screenHeight: 1440, drawerWidth: 400, margin: 24
+        screenWidth: 5120, screenHeight: 1440, drawerWidth: 400, margin: 24,
+        edgeMargin: 12
     })
     // A 16:10 laptop panel, where 400px of drawer is a quarter of the width and
     // the derivation is the tighter of the two constraints.
     readonly property var narrow: EditMode.viewportGeometry({
-        screenWidth: 1600, screenHeight: 1000, drawerWidth: 400, margin: 24
+        screenWidth: 1600, screenHeight: 1000, drawerWidth: 400, margin: 24,
+        edgeMargin: 12
     })
 
     function test_the_desktop_shrinks_by_exactly_what_the_drawer_will_need() {
-        // 1600 - 400 - 2*24 = 1152 of room, so the scale is the ratio of that
-        // to the screen and the drawn width is that room exactly. Asserted as
-        // the width rather than only as the scale: the scale is the mechanism,
-        // the width is the promise.
-        fuzzyCompare(narrow.width, 1152, 0.5);
-        fuzzyCompare(narrow.scale, 1152 / 1600, 1e-9);
+        // 1600 - 400 - 2*24 - 12 = 1140 of room - the drawer, a margin either
+        // side of the desktop, and the drawer's own gap from the screen edge -
+        // so the scale is the ratio of that to the screen and the drawn width
+        // is that room exactly. Asserted as the width rather than only as the
+        // scale: the scale is the mechanism, the width is the promise.
+        fuzzyCompare(narrow.width, 1140, 0.5);
+        fuzzyCompare(narrow.scale, 1140 / 1600, 1e-9);
     }
 
     function test_a_wide_screen_shrinks_by_the_ceiling_instead() {
@@ -166,7 +169,8 @@ TestCase {
         // drawer's WIDTH alone - so a caller that started passing 0 while the
         // drawer was shut would have to change this number.
         const closed = EditMode.viewportGeometry({
-            screenWidth: 1600, screenHeight: 1000, drawerWidth: 400, margin: 24
+            screenWidth: 1600, screenHeight: 1000, drawerWidth: 400, margin: 24,
+            edgeMargin: 12
         });
         compare(closed.width, narrow.width);
         compare(closed.x, narrow.x);
@@ -283,6 +287,7 @@ TestCase {
 
     readonly property var framed: EditMode.viewportGeometry({
         screenWidth: 5120, screenHeight: 1440, drawerWidth: 400, margin: 24,
+        edgeMargin: 12,
         chromeThickness: chrome, insetTop: barInset, insetBottom: dockInset
     })
 
@@ -305,20 +310,50 @@ TestCase {
     }
 
     function test_the_desktop_leaves_the_chrome_a_band_of_its_own() {
-        // The band above and below the card is a margin, the toolbar, and
-        // another margin - so the toolbar centred in it has a whole margin at
-        // each end BY CONSTRUCTION rather than by whatever the ceiling left
-        // over. That is the correction: the old band was 100.8px at this screen
-        // size and the toolbar is 56 centred in it, which starts 22.4px into a
-        // screen whose bar occupies the first 68.
+        // The band above and below the card is an edge margin, the toolbar, and
+        // a full margin - so the toolbar has a known gap at each end BY
+        // CONSTRUCTION rather than by whatever the ceiling left over. The two
+        // ends are deliberately UNEQUAL: the outer one is the chrome's gap from
+        // the screen edge and the inner one is its gap from the desktop, and on
+        // this axis every pixel of the outer one comes off the desktop.
         const bandTop = framed.y - barInset;
         const bandBottom = (1440 - dockInset) - (framed.y + framed.height);
-        fuzzyCompare(bandTop, 24 + chrome + 24, 0.5);
-        fuzzyCompare(bandBottom, 24 + chrome + 24, 0.5);
+        fuzzyCompare(bandTop, 12 + chrome + 24, 0.5);
+        fuzzyCompare(bandBottom, 12 + chrome + 24, 0.5);
+        // The two bands stay the same height as each other, which is what makes
+        // the toolbar and the tab bar travel by the same amount.
+        fuzzyCompare(bandTop, bandBottom, 1e-6);
         // ...and the vertical constraint is what decides the scale here, which
-        // is what makes the two numbers above a promise rather than a
-        // coincidence of the ceiling.
+        // is what makes the numbers above a promise rather than a coincidence
+        // of the ceiling.
         verify(framed.scale < EditMode.MAX_SCALE);
+    }
+
+    function test_the_chrome_sits_at_a_fraction_of_its_band_not_a_pixel_offset() {
+        // The split the two chrome pieces are placed on. It has to be a
+        // fraction: the band has no height at all at progress 0 - it grows out
+        // of nothing as the desktop shrinks away from it - so a piece placed at
+        // a fixed `edgeMargin` from the area's edge would already be sitting on
+        // screen before the mode started.
+        const fraction = EditMode.chromeBandFraction(framed);
+        fuzzyCompare(fraction, 12 / (12 + 24), 1e-9);
+        // At rest the fraction has to land the piece exactly `edgeMargin` in,
+        // or the reservation and the placement are two fields that disagree.
+        const slack = (framed.y - barInset) - chrome;
+        fuzzyCompare(slack * fraction, 12, 0.5);
+        fuzzyCompare(slack * (1 - fraction), 24, 0.5);
+        // At progress 0 the band is gone and the piece is off the edge, which
+        // is what makes the entrance need no Behavior of its own.
+        verify(0 - chrome * fraction < 0);
+        // Equal margins are still dead centre, which is what an unconnected
+        // instance and every caller passing no `edgeMargin` gets.
+        fuzzyCompare(EditMode.chromeBandFraction({ margin: 24 }), 0.5, 1e-9);
+        fuzzyCompare(EditMode.chromeBandFraction({ margin: 24, edgeMargin: 24 }),
+            0.5, 1e-9);
+        // ...and so are the degenerate inputs, rather than a divide by zero.
+        fuzzyCompare(EditMode.chromeBandFraction(null), 0.5, 1e-9);
+        fuzzyCompare(EditMode.chromeBandFraction({ margin: 0, edgeMargin: 0 }),
+            0.5, 1e-9);
     }
 
     function test_the_desktop_rests_dead_centre_of_the_usable_area() {
@@ -343,9 +378,9 @@ TestCase {
         // horizontal constraint binds, or the ceiling answers for both.
         const sided = EditMode.viewportGeometry({
             screenWidth: 1600, screenHeight: 1000, drawerWidth: 400, margin: 24,
-            insetLeft: 60, insetRight: 40
+            edgeMargin: 12, insetLeft: 60, insetRight: 40
         });
-        fuzzyCompare(sided.width, 1600 - 60 - 40 - 400 - 48, 0.5);
+        fuzzyCompare(sided.width, 1600 - 60 - 40 - 400 - 48 - 12, 0.5);
         verify(sided.x >= 60);
         verify(sided.x + sided.width <= 1600 - 40);
     }
@@ -356,7 +391,8 @@ TestCase {
         // neither. If this ever needs updating, the mode's geometry changed for
         // a screen with no bar and no dock, which nothing here intends.
         const plain = EditMode.viewportGeometry({
-            screenWidth: 5120, screenHeight: 1440, drawerWidth: 400, margin: 24
+            screenWidth: 5120, screenHeight: 1440, drawerWidth: 400, margin: 24,
+            edgeMargin: 12
         });
         compare(plain.scale, wide.scale);
         compare(plain.x, wide.x);
@@ -375,15 +411,17 @@ TestCase {
     // exactly what the centred desktop's free side cannot absorb.
 
     function test_the_drawer_travel_is_what_the_free_side_cannot_absorb() {
-        // narrow: width 1152, so each side has (1600 - 1152) / 2 = 224 free.
-        // The drawer's slot is 400 + 24 = 424 against the area's right edge,
-        // so the desktop travels the 200 the free side is short.
-        fuzzyCompare(EditMode.drawerTravel(narrow), 424 - 224, 1e-9);
+        // narrow: width 1140, so each side has (1600 - 1140) / 2 = 230 free.
+        // The drawer's slot is 12 + 400 + 24 = 436 against the area's right
+        // edge - its own gap from that edge, itself, and the gap between it and
+        // the desktop - so the desktop travels the 206 the free side is short.
+        fuzzyCompare(EditMode.drawerTravel(narrow), 436 - 230, 1e-9);
         // A drawer small enough to fit in the ceiling's own leftover needs no
         // travel at all: at 5120 the ceiling leaves 358.4 a side, and a 120px
-        // drawer plus its margin is 144.
+        // drawer plus both its gaps is 156.
         const small = EditMode.viewportGeometry({
-            screenWidth: 5120, screenHeight: 1440, drawerWidth: 120, margin: 24
+            screenWidth: 5120, screenHeight: 1440, drawerWidth: 120, margin: 24,
+            edgeMargin: 12
         });
         compare(EditMode.drawerTravel(small), 0);
         // A geometry from a screen that reported no size travels nowhere.
@@ -428,6 +466,11 @@ TestCase {
         const drawer = EditMode.drawerRect(narrow, 1, 1, 1600, 1000);
         fuzzyCompare(drawer.x - (card.x + card.width), 24, 1e-6);
         verify(card.x - narrow.area.x >= 24 - 1e-6);
+        // ...and the drawer keeps its OWN gap on the side it opens against,
+        // which is the third term and the one that was missing: the panel used
+        // to sit flush, so its rounded right corner met the screen's edge.
+        fuzzyCompare((narrow.area.x + narrow.area.width) - (drawer.x + drawer.width),
+            12, 1e-6);
     }
 
     function test_the_drawer_rect_slides_in_from_the_areas_right_edge() {
@@ -436,15 +479,16 @@ TestCase {
         // is on that edge.
         const closed = EditMode.drawerRect(narrow, 1, 0, 1600, 1000);
         compare(closed.width, 0);
-        compare(closed.x, narrow.area.x + narrow.area.width);
+        compare(closed.x, narrow.area.x + narrow.area.width - 12);
 
-        // Open, it is the drawer's declared width flush against the usable
+        // Open, it is the drawer's declared width a gap in from the usable
         // area's right edge, spanning exactly the card's own band.
         const card = EditMode.cardRect(narrow, 1, 1600, 1000,
             EditMode.drawerTravel(narrow));
         const open = EditMode.drawerRect(narrow, 1, 1, 1600, 1000);
         compare(open.width, 400);
-        fuzzyCompare(open.x + open.width, narrow.area.x + narrow.area.width, 1e-9);
+        fuzzyCompare(open.x + open.width,
+            narrow.area.x + narrow.area.width - 12, 1e-9);
         fuzzyCompare(open.y, card.y, 1e-9);
         fuzzyCompare(open.height, card.height, 1e-9);
 
@@ -458,6 +502,85 @@ TestCase {
         // drawer whatever its own scalar says, which is what makes "the chrome
         // stands down completely on exit" hold for the drawer too.
         compare(EditMode.drawerRect(narrow, 0, 1, 1600, 1000).width, 0);
+    }
+
+    function test_the_reveal_overshoots_with_the_desktop_and_floors_at_zero() {
+        // `elementMove`'s curve leaves the unit box - it peaks at 1.0139 and
+        // spends the last 271ms of its 500ms coming back - and the desktop's
+        // own `drawerTravel * editDrawerProgress` is unclamped, so a reveal
+        // clamped at 1 froze at full width while the desktop was still moving.
+        // The panel takes the overshoot too, which is what puts the two halves
+        // of one gesture back on one curve.
+        const open = EditMode.drawerRect(narrow, 1, 1, 1600, 1000);
+        const peak = EditMode.drawerRect(narrow, 1, 1.0139, 1600, 1000);
+        fuzzyCompare(peak.width, 400 * 1.0139, 1e-9);
+        // ...and it overshoots on the side it opens FROM: the right edge is
+        // pinned, so the extra width is spent travelling further left.
+        verify(peak.x < open.x);
+        fuzzyCompare(open.x - peak.x, peak.width - open.width, 1e-9);
+
+        // The floor is the half that stays. The same curve run backwards
+        // undershoots to -0.0139, and a negative width is not a settle - it is
+        // a rect the surface's input mask cannot build.
+        compare(EditMode.drawerRect(narrow, 1, -0.0139, 1600, 1000).width, 0);
+        compare(EditMode.drawerRect(narrow, 1, -5, 1600, 1000).width, 0);
+
+        // ...and the mode's own progress still multiplies in, so an overshooting
+        // drawer scalar cannot outlive the mode's exit.
+        compare(EditMode.drawerRect(narrow, 0, 1.0139, 1600, 1000).width, 0);
+        fuzzyCompare(EditMode.drawerRect(narrow, 0.5, 1.0139, 1600, 1000).width,
+            400 * 1.0139 * 0.5, 1e-9);
+    }
+
+    function test_a_point_is_on_the_reveal_or_it_is_not() {
+        // The predicate both directions of the drawer's drag ask: a row let go
+        // back over the drawer is abandoned, a widget carried in off the
+        // desktop and let go there is removed. Driven against the real rect so
+        // the check cannot agree with an expression of its own.
+        const open = EditMode.drawerRect(narrow, 1, 1, 1600, 1000);
+        verify(EditMode.pointInDrawerReveal(open,
+            open.x + open.width / 2, open.y + open.height / 2));
+        // A point to the LEFT of the panel is the desktop, which is the whole
+        // of the distinction this exists to draw.
+        verify(!EditMode.pointInDrawerReveal(open, open.x - 1,
+            open.y + open.height / 2));
+        verify(!EditMode.pointInDrawerReveal(open, open.x + open.width + 1,
+            open.y + open.height / 2));
+        // The bands above and below the card: the chrome's own toolbar and tab
+        // bar live there, and the panel does not.
+        verify(!EditMode.pointInDrawerReveal(open,
+            open.x + open.width / 2, open.y - 1));
+        verify(!EditMode.pointInDrawerReveal(open,
+            open.x + open.width / 2, open.y + open.height + 1));
+        // The edges themselves are on it - the same closed interval the input
+        // mask's rect covers.
+        verify(EditMode.pointInDrawerReveal(open, open.x, open.y));
+        verify(EditMode.pointInDrawerReveal(open,
+            open.x + open.width, open.y + open.height));
+    }
+
+    function test_a_closed_drawer_is_not_a_drop_target_at_all() {
+        // "The drawer is open" is not a second term anywhere: a closed drawer
+        // is a zero-width rect, and a widget released on the seam it collapsed
+        // to must be MOVED there rather than removed. A test that read only
+        // x/y would answer true for every point on that seam.
+        const closed = EditMode.drawerRect(narrow, 1, 0, 1600, 1000);
+        compare(closed.width, 0);
+        verify(!EditMode.pointInDrawerReveal(closed, closed.x, closed.y));
+        verify(!EditMode.pointInDrawerReveal(closed, closed.x,
+            closed.y + closed.height / 2));
+        // Mid-slide it is a target for exactly the strip it has revealed, and
+        // for nothing to the left of it.
+        const half = EditMode.drawerRect(narrow, 1, 0.5, 1600, 1000);
+        verify(EditMode.pointInDrawerReveal(half, half.x + 1,
+            half.y + half.height / 2));
+        verify(!EditMode.pointInDrawerReveal(half, half.x - 1,
+            half.y + half.height / 2));
+        // And a missing rect is not a drop target: the desktop's surface reads
+        // the reveal the chrome PUBLISHES, and there is none while the mode is
+        // off or on a screen whose chrome has not come up yet.
+        verify(!EditMode.pointInDrawerReveal(null, 10, 10));
+        verify(!EditMode.pointInDrawerReveal(undefined, 10, 10));
     }
 
     function test_a_screen_point_maps_back_into_the_canvas() {

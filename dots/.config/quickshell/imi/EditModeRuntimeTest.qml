@@ -59,7 +59,8 @@ ShellRoot {
         screenWidth: harness.screenWidth,
         screenHeight: harness.screenHeight,
         drawerWidth: Appearance.sizes.editModeDrawerWidth,
-        margin: Appearance.sizes.editModeMargin
+        margin: Appearance.sizes.editModeMargin,
+        edgeMargin: Appearance.sizes.editModeEdgeMargin
     })
     // The drawer's shift, from the REAL scalar: GlobalStates derives
     // editDrawerProgress from the mode and the open flag exactly as the shell
@@ -171,6 +172,12 @@ ShellRoot {
         }
     }
 
+    // The answer to a widget dropped back on the drawer. Built directly, which
+    // is the whole reason the write lives in a `QtObject` rather than on the
+    // chrome's `PanelWindow`: weston implements no wlr-layer-shell, so a write
+    // put on that surface would be a write no harness can reach.
+    EditModeDrawerDrop {}
+
     function placeWidgets() {
         PluginState.setPosition("edit-resize-probe", harness.testScreen,
                                 { x: 36, y: 36, placementStrategy: "free" });
@@ -202,6 +209,42 @@ ShellRoot {
         driver.mouseMove(canvas, point.x + dx / 2, point.y + dy / 2, 20, Qt.LeftButton);
         driver.mouseMove(canvas, point.x + dx, point.y + dy, 20, Qt.LeftButton);
         driver.mouseRelease(canvas, point.x + dx, point.y + dy, Qt.LeftButton);
+    }
+
+    // The drawer's reveal, in screen coordinates. On the shell this is the
+    // chrome surface's own rect, published across the window boundary; that
+    // surface is a `PanelWindow` this harness cannot build, so the harness
+    // stands in with the SAME module call rather than a rectangle of its own.
+    readonly property var drawerReveal: EditMode.drawerRect(harness.viewport,
+        GlobalStates.editMode ? 1 : 0, GlobalStates.editDrawerProgress,
+        harness.screenWidth, harness.screenHeight)
+
+    function publishReveal() {
+        const published = {};
+        published[harness.testScreen] = harness.drawerReveal;
+        GlobalStates.editDrawerReveals = published;
+    }
+
+    // The hint the drawer paints, sampled while the pointer is still down: it
+    // is cleared by the release, so a check taken after the gesture reads ""
+    // whether or not the drawer ever lit up.
+    property string hintDuringDrag: ""
+
+    // A drag whose RELEASE lands on the drawer's reveal. Driven to a screen
+    // point mapped back into canvas coordinates, because that is the frame
+    // every other gesture here is driven in and QtTest maps it through the
+    // mode's transform on the way to the window.
+    function dragOntoDrawer(widget) {
+        const reveal = harness.drawerReveal;
+        const target = canvas.mapFromItem(null,
+            reveal.x + reveal.width / 2, reveal.y + reveal.height / 2);
+        const x = widget.x + widget.width / 2;
+        const y = widget.y + widget.height / 2;
+        driver.mousePress(canvas, x, y, Qt.LeftButton);
+        driver.mouseMove(canvas, (x + target.x) / 2, (y + target.y) / 2, 20, Qt.LeftButton);
+        driver.mouseMove(canvas, target.x, target.y, 20, Qt.LeftButton);
+        harness.hintDuringDrag = GlobalStates.editDrawerDropScreen;
+        driver.mouseRelease(canvas, target.x, target.y, Qt.LeftButton);
     }
 
     function storedPosition(id) { return PluginState.position(id, harness.testScreen); }
@@ -449,6 +492,98 @@ ShellRoot {
                           Math.round(harness.storedPosition("edit-resize-probe").x) === 96);
             harness.check("...and the lattice goes down when the group's drag ends",
                           !canvas.showGrid && !canvas.gridVisible);
+            canvas.clearSelection();
+        },
+
+        // ---- arrow-key nudge: one lattice cell, the group rigid -----------
+        //
+        // The keys themselves are not driven here. A key event has no explicit
+        // target - TestCase sends it to the focused item of ITS OWN window -
+        // and the canvas takes its focus from the background LAYER surface,
+        // which weston does not implement. What a harness can hold is
+        // everything after the key: the step, the group's rigidity, the clamp
+        // at the wall, the store write and the undo grain. That the surface
+        // receives real compositor keys at all was measured once, in a nested
+        // Hyprland, for the undo that shares this handler (spec §11.4 probe 4).
+        () => { canvas.clearSelection(); harness.placeWidgets(); },
+        () => {
+            canvas.applySelection([movableWidget]);
+            harness.before = { x: movableWidget.x, y: movableWidget.y };
+            canvas.nudgeSelection(1, 0);
+        },
+        () => {
+            harness.check("an arrow moves the widget one lattice cell",
+                          movableWidget.x - harness.before.x === canvas.gridSize);
+            harness.check("...and the move is in the store, not only on screen",
+                          Math.round(harness.storedPosition("edit-move-probe").x)
+                              === Math.round(harness.before.x + canvas.gridSize));
+        },
+        () => {
+            // Off the lattice on purpose: the edge snap parks a widget one gap
+            // off a neighbour's edge, and a stored position can predate a
+            // lattice change. The first press is the one that gets it back on.
+            movableWidget.x = harness.before.x + 5;
+            movableWidget.commitPosition();
+            harness.before = { x: movableWidget.x, y: movableWidget.y };
+            canvas.nudgeSelection(1, 0);
+        },
+        () => harness.check("a press from off the lattice lands back on it",
+                            movableWidget.x % canvas.gridSize === 0),
+        () => {
+            // Both widgets, and the follower is the one against the wall.
+            canvas.clearSelection();
+            harness.placeWidgets();
+            canvas.applySelection([movableWidget, resizableWidget]);
+            resizableWidget.moveTargetBy(
+                resizableWidget.clampX(Infinity) - resizableWidget.targetX, 0);
+            resizableWidget.commitPlacement(0, resizableWidget.targetY);
+            harness.before = {
+                leader: movableWidget.targetX, follower: resizableWidget.targetX
+            };
+            canvas.nudgeSelection(1, 0);
+        },
+        () => {
+            harness.check("a member already at the wall does not pass it",
+                          resizableWidget.targetX === harness.before.follower);
+            // The cluster is rigid: the one with room does not travel on
+            // alone, which is the answer a group drag gives at an edge and
+            // the reason the delta is shrunk once for every member rather
+            // than clamped per widget.
+            harness.check("...and the member with room stays with it",
+                          movableWidget.targetX === harness.before.leader);
+            canvas.clearSelection();
+        },
+        () => {
+            // One burst, one undo entry: a held arrow key delivers a press
+            // every ~30ms, and an entry each would fill a fifty-deep stack in
+            // under two seconds.
+            harness.placeWidgets();
+            GlobalStates.editUndoStack = [];
+            canvas.applySelection([movableWidget]);
+            harness.before = { x: movableWidget.targetX, y: movableWidget.targetY };
+            canvas.nudgeSelection(1, 0);
+            canvas.nudgeSelection(1, 0);
+            canvas.nudgeSelection(1, 0);
+            harness.check("three presses travel three cells",
+                          movableWidget.targetX - harness.before.x === canvas.gridSize * 3);
+            // Asserted in THIS step rather than the next: the batch closes on
+            // a 400ms timer (a key repeat has no release to hang it on) and
+            // the harness ticks at 700, so by the next step it is already
+            // closed and the check would be vacuous.
+            harness.check("...a burst mid-flight has not pushed its entry yet",
+                          GlobalStates.editUndoStack.length === 0);
+        },
+        () => {
+            harness.check("a settled burst is exactly one undo entry",
+                          GlobalStates.editUndoStack.length === 1);
+            GlobalStates.editUndo();
+        },
+        () => {
+            harness.check("undoing the burst returns the widget to where it started",
+                          Math.round(harness.storedPosition("edit-move-probe").x)
+                              === Math.round(harness.before.x));
+            harness.check("...all three cells at once, not one press at a time",
+                          GlobalStates.editUndoStack.length === 0);
             canvas.clearSelection();
         },
 
@@ -754,6 +889,118 @@ ShellRoot {
             GlobalStates.editMode = false;
         },
 
+        // ---- a widget dragged back INTO the drawer leaves the desktop ------
+        //
+        // The inverse of §8.3's drag out, and the half nothing static can
+        // answer: the decision is made on the background surface from a
+        // rectangle published by another window, and the release has to reach
+        // the removal INSTEAD of the commit that runs on every other release.
+        // Both directions are driven, because "the widget was removed" is also
+        // what a release handler that removed on every drop would report.
+        () => {
+            GlobalStates.editMode = true;
+            GlobalStates.editTab = EditMode.DESKTOP_TAB;
+            Config.options.plugins.enabled = ["edit-move-probe", "edit-resize-probe"];
+            harness.placeWidgets();
+            GlobalStates.editDrawerOpen = true;
+        },
+        () => {
+            harness.publishReveal();
+        },
+        () => {
+            harness.check("the drawer's reveal reaches the widget on the other surface",
+                          movableWidget.editDrawerReveal !== null
+                          && movableWidget.editDrawerReveal.width > 0);
+            harness.dragBy(movableWidget, 96, 0);
+        },
+        () => {
+            // The control. A drag ending on the DESKTOP still commits a move,
+            // so what the next steps score is the drop POINT and not the mode.
+            harness.check("a drag that ends on the desktop still commits a move",
+                          Config.options.plugins.enabled.length === 2
+                          && Math.round(harness.storedPosition("edit-move-probe").x) === 132);
+            harness.hintDuringDrag = "";
+            // Cleared HERE, after the control's own commit has pushed its
+            // entry: a removal that is one entry is only readable from a stack
+            // that was empty when the gesture began.
+            GlobalStates.editUndoStack = [];
+            harness.dragOntoDrawer(movableWidget);
+        },
+        () => {
+            harness.check("a drag that ends on the drawer takes the widget off the desktop",
+                          Config.options.plugins.enabled.indexOf("edit-move-probe") === -1
+                          && Config.options.plugins.enabled.indexOf("edit-resize-probe") !== -1);
+            // The store still says where the widget WAS. That is not a detail:
+            // it is the whole of how undo puts the widget back at the position
+            // it had rather than under the panel it was dropped on.
+            harness.check("...and commits no position on the way out",
+                          Math.round(harness.storedPosition("edit-move-probe").x) === 132
+                          && Math.round(harness.storedPosition("edit-move-probe").y) === 396);
+            harness.check("...as exactly one undo entry",
+                          GlobalStates.editUndoStack.length === 1);
+            // Sampled with the pointer still down, because the release clears
+            // it - a check taken after the gesture reads "" whether or not the
+            // drawer ever lit up.
+            harness.check("...and the drawer was told it was the drop target",
+                          harness.hintDuringDrag === harness.testScreen);
+            harness.check("...which the release clears again",
+                          GlobalStates.editDrawerDropScreen === "");
+        },
+        () => {
+            GlobalStates.editUndo();
+            harness.check("undo puts the widget back on the desktop",
+                          Config.options.plugins.enabled.indexOf("edit-move-probe") !== -1);
+            harness.check("...at the position it had, not at a default",
+                          Math.round(harness.storedPosition("edit-move-probe").x) === 132
+                          && Math.round(harness.storedPosition("edit-move-probe").y) === 396);
+        },
+        () => {
+            // A closed drawer is a zero-width rect, so the same gesture at the
+            // same screen point is a MOVE again. Without this the check above
+            // passes on a release handler that removes for the whole mode.
+            GlobalStates.editDrawerOpen = false;
+            harness.placeWidgets();
+        },
+        () => {
+            harness.publishReveal();
+            harness.hintDuringDrag = "";
+        },
+        () => harness.dragOntoDrawer(movableWidget),
+        () => {
+            harness.check("with the drawer closed the same drop moves the widget instead",
+                          Config.options.plugins.enabled.indexOf("edit-move-probe") !== -1
+                          && harness.hintDuringDrag === ""
+                          && Math.round(harness.storedPosition("edit-move-probe").x)
+                              > 36);
+            // ...and a widget the DESKTOP does not hold. A lock-only widget is
+            // on screen and draggable on the Lockscreen tab (and still a live
+            // MouseArea on the Desktop tab, at opacity 0), while the write
+            // declines an id that is not in `plugins.enabled`. With the hint
+            // asking a different question the drawer lit up, the release
+            // swallowed the commit on the strength of that, and the drop then
+            // did nothing at all: one gesture under a panel promising a
+            // removal, and no change anywhere.
+            GlobalStates.editDrawerOpen = true;
+            Config.options.plugins.enabled = ["edit-resize-probe"];
+            harness.placeWidgets();
+        },
+        () => {
+            harness.publishReveal();
+            harness.hintDuringDrag = "";
+        },
+        () => harness.dragOntoDrawer(movableWidget),
+        () => {
+            harness.check("a widget the desktop does not hold is not offered the removal",
+                          harness.hintDuringDrag === "");
+            harness.check("...so its drop commits the move instead of doing nothing",
+                          Math.round(harness.storedPosition("edit-move-probe").x) > 36);
+            Config.options.plugins.enabled = [];
+            GlobalStates.editMode = false;
+            // The next section starts from the placed positions, and the drag
+            // above deliberately left one of them at the screen's right edge.
+            harness.placeWidgets();
+        },
+
         // ---- the lock layout forks on the first Lockscreen-tab move ---------
         //
         // spec §4.3 as amended 2026-08-18: the lock screen's arrangement
@@ -770,7 +1017,13 @@ ShellRoot {
             // The lock has to SHOW the widgets for there to be a lock layout
             // to arrange - a widget the lock hides is at opacity 0 and takes
             // no drag, which is the product's own rule and not this test's.
+            // Both halves of "shows": the master gate, and the per-widget
+            // choice under it, which inherits the DESKTOP's enabled list - so
+            // the probes have to be on that list the way a real placed widget
+            // is. This harness builds its PluginWidgets by hand rather than
+            // through Background's Repeater, so nothing else puts them there.
             Config.options.lock.showWidgets = true;
+            Config.options.plugins.enabled = ["edit-move-probe", "edit-resize-probe"];
             GlobalStates.editMode = true;
         },
         () => {
@@ -879,6 +1132,63 @@ ShellRoot {
             harness.check("...and the desktop option is still 2x2",
                           PluginState.option("edit-resize-probe", "__gridSize", "") === "2x2");
             PluginState.resetLockLayout(harness.testScreen);
+        },
+
+        // ---- and PRESENCE forks the same way -------------------------------
+        //
+        // The store's arithmetic is tst_layout_surfaces and the drawer-to-
+        // surface wiring is the contract's; what only a real widget under the
+        // real transform can answer is whether the pick reaches the PIXELS -
+        // whether a widget picked off the lock actually stops being drawn
+        // there while it keeps being drawn on the desktop, and whether the
+        // mirror (a widget the desktop does not show, kept for the lock) is
+        // hidden on the desktop rather than merely uninstantiated. The pick
+        // itself goes through PluginState rather than the drawer, which lives
+        // on a layer surface this harness does not build.
+        () => {
+            harness.check("before any pick the lock shows what the desktop shows",
+                          !PluginState.lockPresenceForked()
+                          && movableWidget.visibleWhenLocked
+                          && resizableWidget.visibleWhenLocked);
+            GlobalStates.editTab = EditMode.LOCKSCREEN_TAB;
+        },
+        () => {
+            harness.check("...and an inherited widget is drawn on the Lockscreen tab",
+                          movableWidget.opacity === 1 && movableWidget.visible);
+            PluginState.setLockWidgetEnabled("edit-move-probe", false);
+        },
+        () => {
+            harness.check("the first pick forks the choice",
+                          PluginState.lockPresenceForked());
+            harness.check("...the picked widget leaves the lock screen",
+                          movableWidget.opacity === 0 && !movableWidget.visible);
+            harness.check("...and the other one stays, at the desktop's answer",
+                          resizableWidget.opacity === 1);
+            GlobalStates.editTab = EditMode.DESKTOP_TAB;
+        },
+        () => {
+            harness.check("...while the desktop goes on showing it",
+                          movableWidget.opacity === 1 && movableWidget.visible);
+            // The mirror, which one shared list cannot express: a widget the
+            // desktop does not show, kept for the lock screen alone.
+            Config.options.plugins.enabled = ["edit-move-probe"];
+        },
+        () => {
+            harness.check("a lock-only widget is hidden on the desktop",
+                          resizableWidget.opacity === 0 && !resizableWidget.visible);
+            GlobalStates.editTab = EditMode.LOCKSCREEN_TAB;
+        },
+        () => {
+            harness.check("...and drawn on the lock screen",
+                          resizableWidget.opacity === 1 && resizableWidget.visible);
+            PluginState.resetLockPresence();
+        },
+        () => {
+            harness.check("the re-link puts both widgets back on the desktop's answer",
+                          !PluginState.lockPresenceForked()
+                          && movableWidget.opacity === 1
+                          && resizableWidget.opacity === 0);
+            GlobalStates.editTab = EditMode.DESKTOP_TAB;
             GlobalStates.editMode = false;
         }
     ]

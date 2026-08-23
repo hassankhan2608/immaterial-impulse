@@ -57,6 +57,14 @@ ShellRoot {
                 Quickshell.shellPath("modules/common/plugins/PluginWidget.qml"),
                 Quickshell.shellPath("modules/common/widgets/AutostartApps.qml"),
                 Quickshell.shellPath("modules/common/widgets/WallpaperSubmenu.qml"),
+                // Every marquee call site is behind a surface that is unmapped
+                // when idle - the dock's window preview and three right-sidebar
+                // rows - which is deliberate (see MarqueeText.qml's gate) and
+                // means nothing else in this sweep compiles it.
+                Quickshell.shellPath("modules/common/widgets/MarqueeText.qml"),
+                Quickshell.shellPath("modules/imi/sidebarRight/wifiNetworks/WifiNetworkItem.qml"),
+                Quickshell.shellPath("modules/imi/sidebarRight/bluetoothDevices/BluetoothDeviceItem.qml"),
+                Quickshell.shellPath("modules/imi/sidebarRight/volumeMixer/VolumeMixerEntry.qml"),
                 // The clock depth picker sits behind an inactive Loader in the
                 // wallpaper selector, so it compiles for the first time when
                 // someone clicks its toolbar button - which on a shell where
@@ -112,6 +120,12 @@ ShellRoot {
                 // defect a47462fcc ("fix(verticalBar): render plugin bar
                 // widgets instead of an empty stub") came out of.
                 Quickshell.shellPath("modules/imi/bar/BarContent.qml"),
+                // The bar's own window. A live load finds anything wrong with
+                // it because it is built on every startup - but only a live
+                // load did, and the two bars' windows are now one edit apart
+                // (they share BarExclusiveZoneReserver), so the horizontal one
+                // belongs in the sweep beside the vertical one.
+                Quickshell.shellPath("modules/imi/bar/Bar.qml"),
                 Quickshell.shellPath("modules/imi/verticalBar/VerticalBar.qml"),
                 Quickshell.shellPath("modules/imi/verticalBar/VerticalBarContent.qml"),
                 Quickshell.shellPath("modules/common/plugins/bundled/docker/DockerPopup.qml"),

@@ -89,13 +89,13 @@ RowLayout {
             border.color: textArea.activeFocus ? root.colBorderFocused : root.colBorder
 
             Behavior on color {
-                ColorAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
             }
             Behavior on border.color {
-                ColorAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
             }
             Behavior on border.width {
-                NumberAnimation { duration: Appearance.animation.elementMoveFast.duration }
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
             }
 
             HoverHandler {

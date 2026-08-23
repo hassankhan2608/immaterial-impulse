@@ -16,9 +16,20 @@ import qs.modules.common
  * both daemons double-pairs phones anyway). No daemon at all is a clean
  * degraded state: backend "none", no devices, UI hides.
  *
- * Updates are bounded polling like Tailscale.qml, not `busctl monitor`
- * streaming - a persistent streaming Process needs backoff and a retry
- * ceiling (see CONTRIBUTING.md) that this feature does not justify yet.
+ * Updates are signal-driven where the signal set has been verified against a
+ * live daemon, and polled where it has not. KDE Connect gets a
+ * `busctl --json=short monitor` subscribed to a match rule; Valent keeps the
+ * poll, because no Valent daemon was reachable to check its signals against
+ * and a stream that only works for one backend is a regression in the other.
+ * The poll stays on either way as the reconcile that notices a daemon
+ * disappearing - slower while the monitor is live.
+ *
+ * The monitor is a streaming Process, so it is started imperatively and
+ * never by a `running` binding: busctl exits in milliseconds on a rule the
+ * bus rejects, and a binding would answer that with a tight respawn loop
+ * (CONTRIBUTING.md). Restarts go through monitorExitPlan - capped exponential
+ * backoff, a per-daemon-appearance retry ceiling, and a healthy-run reset -
+ * after which polling is the whole update path again.
  *
  * Device ids and object paths get spliced into D-Bus object paths, so both
  * are validated first (validDeviceId / validValentObjectPath); anything that
@@ -162,6 +173,80 @@ Singleton {
     function validDeviceId(id: var): bool {
         return typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id);
     }
+
+    // The monitor's subscription, as one D-Bus match rule. Narrowing it at
+    // the BUS is the only filter there is: `busctl monitor` reports a signal's
+    // sender as the unique name it arrived on (":1.55", captured live), so
+    // nothing downstream can tell the daemon's signals from anyone else's
+    // emitted on the same path. An empty rule means "this backend has no
+    // verified signal set" and leaves it on the poll - Valent's case.
+    function monitorMatchRule(backend: string): string {
+        if (backend === "kdeconnect")
+            return "type='signal',sender='org.kde.kdeconnect.daemon',path_namespace='/modules/kdeconnect'";
+        return "";
+    }
+
+    // One `busctl --json=short monitor` line as { path, iface, member, args },
+    // or null. A monitor sees method calls, returns and errors on the same
+    // stream; only a signal carries a change.
+    function parseMonitorLine(line: string): var {
+        const trimmed = (line ?? "").trim();
+        if (trimmed.length === 0) return null;
+        let doc;
+        try {
+            doc = JSON.parse(trimmed);
+        } catch (e) {
+            return null;
+        }
+        if (!doc || typeof doc !== "object" || doc.type !== "signal") return null;
+        return {
+            path: doc.path ?? "",
+            iface: doc.interface ?? "",
+            member: doc.member ?? "",
+            args: doc.payload?.data ?? []
+        };
+    }
+
+    // Which of the daemon's signals can move the device model. An allowlist
+    // rather than "anything under org.kde.kdeconnect": the SMS plugin's
+    // conversation signals share the device path, and re-reading every device
+    // per incoming message is a chain of busctl spawns for a change this
+    // service does not model. Members verified by introspecting a live
+    // daemon's /modules/kdeconnect and device paths.
+    function signalChangesDevices(signal: var): bool {
+        if (!signal) return false;
+        // PropertiesChanged names the interface it is about in its first arg.
+        if (signal.iface === "org.freedesktop.DBus.Properties")
+            return signal.member === "PropertiesChanged"
+                && String((signal.args ?? [])[0] ?? "").startsWith("org.kde.kdeconnect");
+        const members = {
+            "org.kde.kdeconnect.daemon": ["deviceAdded", "deviceRemoved", "deviceListChanged",
+                "deviceVisibilityChanged", "pairingRequestsChanged"],
+            "org.kde.kdeconnect.device": ["reachableChanged", "pairStateChanged", "nameChanged",
+                "typeChanged", "pluginsChanged"],
+            "org.kde.kdeconnect.device.battery": ["refreshed"]
+        }[signal.iface];
+        return Array.isArray(members) && members.includes(signal.member);
+    }
+
+    // Delay before the Nth consecutive fast monitor exit is retried: 1s, 2s,
+    // 4s, 8s, 16s, capped at 30s.
+    function monitorBackoffDelay(attempt: int): int {
+        return Math.min(30000, 1000 * Math.pow(2, Math.max(1, attempt) - 1));
+    }
+
+    // What a monitor exit means, as one decision: the attempt count it leaves
+    // behind, whether to restart, and after how long. A run that lasted at
+    // least `healthyMs` was working, so it clears the count rather than
+    // counting as the next rung of a respawn loop - without that, one daemon
+    // restart in a day-long session spends the ceiling and the shell never
+    // streams again.
+    function monitorExitPlan(attempts: int, ranForMs: int, wanted: bool, healthyMs: int, ceiling: int): var {
+        const settled = ranForMs >= healthyMs ? 0 : attempts;
+        if (!wanted || settled >= ceiling)
+            return { attempts: settled, retry: false, delay: 0 };
+        return { attempts: settled + 1, retry: true, delay: root.monitorBackoffDelay(settled + 1) };
+    }
     // END phone-connect parser logic
 
     function applyBackend(newBackend: string): void {
@@ -181,6 +266,12 @@ Singleton {
 
     function busctlCall(dest: string, path: string, iface: string, member: string, extra: var): var {
         return ["busctl", "--user", "--json=short", "--timeout=5", "call", dest, path, iface, member, ...extra];
+    }
+
+    // The match rule is one argv element. It carries quotes the D-Bus match
+    // grammar requires, which is exactly why it never goes near a shell.
+    function busctlMonitor(matchRule: string): var {
+        return ["busctl", "--user", "--json=short", "monitor", `--match=${matchRule}`];
     }
 
     function refresh(): void {
@@ -237,6 +328,117 @@ Singleton {
                 });
             }
         });
+    }
+
+    // ---- signal streaming ----
+
+    property string monitorState: "idle" // idle | running | backoff | failed
+    property int monitorAttempts: 0
+    property real monitorStartedAt: 0
+
+    readonly property int monitorAttemptCeiling: 5
+    // A monitor that held the bus this long was doing its job; anything
+    // shorter counts toward the ceiling (see monitorExitPlan).
+    readonly property int monitorHealthyMs: 30000
+
+    readonly property bool monitorLive: root.monitorState === "running"
+
+    // A function rather than a binding, and that is not a style choice:
+    // onBackendChanged is the caller, and nothing orders a change handler
+    // against the re-evaluation of a binding derived from the same property,
+    // so a binding here answers with the PREVIOUS backend. Written as one it
+    // read false on the transition that arms the stream and the monitor
+    // never started - measured against the runtime harness, silently, with
+    // the model still updating from the poll.
+    function monitorWanted(): bool {
+        return root.enableService && root.installed
+            && root.monitorState !== "failed" && root.monitorMatchRule(root.backend) !== "";
+    }
+
+    function startMonitor(): void {
+        if (monitorProc.running || !root.monitorWanted()) return;
+        monitorRestart.stop();
+        root.monitorStartedAt = Date.now();
+        root.monitorState = "running";
+        monitorProc.exec(root.busctlMonitor(root.monitorMatchRule(root.backend)));
+    }
+
+    function stopMonitor(): void {
+        monitorRestart.stop();
+        root.monitorAttempts = 0;
+        root.monitorState = "idle";
+        monitorProc.running = false;
+    }
+
+    function handleMonitorLine(line: string): void {
+        if (!root.signalChangesDevices(root.parseMonitorLine(line))) return;
+        // Signals arrive in bursts - one device going out of range emitted
+        // seven within a millisecond of each other on a live daemon - and
+        // every re-read is a chain of busctl spawns, so they coalesce.
+        signalSettle.restart();
+    }
+
+    Timer {
+        id: signalSettle
+        interval: 120
+        onTriggered: {
+            // refresh() declines while a sweep is in flight; re-arm rather
+            // than drop the change that asked for it.
+            if (busProc.running || root.callQueue.length > 0) {
+                signalSettle.restart();
+                return;
+            }
+            root.refresh();
+        }
+    }
+
+    Timer {
+        id: monitorRestart
+        onTriggered: root.startMonitor()
+    }
+
+    Process {
+        id: monitorProc
+        // process-lifecycle: restart-safe -- capped exponential backoff; no running binding.
+        environment: ({
+            LANG: "C",
+            LC_ALL: "C"
+        })
+        stdout: SplitParser {
+            onRead: data => root.handleMonitorLine(data)
+        }
+        // busctl says nothing here on a rule the bus accepts, and exits
+        // non-zero with one line on a rule it does not; either way the exit
+        // is what the plan reads.
+        stderr: SplitParser {}
+        onExited: (exitCode, exitStatus) => {
+            const plan = root.monitorExitPlan(root.monitorAttempts, Date.now() - root.monitorStartedAt,
+                root.monitorWanted(), root.monitorHealthyMs, root.monitorAttemptCeiling);
+            root.monitorAttempts = plan.attempts;
+            if (!plan.retry) {
+                if (root.monitorWanted()) {
+                    root.monitorState = "failed";
+                    console.warn(`[PhoneConnect] busctl monitor gave up after ${root.monitorAttemptCeiling} restarts; falling back to polling`);
+                } else {
+                    root.monitorState = "idle";
+                }
+                return;
+            }
+            root.monitorState = "backoff";
+            monitorRestart.interval = plan.delay;
+            monitorRestart.restart();
+        }
+    }
+
+    onBackendChanged: {
+        // The ceiling is per daemon appearance, not per session: a daemon
+        // that has just come back is a new opportunity rather than the sixth
+        // rung of the loop that gave up on the old one. Nothing can reach
+        // this faster than a ListNames sweep, so it cannot itself become one.
+        root.monitorAttempts = 0;
+        if (root.monitorState === "failed") root.monitorState = "idle";
+        if (root.monitorMatchRule(root.backend) === "") root.stopMonitor();
+        else root.startMonitor();
     }
 
     // ---- actions ----
@@ -327,6 +529,7 @@ Singleton {
         if (!root.enableService) {
             root.callQueue = [];
             root.activeCallback = null;
+            root.stopMonitor();
             root.applyBackend("none");
         } else if (root.installed) {
             root.refresh();
@@ -344,8 +547,14 @@ Singleton {
         }
     }
 
+    // While the monitor is live this is no longer the update path - every
+    // change already arrives as a signal - but it stays on, slower, as the
+    // reconcile that notices a daemon which went away without saying so, and
+    // as the detector that notices one arriving in the first place.
+    readonly property int reconcileInterval: Math.max(root.pollInterval * 6, 60000)
+
     Timer {
-        interval: root.pollInterval
+        interval: root.monitorLive ? root.reconcileInterval : root.pollInterval
         running: root.enableService && root.installed
         repeat: true
         triggeredOnStart: true

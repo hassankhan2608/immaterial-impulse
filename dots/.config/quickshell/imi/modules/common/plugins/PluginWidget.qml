@@ -8,6 +8,7 @@ import qs.modules.common
 import qs.modules.common.widgets
 import qs.modules.imi.background.widgets
 import "../functions/parallax.js" as ParallaxMath
+import "../functions/edit_mode.js" as EditMode
 import "gridSizes.js" as GridSizes
 import "resize-tension.js" as Tension
 import "gridResize.js" as GridResize
@@ -26,11 +27,35 @@ AbstractBackgroundWidget {
     // declares none of them behaves exactly as before.
     //
     // The clock is the only clock the lock screen has, so it must be able to
-    // stay visible while locked regardless of `lock.showWidgets` - which
-    // exists to hide the *other* desktop widgets - and to centre itself there,
-    // which is what `lock.centerClock` has always done.
-    visibleWhenLocked: pluginNode.wantsVisibleWhenLocked
-        || Config.options.lock.showWidgets
+    // stay visible while locked when `lock.showWidgets` - which exists to hide
+    // the *other* desktop widgets - is off, and to centre itself there, which
+    // is what `lock.centerClock` has always done.
+    //
+    // Which widgets the lock shows is two decisions now, and this is a BRANCH
+    // rather than a disjunction because the second one has to be able to say
+    // no. `lock.showWidgets` is the master gate over the feature ("does the
+    // lock show desktop widgets at all"); with it off, a widget's own
+    // `visibleWhenLocked` opt-in is the whole answer, exactly as before. With
+    // it on, the per-widget choice is - inherited from the desktop's enabled
+    // set until the user picks something on the Lockscreen tab
+    // (layout_surfaces.js), so every widget shows, exactly as before, until
+    // then. An `||` here would leave the clock's row in that picker unable to
+    // do anything: the toggle would go off and the clock would stay on the
+    // lock screen, which is a control that lies rather than a widget that is
+    // protected. Nothing about the upgrade changes - the branch and the
+    // disjunction agree on every state reachable before the first pick.
+    visibleWhenLocked: Config.options.lock.showWidgets
+        ? PluginState.lockWidgetEnabled(rootWidget.manifest?.id ?? "")
+        : pluginNode.wantsVisibleWhenLocked
+    // Am I on screen only because the LOCK asked for me? That is the one case
+    // the desktop has to filter, and it is deliberately narrower than "not in
+    // plugins.enabled": a widget being removed from BOTH is in neither list,
+    // and hiding it from here would race the host loader's exit fade to zero
+    // and cut the transition short.
+    readonly property bool lockOnlyWidget: Config.options.lock.showWidgets
+        && PluginState.lockWidgetEnabled(rootWidget.manifest?.id ?? "")
+        && !Config.options.plugins.enabled.includes(rootWidget.manifest?.id ?? "")
+    visibleOnDesktop: !rootWidget.lockOnlyWidget
     readonly property bool forceCenter: pluginNode.wantsForceCenter
 
     // Drives AbstractBackgroundWidget's least-busy-region pass, whose real
@@ -417,6 +442,93 @@ AbstractBackgroundWidget {
         GlobalStates.editWidgetMenuOpen = true;
     }
 
+    // ---- dragging a widget back into the drawer (the inverse of §8.3) -----
+    //
+    // The drawer's rows drag OUT onto the desktop; a widget on the desktop
+    // dragged back over the drawer and let go there leaves the desktop. The
+    // rectangle is the chrome surface's own, published per screen because it
+    // lives in another window (GlobalStates.editDrawerReveals), and the
+    // pointer is mapped to the SCENE through Qt's transform chain for the same
+    // reason the right-click above is: the mode's scale and the drawer's shift
+    // are already in it, and multiplying a viewport scale in by hand is the
+    // compensation the contract forbids.
+    readonly property var editDrawerReveal:
+        GlobalStates.editDrawerReveals[rootWidget.screenName] ?? null
+
+    // Takes SCREEN coordinates, because its two callers reach them differently
+    // and only one of them may map through this item - see the drag handler
+    // below.
+    function dropWouldRemoveAt(screenX, screenY) {
+        if (!GlobalStates.editMode || !GlobalStates.editDrawerOpen || !manifest)
+            return false;
+        // The hint and the write ask the ONE question, membership included.
+        // `EditModeDrawerDrop` declines an id the desktop does not hold, and a
+        // widget can be on screen and draggable without being in that list -
+        // `lockOnlyWidget` above is exactly one, drawn on the Lockscreen tab
+        // and still a live MouseArea at opacity 0 on the Desktop tab. Without
+        // this term the drawer lit up, the release swallowed the commit on the
+        // strength of it, and the drop was then declined: one gesture under a
+        // panel promising a removal, and nothing happening anywhere.
+        if (!Config.options.plugins.enabled.includes(manifest.id))
+            return false;
+        return EditMode.pointInDrawerReveal(rootWidget.editDrawerReveal,
+            screenX, screenY);
+    }
+
+    // The drawer lights up while the release would remove rather than move -
+    // the widget itself cannot say so, because it is drawn on the surface
+    // BELOW the chrome and passes under the panel it is being carried into.
+    //
+    // The pointer comes from `dragPointerParentX/Y` rather than from this
+    // event's own `mouse.x/y`: a base class's handlers run first, so
+    // AbstractWidget has already moved the item those coordinates are relative
+    // to, and mapping them out again overshoots the pointer by that event's
+    // delta. Measured - with `mouse.x/y` the hint never lit up on a drag that
+    // ends on the drawer, while the release, whose handler moves nothing, was
+    // exact.
+    onPositionChanged: {
+        if (!rootWidget.dragging) return;
+        const point = rootWidget.parent.mapToItem(null,
+            rootWidget.dragPointerParentX, rootWidget.dragPointerParentY);
+        GlobalStates.editDrawerDropScreen =
+            rootWidget.dropWouldRemoveAt(point.x, point.y)
+                ? rootWidget.screenName : "";
+    }
+
+    // Runs BEFORE AbstractBackgroundWidget's commit, which is why the decision
+    // is a function that handler asks rather than a release handler of its own.
+    // Nothing about the position is written: the store still holds where the
+    // widget was, and that is exactly what makes undoing the removal put it
+    // back there rather than at the drawer or at a default - the same
+    // arrangement the menu's Remove already relies on.
+    //
+    // This one DOES map through the item, and correctly: nothing moves the
+    // widget on a release (the drag Binding stands down with RestoreNone), so
+    // the event's own coordinates are the pointer's. It needs no "was this a
+    // drag" term either - the chrome surface's input mask covers the reveal, so
+    // a press can never land there, and the only way a release reaches it is a
+    // gesture that began somewhere else and kept the implicit grab.
+    function releaseRemovesWidget(mouseX, mouseY) {
+        const point = rootWidget.mapToItem(null, mouseX, mouseY);
+        if (!rootWidget.dropWouldRemoveAt(point.x, point.y)) return false;
+        rootWidget.restoreXYBinding();
+        GlobalStates.editWidgetDroppedOnDrawer(manifest.id);
+        return true;
+    }
+
+    // The hint is cleared by the END OF THE GESTURE rather than by a release
+    // handler of its own, which covers the release, the cancel and Edit Mode
+    // ending mid-drag in one place - and keeps this file free of the second
+    // `onReleased` test_widget_group_selection.py refuses, because a widget
+    // with two release paths is how the write-back came to have two copies.
+    // It runs BEFORE the base's commit branch (a base class's handlers run
+    // first), and the removal re-asks the pointer rather than reading this, so
+    // the order costs nothing.
+    onDraggingChanged: {
+        if (!rootWidget.dragging)
+            GlobalStates.editDrawerDropScreen = "";
+    }
+
     // A widget destroyed while its menu is open must not strand the menu - the
     // BarContent.filterLayout shape: disabling a plugin (the menu's own Remove
     // included) tears this instance down while the menu still points at it, so
@@ -631,6 +743,16 @@ AbstractBackgroundWidget {
         rootWidget.targetY = rootWidget.clampY(ParallaxMath.placementFromDrawn(
             rootWidget.y, rootWidget.parallaxCancelY));
         rootWidget.restoreXYBinding();
+        rootWidget.commitPlacement(beforeX, beforeY);
+    }
+
+    // The store write, from targetX/targetY rather than from the drawn
+    // coordinate. Split out because a nudge has no drawn coordinate to read:
+    // `x` carries a position Behavior, so a keyboard step that assigned to it
+    // and committed in the same turn read the value the animation had not left
+    // yet, wrote it back as the target, and the widget snapped home - a move
+    // that looked like the keys doing nothing at all.
+    function commitPlacement(beforeX, beforeY) {
         if (!manifest) return;
         // A drag's release is a committed mutation (spec §7.3), and this is
         // its one commit path - the leader's release and every group-drag
