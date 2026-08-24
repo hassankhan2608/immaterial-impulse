@@ -457,7 +457,7 @@ ContentPage {
                     // that can use it and nowhere else.
                     ConfigRow {
                         uniform: true
-                        visible: PrismLauncher.available
+                        property bool rowVisible: PrismLauncher.available
                         ConfigTextArea {
                             Layout.fillWidth: true
                             buttonIcon: "stadia_controller"
@@ -561,28 +561,35 @@ ContentPage {
         }
 
         ContentSection {
-            // Only for users who chose to install Clight; everyone else never
-            // sees this section (the daemon-detection gate from the proposal).
-            visible: Clight.installed
             icon: "brightness_auto"
             title: Translation.tr("Clight")
+            // The proposal's daemon-detection gate used to hide this whole
+            // section (`visible: Clight.installed`). That kept dead controls
+            // off the page and also made the integration unfindable: "Clight"
+            // is in this page's static `sections:` list, so settings search
+            // offered a section that did not exist and landed the reader on an
+            // unrelated scroll position. The controls keep the gate per row;
+            // the section stays, and states why it is empty.
 
             GroupedList {
                 ConfigSwitch {
+                    property bool rowVisible: Clight.installed
                     buttonIcon: "handshake"
                     text: Translation.tr("Cooperate with the Clight daemon")
                     checked: Config.options.light.clight.enable
                     onToggleRequested: Config.options.light.clight.enable = !Config.options.light.clight.enable
                 }
                 ConfigSwitch {
-                    visible: Clight.available
+                    // `rowVisible`, never `visible`: a GroupedList row hidden
+                    // with `visible` keeps an empty plate (GroupedList.qml).
+                    property bool rowVisible: Clight.available
                     buttonIcon: "brightness_auto"
                     text: Translation.tr("Automatic brightness calibration")
                     checked: Clight.autoCalibration
                     onToggleRequested: Clight.setAutoCalibration(!Clight.autoCalibration)
                 }
                 ConfigSpinBox {
-                    visible: Clight.available
+                    property bool rowVisible: Clight.available
                     icon: "light_mode"
                     text: Translation.tr("Day temperature (K)")
                     value: Clight.dayTemperature
@@ -594,7 +601,7 @@ ContentPage {
                     }
                 }
                 ConfigSpinBox {
-                    visible: Clight.available
+                    property bool rowVisible: Clight.available
                     icon: "bedtime"
                     text: Translation.tr("Night temperature (K)")
                     value: Clight.nightTemperature
@@ -612,7 +619,14 @@ ContentPage {
                 text: Translation.tr("Ambient brightness: %1%").arg(Math.round(Clight.ambientBrightness * 100))
             }
             StyledText {
-                visible: Config.options.light.clight.enable && !Clight.available
+                visible: !Clight.installed
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Appearance.colors.colSubtext
+                text: Translation.tr("Clight is not installed. With the clight daemon installed and running, the shell routes brightness changes through it and shows its colour-temperature changes on the OSD.")
+            }
+            StyledText {
+                visible: Clight.installed && Config.options.light.clight.enable && !Clight.available
                 color: Appearance.colors.colSubtext
                 text: Translation.tr("Clight is installed but not running.")
             }

@@ -88,15 +88,55 @@ Scope { // Scope
         sourceComponent: PanelWindow { // Window
             id: panelWindow
 
-            property bool reallyVisible: false
-            visible: reallyVisible
+            // The surface stays mapped; the panel is what slides. See
+            // SidebarRight.qml and EdgeSlide.qml - the window following the
+            // open flag was a 61ms stall of the whole shell per open.
+            readonly property EdgeSlide slide: EdgeSlide {
+                open: GlobalStates.sidebarLeftOpen
+                travel: panelWindow.implicitWidth
+                direction: -1
+            }
 
-            Component.onCompleted: reallyVisible = GlobalStates.sidebarLeftOpen
-
+            // The grab is taken after the surface has RENDERED two frames with the
+            // panel open, not in the tick the flag flips. On a surface that is
+            // mapped all the time there is no map to carry the new
+            // `keyboardFocus` to the compositor - it goes out with the next commit,
+            // and a grab that reaches Hyprland before that commit is a grab on a
+            // surface it still knows as keyboard-interactivity None: Hyprland
+            // clears it within milliseconds, and `onDismissed` reads the clear as
+            // a click outside and closes the panel it just opened. A 1ms Timer
+            // lost that race on the left sidebar (grab at +10ms, cleared at +14ms)
+            // and won it on the right (+32ms) - so the wait is for frames, which
+            // is the thing the commit actually rides on.
+            FrameAnimation {
+                id: focusGrabAfterCommit
+                property int framesLeft: 0
+                running: framesLeft > 0
+                onTriggered: {
+                    if (--framesLeft > 0)
+                        return;
+                    if (GlobalStates.sidebarLeftOpen)
+                        GlobalFocusGrab.addDismissable(panelWindow);
+                }
+            }
             Connections {
                 target: GlobalStates
                 function onSidebarLeftOpenChanged() {
-                    panelWindow.reallyVisible = GlobalStates.sidebarLeftOpen;
+                    if (GlobalStates.sidebarLeftOpen) {
+                        focusGrabAfterCommit.framesLeft = 2;
+                        // The window used to be rebuilt per open, and the tabs'
+                        // own creation-time focus grabs picked the focus item.
+                        // A persistent window is created once, at boot, without
+                        // keyboard focus - so an open has to say where keys go
+                        // or the window activates with NO focus item and every
+                        // key is dropped at the content item. (The right
+                        // sidebar's loader does this with a `focus:` binding on
+                        // the open flag.)
+                        root.sidebarContent?.focusActiveItem();
+                    } else {
+                        focusGrabAfterCommit.framesLeft = 0;
+                        GlobalFocusGrab.removeDismissable(panelWindow);
+                    }
                 }
             }
 
@@ -113,7 +153,9 @@ Scope { // Scope
             implicitWidth: Appearance.sizes.sidebarWidthExtended + Appearance.sizes.elevationMargin
             WlrLayershell.namespace: "quickshell:sidebarLeft"
             // Hyprland 0.49: OnDemand is Exclusive, Exclusive just breaks click-outside-to-close
-            WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+            // ...and on a surface that is mapped all the time, an unconditional
+            // OnDemand is a panel that holds the keyboard while showing nothing.
+            WlrLayershell.keyboardFocus: GlobalStates.sidebarLeftOpen ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
             color: "transparent"
 
             anchors {
@@ -135,26 +177,21 @@ Scope { // Scope
                 }
             }
 
+            // Gated on the flag: a mapped surface with an unconditional mask
+            // takes every click on the left edge of the screen, panel or not.
             mask: Region {
-                item: sidebarLeftBackground
+                item: GlobalStates.sidebarLeftOpen ? sidebarLeftBackground : null
             }
 
             // Blur only the panel body. The drop shadow is drawn in the
             // surface's elevation margin, outside this region, so the
             // compositor's blur can't frost it (#82). Pairs with rules.lua
             // turning the whole-surface layerrule blur off for this namespace.
+            // Follows the body as it slides, withdrawn once it is off screen.
             WindowBlurRegion {
                 targetWindow: panelWindow
-                regionItem: sidebarLeftBackground
+                regionItem: panelWindow.slide.shown ? sidebarLeftBackground : null
                 regionRadius: sidebarLeftBackground.radius
-            }
-
-            onVisibleChanged: {
-                if (visible) {
-                    GlobalFocusGrab.addDismissable(panelWindow);
-                } else {
-                    GlobalFocusGrab.removeDismissable(panelWindow);
-                }
             }
             Connections {
                 target: GlobalFocusGrab
@@ -167,9 +204,11 @@ Scope { // Scope
             StyledRectangularShadow {
                 target: sidebarLeftBackground
                 radius: sidebarLeftBackground.radius
+                visible: sidebarLeftBackground.visible
             }
             Rectangle {
                 id: sidebarLeftBackground
+                visible: panelWindow.slide.shown
                 anchors.top: parent.top
                 anchors.topMargin: Appearance.sizes.hyprlandGapsOut
                 width: panelWindow.sidebarWidth - Appearance.sizes.hyprlandGapsOut - Appearance.sizes.elevationMargin
@@ -179,7 +218,9 @@ Scope { // Scope
                 border.color: Appearance.colors.colLayer0Border
                 radius: Appearance.rounding.screenRounding - Appearance.sizes.hyprlandGapsOut + 1
 
-                x: Appearance.sizes.hyprlandGapsOut
+                // An `x`, not a transform: the blur region and the shadow both
+                // follow the item's geometry, and a transform moves neither.
+                x: Appearance.sizes.hyprlandGapsOut + panelWindow.slide.offset
 
                 Behavior on width {
                     animation: Appearance.animation.elementMove.numberAnimation.createObject(this)

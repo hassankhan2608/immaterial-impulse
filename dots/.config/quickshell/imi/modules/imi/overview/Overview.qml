@@ -15,20 +15,25 @@ Scope {
     id: overviewScope
     property bool dontAutoCancelSearch: false
 
-    // The surface outlives the flag by exactly one exit animation, and it is
+    // The CONTENT outlives the flag by exactly one exit animation, and it is
     // the ANIMATION that says when - the same rule, and for the same reason, as
     // `modules/imi/wallpaperSelector/WallpaperSelector.qml`'s `reallyOpen`
     // records: a Behavior's animation starts a frame after the write that
     // triggers it, and an accelerating exit carries most of its distance in its
-    // last frames, so a Timer at the exit tier's own duration tears the window
+    // last frames, so a Timer at the exit tier's own duration tears the card
     // down with the transition still on screen.
     //
-    // Before this the window's `visible` followed `GlobalStates.overviewOpen`
-    // directly, and `rules.lua` turns the compositor's own map animation off for
-    // this namespace (`no_anim`, because a map animation on a screen-sized
-    // surface reads as the desktop lurching). Between the two there was nothing
-    // left to animate the overview at either end: it appeared and vanished on
-    // one frame.
+    // This used to be the WINDOW's lifetime, and that was the overview's last
+    // per-open stall: a destroyed-and-rebuilt window blocks the shell's one
+    // GUI thread the way the sidebars' did before EdgeSlide.qml (61ms
+    // measured there, and this is the largest surface in the shell). The
+    // surface now stays mapped for the life of the shell - `rules.lua`
+    // already turns the compositor's map animation off for this namespace,
+    // and there is no map left to animate - while `reallyOpen` gates what it
+    // shows: the column's visibility, the grid loader, and (through
+    // `openProgress`) the blur regions. A closed overview is a full-screen
+    // surface with a null input mask, keyboardFocus None and nothing drawn,
+    // which is exactly what the bar's surface is under a fullscreen window.
     property bool reallyOpen: false
 
     PanelWindow {
@@ -36,15 +41,26 @@ Scope {
         property string searchingText: ""
         readonly property HyprlandMonitor monitor: Hyprland.monitorFor(panelWindow.screen)
         property bool monitorIsFocused: (Hyprland.focusedMonitor?.id == monitor?.id)
-        visible: overviewScope.reallyOpen
 
         WlrLayershell.namespace: "quickshell:overview"
         WlrLayershell.layer: WlrLayer.Top
         WlrLayershell.keyboardFocus: GlobalStates.overviewOpen ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
         color: "transparent"
 
+        // The proxy, not the column: the card scales during its entrance and
+        // a Region maps the item through its render transform, while
+        // Hyprland snapshots the input region when the focus grab lands -
+        // two frames into that entrance. The selector shipped the full
+        // failure (see WallpaperSelector.qml's mask note for the click-map);
+        // this one had the same scaled item under its mask and the same
+        // grab timing. Anchors track layout geometry and ignore render
+        // transforms, so the proxy is the settled rect at every instant.
+        Item {
+            id: inputRegionProxy
+            anchors.fill: columnLayout
+        }
         mask: Region {
-            item: GlobalStates.overviewOpen ? columnLayout : null
+            item: GlobalStates.overviewOpen ? inputRegionProxy : null
         }
 
         // Blur only the painted body cards. This one surface carries two of
@@ -65,8 +81,20 @@ Scope {
         // be while the switch happens. This is a choice about where to put an
         // unavoidable step, not a measurement.
         readonly property bool bodyFrosted: columnLayout.openProgress >= 0.5
+        onBodyFrostedChanged: blurRegion.publishNow()
 
+        // The composed region's INNER items swap identity at runtime - the
+        // grid is rebuilt by its loader every open, and bodyFrosted flips
+        // both items in and out - and BackgroundEffect's live geometry
+        // tracking follows a given item, not a binding that replaces it.
+        // On the persistent surface nothing else republishes any more (the
+        // window never resizes and never remaps), so the first open showed
+        // the frost where the HALF-BUILT grid had been when the region was
+        // first pushed: a sharp unblurred band down the card's left edge,
+        // user-reported. Each identity flip republishes now; the settle
+        // timer inside publishNow covers the layout that follows it.
         WindowBlurRegion {
+            id: blurRegion
             targetWindow: panelWindow
             region: Region {
                 Region {
@@ -87,23 +115,48 @@ Scope {
             right: true
         }
 
+        // The grab is taken after the surface has RENDERED two frames with the
+        // card open, not in the tick the flag flips - the sidebars' rule (see
+        // SidebarRight.qml): on a surface that is mapped all the time the new
+        // `keyboardFocus` value rides the next commit, and a grab that reaches
+        // Hyprland first lands on a surface it still knows as interactivity
+        // None, is cleared within milliseconds, and the clear is read as a
+        // click-outside that closes the overview it just opened.
+        FrameAnimation {
+            id: focusGrabAfterCommit
+            property int framesLeft: 0
+            running: framesLeft > 0
+            onTriggered: {
+                if (--framesLeft > 0)
+                    return;
+                if (GlobalStates.overviewOpen)
+                    GlobalFocusGrab.addDismissable(panelWindow);
+            }
+        }
+
         Connections {
             target: GlobalStates
             function onOverviewOpenChanged() {
                 if (!GlobalStates.overviewOpen) {
                     searchWidget.disableExpandAnimation();
                     overviewScope.dontAutoCancelSearch = false;
+                    focusGrabAfterCommit.framesLeft = 0;
                     GlobalFocusGrab.dismiss();
                     columnLayout.leave();
                 } else {
-                    // The surface is asked for before the card is asked to
+                    // The content is asked for before the card is asked to
                     // arrive, in this order: an entrance started against an
-                    // unmapped window is an entrance nothing advances.
+                    // unbuilt card is an entrance nothing advances.
                     overviewScope.reallyOpen = true;
                     if (!overviewScope.dontAutoCancelSearch) {
                         searchWidget.cancelSearch();
                     }
-                    GlobalFocusGrab.addDismissable(panelWindow);
+                    focusGrabAfterCommit.framesLeft = 2;
+                    // A persistent window is created once, at boot, without
+                    // keyboard focus - so an open has to say where keys go
+                    // (the sidebars' lesson, SidebarLeft.qml) or the window
+                    // activates with no focus item and every key is dropped.
+                    searchWidget.focusSearchInput();
                     columnLayout.arrive();
                 }
             }
@@ -229,6 +282,7 @@ Scope {
             Loader {
                 id: overviewLoader
                 active: overviewScope.reallyOpen && (Config?.options.overview.enable ?? true)
+                onItemChanged: blurRegion.publishNow()
                 sourceComponent: (Config?.options.overview.style ?? "default") === "niri" ? niriComponent : defaultComponent
 
                 Component {

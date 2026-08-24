@@ -12,6 +12,41 @@ own repo; the installer pins which revision it builds.
 
 ## [Unreleased]
 
+## [0.30.1] — 2026-08-24
+
+Three fixes, all in the "silently wrong" family: terminal theming that died on
+a leftover symlink, a settings section that search offered but could not show,
+and settings rows that hid by leaving an empty plate behind.
+
+### Fixed
+- **Selecting the tmux config in the installer now actually themes tmux.** The
+  palette switch themes cava, btop, tmux and kitty in one run, and a single
+  unwritable config — measured: a dangling `~/.config/btop` symlink left behind
+  by a previous dotfiles suite — aborted the run before tmux's theme was ever
+  written, silently, on every wallpaper change. Each app now themes
+  independently, and a broken one is named in the log instead of taking the
+  rest down.
+- **The Clight settings section is findable again on machines without clight.**
+  Settings search offered "Clight" (it is in the Services page's section list)
+  while the section itself was hidden whenever the daemon was not installed, so
+  searching for it landed on an unrelated scroll position. The section now
+  stays on the page: without clight it is a single line saying what the
+  integration does; the controls still appear only when the daemon is there.
+- **Hidden settings rows no longer leave empty plates behind.** A GroupedList
+  row hidden with `visible:` kept its full-height background plate — a blank
+  band in the group. Thirteen rows across the Services, Wallpaper and Sidebars
+  pages and the bar's network popup carried the wrong spelling; all now use the
+  `rowVisible` contract, and a new lint keeps the next one out.
+
+## [0.30.0] — 2026-08-24
+
+The panels stop rebuilding themselves: the sidebars and the overview keep one
+window for the life of the shell and only their panels move, which removes the
+last per-gesture stalls — and this release pays everything that owed, from the
+keyboard grab to the input regions to the blur. Alongside it, a performance
+round across the services, the clock settings finally filtering by style, and
+wallpaper depth reachable for Wallpaper Engine scenes.
+
 ### Added
 - **You can put a widget away by dragging it back into Edit Mode's drawer.**
   Dragging a widget out of the drawer has always placed it on the desktop; the
@@ -34,6 +69,26 @@ own repo; the installer pins which revision it builds.
   Your presets carry the choice.
 
 ### Changed
+- **The shell idles lighter and boots smoother.** A round of performance
+  fixes, none of which changes how anything looks:
+  - The overview's window now stays alive like the sidebars' do, so
+    Super+Tab no longer pays a rebuild stall on every press.
+  - The icon-search database (1.7MB) loads the first time you search
+    symbols instead of at startup.
+  - Caps/Num Lock state comes from the keyboard's own LEDs through one
+    tiny watcher instead of asking Hyprland 3 times a second.
+  - Network events feed the shell through a single monitor that cleans up
+    after itself - crashed shells used to leave silent nmcli processes
+    behind (30 were found on the dev machine).
+  - The dock's window previews stop being captured the moment the popup
+    hides, decorative cookie spins tick at 30Hz instead of every frame,
+    and icons share font engines instead of minting near-duplicates.
+- **The clock widget's settings show only the options for the clock style you
+  picked.** Digital, Cookie and Pixel each have their own options, and all
+  three sets used to be listed together — eleven Cookie rows under a Digital
+  clock. Now a style's rows appear only while that style is selected for the
+  desktop or for the lock screen (the two can differ). Plugin authors get the
+  same: an option can declare `visibleWhen` against another option's value.
 - **The session screen and the settings pages now arrive in sequence instead of
   all at once.** The session screen's nine action buttons and a settings page's
   sections each fade in one after the other, a few hundredths of a second
@@ -47,6 +102,38 @@ own repo; the installer pins which revision it builds.
   slide, the way it always did.
 
 ### Fixed
+- **Wallpaper depth is reachable for Wallpaper Engine wallpapers.** The
+  depth service could already cut a subject from a live scene's still, but
+  the button that opens the picker only existed on the Local tab - from the
+  Wallpaper Engine grid the feature was unreachable. The same button now
+  sits in that tab's toolbar too.
+- **The overview's frost covers the whole card again.** Keeping the
+  overview's window alive left its blur region stuck where the half-built
+  grid had been on the very first open - a sharp unblurred band down the
+  card's left edge. The region now follows the card through every rebuild.
+- **Typing works again the moment a sidebar opens.** Keeping the sidebar
+  windows alive (the stutter fix below) quietly broke their keyboard: a
+  window that is never re-created never gets the keyboard grant that used to
+  arrive with its creation, so keys only reached a sidebar after the mouse
+  happened to touch it — the left sidebar's AI chat felt dead, and Escape
+  wouldn't close it. The focus system now hands the keyboard to whichever
+  panel just opened. Confirmed for both sidebars: typing lands immediately,
+  Escape closes, clicking outside closes, and clicking the bar while a
+  sidebar is open still leaves it open.
+- **The clock settings filter actually filters now.** The per-style option
+  rows were annotated in the last cycle but Settings > Widgets kept showing
+  all of them regardless of the selected style: the rules survive as data,
+  but on their way to the settings page they cross a Qt type boundary that
+  turns JSON lists into list-like objects a strict `Array.isArray` check no
+  longer recognises, so every rule fell back to "just show the row". The
+  evaluator now accepts those objects, and switching Digital / Cookie / Pixel
+  swaps the visible rows immediately.
+- **Opening a sidebar no longer freezes the shell for a moment.** Every open
+  rebuilt the sidebar's window from scratch, and while that happened every
+  other thing the shell draws — the bar, the dock, the desktop — stopped for
+  about fifteen frames. The windows now stay alive and only the panel slides,
+  on the same motion as before, so the open is immediate. The left sidebar
+  also stops being able to hold the keyboard while it is closed.
 - **The overview opens and closes with an animation instead of snapping.** It
   appeared and vanished on a single frame at both ends. Now the search bar and
   the workspace grid grow out of the top of the screen together and settle with
