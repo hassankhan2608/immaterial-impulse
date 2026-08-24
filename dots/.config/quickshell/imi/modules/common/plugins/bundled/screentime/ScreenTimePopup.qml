@@ -68,7 +68,7 @@ StyledPopup {
         property string value: ""
         Layout.fillWidth: true
         Layout.preferredWidth: 1
-        spacing: 1
+        spacing: Appearance.spacing.space25
 
         StyledText {
             text: stat.label

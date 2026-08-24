@@ -10,8 +10,6 @@
     "apiVersion": 1,
     "capabilities": ["bar-widget", "settings"],
     "permissions": ["process", "settings_read", "settings_write"],
-    "defaultWidth": 0,
-    "defaultHeight": 0,
     "options": [
         {
             "key": "showBarWidget",

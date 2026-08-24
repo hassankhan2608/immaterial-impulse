@@ -66,7 +66,7 @@ Item {
     Item {
         id: axisArea
         anchors.top: chartArea.bottom
-        anchors.topMargin: 2
+        anchors.topMargin: Appearance.spacing.space25
         width: parent.width
         height: root.axisHeight
 

@@ -16,7 +16,7 @@ Column {
     readonly property real durationWidth: 44
     readonly property real barWidth: width - labelWidth - durationWidth - 8
 
-    spacing: 4
+    spacing: Appearance.spacing.space50
 
     readonly property real maxTotal: {
         let m = 0
@@ -44,14 +44,14 @@ Column {
     // Inline category legend
     Row {
         visible: root.legendRoots.length > 0
-        spacing: 10
+        spacing: Appearance.spacing.space125
 
         Repeater {
             model: root.legendRoots
 
             Row {
                 required property string modelData
-                spacing: 4
+                spacing: Appearance.spacing.space50
 
                 Rectangle {
                     anchors.verticalCenter: parent.verticalCenter

@@ -82,7 +82,7 @@ Item {
     Item {
         id: axisArea
         anchors.top: barcodeArea.bottom
-        anchors.topMargin: 2
+        anchors.topMargin: Appearance.spacing.space25
         width: parent.width
         height: root.axisHeight
 

@@ -86,7 +86,7 @@ ColumnLayout {
 
             ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 2
+                spacing: Appearance.spacing.space25
 
                 RowLayout {
                     Layout.fillWidth: true

@@ -38,7 +38,7 @@ Column {
     readonly property real gridWidth: numWeeks > 0
         ? gutterWidth + numWeeks * cellSize + (numWeeks - 1) * cellGap
         : 0
-    spacing: 2
+    spacing: Appearance.spacing.space25
 
     readonly property real maxValue: {
         let m = 0
