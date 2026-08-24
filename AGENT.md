@@ -183,6 +183,11 @@ Because a single bad widget takes down every panel that transitively reaches it,
 **`tests/run_tests.sh` cannot catch this class of bug.** The QML suite instantiates pure-logic
 singletons and never builds these widgets, so a widget that fails to compile leaves the suite fully
 green. Only a live load surfaces it.
+The Screen Time year heatmap is covered by `tests/test_screentime_heatmap_runtime.py` and
+`ScreenTimeHeatmapRuntimeTest.qml`, which build the production component at the 468px card width
+and assert that its cells and month labels stay inside the card without overlap. The harness needs a
+Wayland compositor; when headless weston is unavailable, the live-shell check remains mandatory.
+("fix(screentime): make the year heatmap fit narrow cards")
 
 **Gotcha — FINAL properties:** anything deriving from `RippleButton` (and so from QQC2 `Control`)
 must not declare `horizontalPadding`, `verticalPadding`, `padding`, `spacing`, `font`, `palette`, or

@@ -1293,6 +1293,12 @@ if ! python3 "$SCRIPT_DIR/test_weather_popup_hero_runtime.py"; then
     exit 1
 fi
 
+echo "Running Screen Time heatmap runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_screentime_heatmap_runtime.py"; then
+    echo "Screen Time heatmap runtime tests failed."
+    exit 1
+fi
+
 echo "Running currency service safety tests..."
 if ! python3 "$SCRIPT_DIR/test_currency_service_contract.py"; then
     echo "Currency service safety tests failed."
