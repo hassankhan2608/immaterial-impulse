@@ -538,6 +538,33 @@ Singleton {
         function staggerDelay(rank: int, step: int, leadIn: int): int {
             return MotionPolicy.staggerDelay(rank, step, leadIn);
         }
+        // The three-channel member entrance's two terms, read by
+        // StaggerEntrance (the one spelling of how a wave member arrives:
+        // opacity, a scale and a small rise, all on one `appear` scalar).
+        // The rise is a spacing token because it is a distance on the shell's
+        // rhythm, not a duration; the scale START is derived from it by the
+        // policy, floored at the survey's measured 0.85, so the scale's
+        // excursion stays the rise's size at any member width.
+        readonly property real entranceRise: root.spacing.space250
+        function entranceScaleFrom(reference: real): real {
+            return MotionPolicy.entranceScaleFrom(motion.entranceRise, reference);
+        }
+
+        // Convergent arrival: an object starts a short reach away from its
+        // place on its own side of the container and settles with a slight
+        // overshoot (motion_policy.js's converge block carries the measured
+        // provenance). The reaches are DISTANCES, so they come off the
+        // spacing ladder, not the duration policy; the settle shape is
+        // unitless and rides whatever tier animates `appear`.
+        readonly property real convergeReachX: root.spacing.space250
+        readonly property real convergeReachY: root.spacing.space150
+        readonly property real convergeScaleFrom: 0.92
+        function convergeFrom(normX: real, rankParity: int): var {
+            return MotionPolicy.convergeFrom(normX, rankParity);
+        }
+        function convergeSettle(appear: real): real {
+            return MotionPolicy.convergeSettle(appear);
+        }
 
         property QtObject elementMove: QtObject {
             property int duration: motion.scale(animationCurves.expressiveDefaultSpatialDuration)
@@ -838,6 +865,13 @@ Singleton {
         property real searchWidth: 360
         property real sidebarWidth: 460
         property real sidebarWidthExtended: 750
+        // The Phone tab's footer toolbar. Its two actions flank the count
+        // pill, which is the row's only `Layout.fillWidth` item - so nothing
+        // about an icon-only button's own content can decide how wide it is,
+        // and left to size itself from a glyph plus an empty label each came
+        // out 44x35, near enough square to read as a circle under
+        // `rounding.full`. Both dimensions are stated here so the two buttons
+        // and the pill between them cannot disagree about the row's height.
         // Edit Mode's viewport is inset by exactly what the drawer will need,
         // so the drawer opens into space that already exists rather than
         // covering the desktop or resizing it (spec §1.2). This is the one

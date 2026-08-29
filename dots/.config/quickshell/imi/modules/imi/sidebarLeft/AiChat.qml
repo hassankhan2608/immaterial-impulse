@@ -273,6 +273,45 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
         color: Appearance.colors.colOutlineVariant
     }
 
+    // The pane's members run their entrance UNDER the slide, ungated (see
+    // the right sidebar's comment for the twice-learned reason): content,
+    // hint, suggestions, composer, each individually, with the composer -
+    // last rank - as the visible tail after the panel lands, which is the
+    // fork's own left-pane look.
+    Connections {
+        target: GlobalStates
+        function onSidebarLeftOpenChanged() {
+            if (GlobalStates.sidebarLeftOpen) {
+                paneEntrance.park();
+                paneEntrance.enter();
+                if (emptyStatePlaceholder.shown) {
+                    glyphGrow.stop();
+                    emptyStatePlaceholder.scale = 0.85;
+                    glyphGrow.start();
+                }
+            }
+        }
+    }
+
+    // The empty state's glyph GROWS into place while the pane's members
+    // fade - the fork's left-pane look, where the brain mark visibly
+    // arrives rather than being faded in as furniture. Scale only, on its
+    // own item: the fade is the wave member's (the messages area above it)
+    // and the placeholder's own opacity Behavior belongs to its shown
+    // fade - three channels, three owners, no doubling.
+    SequentialAnimation {
+        id: glyphGrow
+        PauseAnimation { duration: Appearance.animation.scale(120) }
+        NumberAnimation {
+            target: emptyStatePlaceholder
+            property: "scale"
+            to: 1
+            duration: Appearance.animation.scale(380)
+            easing.type: Easing.OutBack
+            easing.overshoot: 1.2
+        }
+    }
+
     ColumnLayout {
         id: columnLayout
         anchors {
@@ -281,7 +320,24 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
         }
         spacing: root.padding
 
+        StaggerWave {
+            id: paneEntrance
+            target: columnLayout
+            // The right sidebar's twice-learned cadence: a modest head start
+            // so no member is mid-fade while the panel edge is arriving,
+            // then the fork's tight per-member step. The composer is the
+            // last rank - the visible tail after the landing, which is the
+            // fork's own left-pane signature.
+            leadIn: 80
+            step: 25
+        }
+        StaggerEntrance {
+            target: columnLayout
+            reference: root.width
+        }
+
         Item {
+            property real appear: 1
             // Messages
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -394,6 +450,7 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
             }
 
             PagePlaceholder {
+                id: emptyStatePlaceholder
                 z: 2
                 shown: Ai.messageIDs.length === 0
                 icon: "neurology"
@@ -409,11 +466,13 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
         }
 
         DescriptionBox {
+            property real appear: 1
             text: root.suggestionList[suggestions.selectedIndex]?.description ?? ""
             showArrows: root.suggestionList.length > 1
         }
 
         FlowButtonGroup { // Suggestions
+            property real appear: 1
             id: suggestions
             visible: root.suggestionList.length > 0 && messageInputField.text.length > 0
             property int selectedIndex: 0
@@ -470,6 +529,7 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
         }
 
         Rectangle { // Input area
+            property real appear: 1
             id: inputWrapper
             property real spacing: Appearance.spacing.space100
             Layout.fillWidth: true
@@ -715,6 +775,7 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                     }
 
                     contentItem: MaterialSymbol {
+                        verticalAlignment: Text.AlignVCenter
                         anchors.centerIn: parent
                         horizontalAlignment: Text.AlignHCenter
                         iconSize: 22

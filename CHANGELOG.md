@@ -12,6 +12,455 @@ own repo; the installer pins which revision it builds.
 
 ## [Unreleased]
 
+### Fixed
+- **The phone panel's buttons behave like the rest of the shell's.** Its
+  notification bar is the same one the right sidebar draws, so its two
+  actions square off and swell under a press instead of sitting still;
+  the mirror, webcam and microphone cards ripple, dim when they cannot
+  start, and can be reached from the keyboard; a contact card expands
+  the way the Docker panel's cards do; and a notification group of one
+  no longer offers to expand into nothing.
+- **Settings rows show their choices in a row again.** Every segmented
+  option row on every settings page had started stacking its buttons one
+  per line - Bar position, Bar style, Group style and the rest - since
+  the settings window stopped building all of its pages at once. A page
+  built a few frames at a time gave the buttons a width they then kept.
+- **The phone webcam's preview window closes with the session instead of
+  freezing on screen.** Open the webcam, open the preview, then stop the
+  camera: the preview used to stay up, frozen on its last frame, and nothing in
+  the shell could close it - the player had been launched with no handle to
+  hold. It now closes whichever way the session ends: you press stop, the
+  stream drops on its own, the phone goes away, or the shell restarts. The
+  Preview button is a toggle too, so you can close the window from the page you
+  opened it from.
+
+### Added
+- **The Phone tab pairs your phone over Wi-Fi instead of telling you to open a
+  terminal.** The Android Apps page used to print the two commands Android 11
+  and newer needs — `adb pair host:port code`, then `adb connect host:port` —
+  and leave you to retype them after every toggle of the Wireless debugging
+  switch. It now offers them as a form: an address and the six-digit code the
+  phone shows, a Pair button, then the connect address and a Connect button,
+  with whatever adb answered printed under each step. Where `avahi-browse` is
+  installed, **Find the ports** asks the network which ports the phone is
+  advertising and fills both addresses in; the address KDE Connect already
+  reaches the phone on is filled in either way. The six-digit code is still
+  read off the phone — it is generated per pairing and published nowhere.
+- **Opening a Phone tab page fades the tab back behind it.** Contacts and
+  Android Apps slide in over a tab that now recedes and dims as they arrive,
+  rather than sitting there at full strength underneath. It follows the
+  animation-speed slider and the reduce-motion switch like the rest of the
+  shell.
+- **The Phone tab.** The paired phone gets a tab of its own in the left
+  sidebar, beside Intelligence, Translator and Media. Top to bottom: the
+  device on a chip whose arrow opens the list of every device the daemon
+  knows, with its cellular network (or its wireless address) and its
+  battery as pills beside it; one row of six round actions — ring it, ping
+  it, send it your clipboard, send it a file, share the clipboard as a link
+  or as text, and browse its storage; cards for Contacts and Android Apps
+  that say how many contacts synced and whether this machine's scrcpy can
+  do App Mode; your phone's notifications filling the rest of the panel,
+  grouped by app, with swipe-to-dismiss, inline reply, action buttons and
+  copy; and a toolbar to re-read them, count them or clear them all. Files
+  dropped anywhere on the tab are sent to the phone, and pairing requests
+  appear as cards at the bottom. The right sidebar's Phone quick toggle
+  opens this tab instead of its old dialog, which is gone.
+
+  Everything the last few releases built for the phone but had nowhere to
+  show is now reachable, and the phone's notifications stop appearing twice.
+- **Phone Connect warns when your phone's battery is low, and can send it
+  files, links and your clipboard, or open its storage.** A desktop
+  notification arrives once when the paired phone drops below 20% while
+  not charging, and again when it is back at 25% or plugged in. The phone
+  service can now share files picked with the file dialog, a link or a
+  piece of text from the clipboard (a link is recognised and sent as one),
+  and browse the phone over SFTP, opening its internal storage rather than
+  the bare mount. The device you pick in the panel is remembered across
+  restarts, with the last five picks kept for the list. The buttons for the
+  new actions are the Phone tab's six-button row, in this same release.
+- **Your phone's notifications are mirrored into the shell.** With a phone
+  paired through KDE Connect, the shell reads its active notifications off
+  the daemon as they arrive, keeps them grouped by app, dismisses one on the
+  phone itself rather than only hiding the card, replies inline where the app
+  allows it, and remembers the list across a restart. While the phone is
+  reachable, kdeconnectd's own desktop pop-ups of those same notifications
+  are no longer shown beside them. The Phone tab draws them, in this same
+  release.
+- **The phone's contacts reach the shell.** A new `PhoneContacts` service
+  reads the vCards KDE Connect syncs to `~/.local/share/kpeoplevcard`, keeps
+  the list live as the phone syncs (and parses the names Android soft-wraps,
+  which used to come out truncated in the fork this is ported from), searches
+  it by name, organization, address or digits, hides the number-only cards
+  anti-spam apps leave behind - never a starred one - and can open the
+  phone's dialer or SMS composer for a number over adb, saying why when it
+  cannot. It is what the Phone tab's Contacts card counts.
+- **The phone's screen, camera and microphone reach the desktop.** Groundwork
+  for the Phone tab: scrcpy mirrors the phone in a window and opens one
+  Android app on a virtual display of its own (scrcpy 4+, "App Mode"), the
+  phone's camera becomes a `/dev/videoN` webcam through DroidCam, and its
+  microphone becomes a `DroidCam-Mic` input that any app can record from -
+  through scrcpy with no app on the phone, or through DroidCam. Every one of
+  these is optional: nothing is added to the installer, each tool is probed
+  when the shell starts, and what is missing is answered with the install
+  command for Arch, Fedora and Debian. The settings live under
+  `phone.*` in config.json (mirror flags, app-mode display, webcam and
+  microphone connection); the Phone tab is where they are reached from.
+- **The Phone tab's feature cards, its sub-pages, and a Devices & Phone
+  settings page.** The bottom of the Phone tab is three cards — the scrcpy
+  mirror, the phone as a webcam, the phone as a microphone — that say which
+  of the five things they are (not installed, no phone, connecting, ready,
+  running), grow while one is running to carry how long it has been up, a
+  Stop button and its own quick actions, and take a file dropped on them to
+  send to the phone. A card for a tool that is not installed opens a guide
+  naming exactly what is missing, with the install command for Arch, Fedora
+  or Debian and a button to copy it, and a Re-check that closes the guide
+  once it is satisfied. A pairing request joins the same stack. Behind the
+  tab's two navigation cards: Contacts, which searches the phone's contacts
+  by name or number, shows their own photos, stars the ones that matter and
+  opens the phone's dialer or SMS composer; and Android Apps, which lists
+  what the phone has installed, starts one on a display of its own, and
+  shows what is already running with Focus, Close and Stop all. The webcam
+  and microphone each get a page with their toggle and settings. Settings >
+  Devices & Phone collects everything the tab persists — the panel's cards,
+  the contacts rules, and the mirror's connection, options and App Mode.
+- **Phone Connect shows your phone's wireless address and cellular network,
+  and answers pairing requests.** The panel reads the address KDE Connect
+  reaches the phone on and its cellular network type (LTE, 5G, …) alongside
+  the battery. When another device asks to pair with this one, the panel
+  shows the request as a card with Accept and Decline, so pairing no longer
+  needs KDE Connect's own window — and it is answered only for the device
+  that asked.
+
+### Changed
+- **The Phone tab's device roster unrolls instead of appearing all at once.**
+  Clicking the device chip used to put the list of every device the daemon
+  knows on screen in one frame and take it away in one. It now unrolls from
+  under the chip and folds back the same way, and it is drawn by the same list
+  the Wi-Fi and Bluetooth device pickers use, so a device joining or leaving
+  the network arrives and leaves as a row rather than making the list jump. The
+  reveal follows the animation-speed slider and the reduce-motion switch like
+  the rest of the shell.
+- **The right sidebar's quick sliders arrive one card at a time.** Each slider
+  card now fades in, zooms up from slightly smaller and rises into place —
+  the bottom row first, brightness last — while its fill still sweeps up from
+  zero with the icon turning, as before. It is the sibling fork's slider
+  entrance on the shell's own motion tiers, so the animation speed slider and
+  reduce motion reach it.
+- **Settings > Capture reads as one grammar of rows.** Subsection headers lead
+  with an icon; every Quality and selection option carries an icon; a live line
+  under Quality says what the chosen tier costs on this screen ("~44 Mbps -
+  5120x1440 - 60 fps on this screen", computed from the monitor the window is
+  on, with the frame rate capped at the screen's refresh); toggle rows carry an
+  icon chip; the codec dropdown marks Auto as recommended; the path fields
+  float their labels into the field; and every explanation moved from a
+  paragraph under its row to an (i) you hover. The other settings pages are
+  unchanged and follow in later releases.
+- **The phone panel is laid out like a phone panel, and it moved.** The
+  device sits on a chip whose arrow opens the list of every device the
+  daemon knows; its connection, battery and cellular network are pills
+  beside it; the actions are one row of round buttons instead of buttons
+  repeated on every device row; the middle of the panel is reserved for
+  your phone's notifications; and secondary features — pairing requests
+  among them — stack as cards at the bottom. It landed as a dialog in the
+  right sidebar and ships as the Phone tab in the left one, which is where
+  the rest of this release's phone work is reached.
+- **The Phone tab's footer toolbar.** The count under your phone's
+  notifications reads "7 notifications" rather than "7 notif.", and "1
+  notification" for one; it says "Device offline" instead of counting when the
+  device on the chip is not there; and a longer count elides inside its pill
+  rather than being drawn over the buttons beside it. Those two buttons — sync
+  and clear — are a little wider than they are tall now, so the row reads as
+  three soft rectangles rather than two circles around a pill, and their icons
+  sit dead centre instead of a pixel and a half to the left.
+
+### Fixed
+- **A phone feature no longer says "ready" when the tool it needs cannot
+  start.** The shell checked whether scrcpy, adb and DroidCam CLI were
+  installed and not whether they run. On this machine `droidcam-cli` was
+  installed and died on startup with a missing `libswscale.so.9` — the package
+  was built against an older ffmpeg than the system now ships — so the webcam
+  card read "ready", pressing it did nothing, and the message on screen asked
+  whether the DroidCam app was open on the phone. The three tools are started
+  as well as located now, and a tool that cannot start says so: which library
+  is missing, and that the package needs rebuilding rather than installing.
+  The Android Apps page tells the same three states apart too — adb missing,
+  adb unable to start, and adb working with no phone on it — where it used to
+  assume the first two away.
+- **Turning the phone webcam off no longer kills the phone microphone.** The
+  webcam and the microphone are both `droidcam-cli`, and the shell told them
+  apart by looking for `droidcam-cli` in the running process's command line -
+  which the microphone's contains too. After a shell restart with only the
+  microphone running, the Webcam card came up claiming a stream that did not
+  exist, and switching it off sent the stop signal to the microphone instead.
+  The two are told apart properly now, and the same mistake could no longer
+  have let the webcam's stop reach a scrcpy microphone either.
+- **The Phone tab's webcam and microphone state stops disappearing
+  altogether.** The probe the two cards read builds one line of JSON, and
+  when it could not work out the connection's port it left that field empty -
+  which is not a missing port but a broken line, so the shell threw the
+  *whole* answer away: the webcam device, the audio source and both running
+  flags with it. A configured port shorter than three digits was enough on
+  its own. The probe also reported a webcam as running when the process it
+  had just seen exited underneath it, and lost the port and the address of
+  any session it re-adopted after a restart.
+- **A frozen phone mirror stops reading as a running one.** scrcpy is
+  talkative, and the supervisor that owns it only read what it printed after
+  it had finished - so once scrcpy had said about 64 KiB it stopped dead
+  waiting for someone to listen, and since it never exited, the mirror card
+  stayed on "running" over a window that had frozen or died, with no way back
+  but a restart. The Phone tab also stopped answering clicks for up to half a
+  minute while it fetched the phone's app list, and an event lost to two
+  writes colliding could leave a session on screen with no window behind it.
+  Stopping the shell now really does stop every mirror it started, rather
+  than only when it shuts down cleanly.
+- **Installing DroidCam on Arch no longer claims success when it failed, and
+  installs what the webcam needs.** The Arch branch of the installer printed
+  "✓ DroidCam installed" whatever the AUR helper did, and the closing note
+  then told you the Phone tab's cards should read "Ready". It also never
+  installed `v4l-utils` or `android-tools`, both of which the other
+  distributions' branches install and without which the webcam cannot be
+  found at all - so a completed install could leave the feature dead. On
+  every distribution, a failed download or extract no longer runs the
+  DroidCam installer as root from whatever directory you happened to be in.
+- **The DroidCam microphone stops collecting duplicate audio devices.** On a
+  sound server that names the null sink's monitor with a prefix, the setup
+  script could not see the sink it had loaded a moment earlier and loaded
+  another under the same name on every launch, while the teardown removed
+  exactly one per call. A setup that fails now takes its own sink back with
+  it.
+- **The Stop button on a running Phone tab card draws its icon and its label in
+  the middle.** They were pressed against the button's left edge with the rest
+  of it empty, and the gap between the icon and the word grew as the button did.
+- **The Phone tab's clear-notifications button stops drifting out of its
+  circle.** The moment the notification count first changed, that button's icon
+  slid up and to the left and stayed there for the rest of the session - and
+  blinked out entirely while it moved, leaving an empty pill behind. Its
+  neighbour was unaffected, which is what made it read as one broken button.
+- **The Phone tab's Android Apps page says what to turn on when it cannot
+  reach the phone.** App Mode drives the phone over ADB, which is a
+  different link from the one KDE Connect pairs: with a phone reachable on
+  the network but no `adb devices` entry, the page drew one thin line of red
+  text ("Phone not reachable over ADB") and an unhelpful "No apps yet" under
+  it. It now draws one panel in the error colours, carrying both ways to get
+  a device - USB debugging over a cable, and wireless debugging with the
+  pair-and-connect Android 11 and newer needs after every toggle - and the
+  empty state stays out of the way until there is a phone that answered with
+  nothing. As soon as a device appears the panel goes and the app list is
+  fetched without a click. The empty state's own line is held to a readable
+  measure and centred instead of running the full width of the panel.
+- **Contacts with an Arabic name fit inside their row.** In the Phone tab's
+  Contacts list, a contact whose name is written in Arabic had its number and
+  its avatar drawn below the bottom of its own card - a row taller than the
+  card holding it - and with Latin names the avatar sat against the card's
+  bottom edge with almost no room around it. The row was a fixed height, and
+  Arabic sets taller than Latin at the same text size. Every row now takes the
+  height its own contents need, in any script, with the same breathing room
+  above and below.
+- **The Phone tab's Phone Webcam and Phone Microphone pages fit the panel
+  again.** Both pages were drawn wider than the sidebar and shifted left, so
+  every label was cut off at the panel's left edge — the error banner read
+  "m did not start - is the DroidCam app open on the phone?", the section
+  headers read "ra" and "ra settings", and the resolution row ran off the
+  right edge. Both pages now take the width the panel gives them, and a long
+  message from the camera or the microphone wraps inside its banner instead
+  of stretching the page around it.
+- **The scrcpy Mirror card stops claiming a mirror it never opened.**
+  Clicking it on a phone your machine can reach over KDE Connect but that
+  `adb devices` does not list flipped the card to "scrcpy Mirror / Mirror is
+  running · click to focus its window" with a tick and "Active for 0s" — and
+  a second later dropped it back to exactly the line it had before the
+  click, with the icon missing from its badge. The card now says
+  "Connecting scrcpy…" for the whole time between the click and the answer,
+  and a launch that fails shows why it failed instead of quietly returning
+  to where it started. The badge keeps its icon throughout.
+- **The Phone tab's message bar stays inside the panel.** A long error — for
+  instance "DroidCam did not start - is the DroidCam app open on the phone?"
+  — drew as a red bar clipped at the panel's edge with its text running off
+  the end. It now wraps and stays within the tab, however long the message.
+- **The Phone tab's Contacts and Android Apps pages draw their contents
+  again.** Contacts showed its count — "147 of 150 contacts" — and then an
+  empty page, and Android Apps drew its big empty-state icon on top of its
+  own search box, hiding the line explaining that the phone was not
+  reachable. Both pages were being given no height to draw into, so a full
+  list showed nothing and an empty one spilled over the header above it.
+  Each page now fills the room under its title bar: the list runs to the
+  bottom of the panel, and an empty state centres in what is left.
+- **Phone notifications show the app's icon.** A mirrored notification drew
+  the app's name and its text but never the icon KDE Connect sends with it.
+  The icon is now on the card, beside the app name, with the same
+  guessed-glyph fallback the shell's own notifications use for an app that
+  sends none.
+- **Settings stops switching off the debounce on every config write in the
+  shell.** Opening the settings window was never actually required: the
+  settings page host is built while the shell starts, and it asked for its
+  config writes to be flushed immediately and never asked for that to stop —
+  so from startup onward every setting written anywhere in the shell, by any
+  panel, rewrote the whole of `config.json` and read it straight back, once
+  per value instead of once per burst. Settings still writes immediately while
+  its window is open, and only while its window is open.
+- **The Phone tab's Mirror, Webcam and Microphone cards say what is wrong
+  instead of nothing.** Three separate silences, all of which read as the card
+  ignoring the click. A card whose feature drives the phone over ADB — the
+  scrcpy mirror, and the microphone wherever scrcpy is installed — now says "No
+  device over ADB" *before* you click it, if `adb devices` lists nothing,
+  instead of offering to open a window it cannot open; plugging the phone in
+  while the tab is open clears it. A launch that fails puts its reason on the
+  card, where before the webcam and the microphone dropped straight back to
+  "Tap to start" with the reason recorded nowhere you could see. And the three
+  services' own error reports now reach the tab's toast, which had only ever
+  been connected to the phone link's.
+- **Both sidebars open on the monitor you are using again.** On a multi-monitor
+  setup the left and right sidebars had started opening on whichever screen was
+  focused when the shell started, wherever you actually were — the same thing
+  the overview did in 0.30.0, arriving through the same change (the panels' own
+  surfaces now outlive the gesture, and a surface that is created once has to
+  say which screen it lives on). Each sidebar is one surface per screen now, and
+  every open picks the focused monitor afresh. Pinning the left sidebar reserves
+  space on that screen only.
+- **The left sidebar's tabs stop disagreeing with the page on screen.** After
+  clicking a tab once, swiping the panel — or following a link into a tab, such
+  as the Phone quick toggle — moved the page without moving the tab bar.
+- **The shell no longer freezes for two thirds of a second while it starts.**
+  Settings built all fifteen of its pages — about 24500 items — in one go the
+  moment the configuration loaded: measured at 618ms with nothing on screen able
+  to move, bar and dock included, and paid on every launch whether or not the
+  window was ever opened. The pages are built one at a time in the background
+  now, and the same measurement reads 64ms. Switching pages stays as immediate
+  as it was; a page reached before the background pass gets to it says
+  "Building this page…" for the moment it takes, instead of showing an empty
+  pane.
+- **Leaving a Discord voice channel no longer kills the voice bridge.** Discord
+  reports the empty selection as a null payload, which the bridge treated as a
+  crash; after five restarts the widget gave up with "Discord bridge stopped
+  after repeated failures". A null payload is read as an empty one now.
+- **Discord started after the shell is picked up on its own.** With Discord
+  closed, or its RPC socket dropped, the voice widget used to sit on "Start
+  Discord, then reconnect" until you pressed connect. It now retries by itself,
+  backing off from one second to every thirty, and stops the moment it
+  connects.
+
+## [0.32.0] — 2026-08-27
+
+One behaviour change, small in code and large on the hand: picking a section
+in Settings scrolls the page there instead of snapping.
+
+### Changed
+- **Picking a section in Settings scrolls to it instead of jumping.** Choosing
+  a category in the left tree (or landing on a search hit) used to snap the
+  page to that section in one frame; the page now glides there on the same
+  curve every other scroll in the shell uses, and any wheel or drag takes over
+  from wherever it got to.
+
+## [0.31.2] — 2026-08-27
+
+Two fixes found on one button and applied everywhere the same spelling lived:
+icon buttons centre their glyph, and the text field's confirm button arrives
+and leaves smoothly instead of snapping.
+
+### Fixed
+- **Icon buttons draw their icon in the middle.** The presets "save" button, the
+  password-reveal eye, the phone panel's ring and send buttons, the wallpaper
+  selector's close and audio buttons, the edit-mode menu's back arrow and the
+  clock-depth inspector all drew their glyph up-left of centre. The glyph was
+  told to centre itself in a way its button ignores; it now says so in the way
+  the button honours.
+- **The presets "save" button arrives and leaves smoothly.** It used to pop in
+  at full size the moment you typed a name and vanish the moment you cleared
+  it, shoving the text field a button-width in one frame each way. It now
+  glides in and out like the bar's pills, and the field reflows with it.
+
+## [0.31.1] — 2026-08-26
+
+Three fixes: the overview really does follow the focused monitor now (the
+0.31.0 fix only got the first open right), no more empty pill at the end of a
+bar section, and the notifications section stops painting over its neighbours
+when the sidebar has no room for it.
+
+### Fixed
+- **The overview opens on the focused monitor every time, not just the first
+  time.** 0.31.0's fix picked the right monitor for the first open and then
+  kept reusing that monitor's window for every open after it — on one
+  monitor invisible, on two the same bug as before (#297, reopened). Each
+  open now asks which monitor has focus.
+- **No more empty pill in the bar.** With the timer or the submap indicator
+  at the end of a bar section, an empty rounded stub sat beside the last
+  widget whenever the pill had nothing to show — the group around the pill
+  kept its padding after the pill itself had collapsed. A group whose
+  content is gone now goes with it, and the widget next to it gets the
+  rounded end it is entitled to. Edit mode still shows every slot so an idle
+  pill can be dragged.
+- **The notifications section no longer bleeds over its neighbours.** When
+  the media player and an expanded timer/calendar left the right sidebar no
+  room for notifications, the empty-state bell, "Nothing" and the
+  "0 notifications" pill still painted, over the media player and the tab
+  row. The section now paints nothing when it has no room and hides its
+  list until there is space for the status row and a line above it.
+
+## [0.31.0] — 2026-08-26
+
+The motion language's second half: the panels arrive composed, with their
+pieces cascading and converging into place, instead of snapping on. Plus the
+overview back on the monitor you are actually using, and the to-do list's
+buttons aimed at the right row.
+
+### Changed
+- **The panels arrive composed instead of snapping into place.** The bar's
+  popups open at their full height first and then let the sections below the
+  first fold cascade in — the top section is there on frame one, so a popup is
+  readable the instant it opens, and switching popups by hovering along the
+  bar never blinks content. The desktop menu's rows arrive in sequence the
+  same way. The sidebars got the fuller treatment: sections cascade behind the
+  panel's own slide, the quick-toggle tiles converge from their side of the
+  grid, the slider fills sweep up from zero with their icons turning with the
+  fill, the calendar ripples in diagonally, and the notification status row
+  converges into place. The left sidebar and the AI pane materialize the same
+  way. Exits stay rigid — everything rides out with the panel, nothing
+  cascades on the way out. Dialogs deliberately do not do any of this: a
+  cascade on a question you were interrupted to answer is latency.
+- **Text that changes now moves.** The bar's media label and the weather
+  temperature slide to their new value instead of swapping, and adding or
+  finishing a task in the to-do list animates the row in or out.
+
+### Fixed
+- **The overview opens on the monitor you are using again.** Since 0.30.0 it
+  opened on whichever monitor had focus when the shell started — usually the
+  primary — no matter where the cursor was, because the overview's window is
+  created once at startup now and the compositor places a window without a
+  screen of its own on the monitor focused at that moment. There is one
+  overview window per monitor now, and each open picks the focused one.
+  (#297)
+- **The to-do list's buttons no longer aim at the wrong row after a delete.**
+  Each row resolved its task by an index taken when the row was built, so
+  deleting a task left every row below it one off. Rows now find their task
+  at click time — by identity, and by content on older Quickshell builds where
+  the model hands each row a copy (the Gentoo package pins one), where every
+  done/delete click had been a silent no-op.
+
+## [0.30.2] — 2026-08-26
+
+Two more "silently wrong" settings fixes and one decode the selector never
+needed to pay.
+
+### Fixed
+- **The EasyEffects quick toggle tells the truth about a failed launch.** The
+  toggle flipped to "on" the moment it was clicked and nothing ever checked
+  whether the daemon actually came up, so a failed launch left it saying on
+  for the rest of the session. It still answers the click immediately, and
+  now verifies against the real process list a grace period later — a launch
+  that died is reflected instead of trusted.
+- **The Screens settings section is findable again on one monitor.** Like the
+  Clight section in 0.30.1, Settings search offered "Screens" while the
+  section hid itself whenever only one monitor was connected — with a sharper
+  edge: a laptop undocked with a stored screen filter hid the only control
+  that can clear that filter. The section now stays on the page; the chooser
+  appears when there is something to choose, and a single screen with no
+  stored filter gets a caption instead.
+
+### Changed
+- **The wallpaper selector opens lighter.** Its blurred backdrop decoded the
+  current wallpaper at full file resolution on every open; the decode is now
+  bounded to the size of the backdrop it is drawn into.
+
 ## [0.30.1] — 2026-08-24
 
 Three fixes, all in the "silently wrong" family: terminal theming that died on
@@ -2539,8 +2988,40 @@ illogical-impulse), collecting the work done to date:
   (`Super`+`/`).
 - This changelog and versioning.
 
-[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.31.2...v0.32.0
+[0.31.2]: https://github.com/XephyLon/immaterial-impulse/compare/v0.31.1...v0.31.2
+[0.31.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.31.0...v0.31.1
+[0.31.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.30.2...v0.31.0
+[0.30.2]: https://github.com/XephyLon/immaterial-impulse/compare/v0.30.1...v0.30.2
+[0.30.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.30.0...v0.30.1
+[0.30.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.29.0...v0.30.0
+[0.29.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.28.0...v0.29.0
+[0.28.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.27.0...v0.28.0
+[0.27.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.26.0...v0.27.0
+[0.26.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.25.0...v0.26.0
+[0.25.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.23.1...v0.24.0
+[0.23.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.23.0...v0.23.1
+[0.23.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.20.1...v0.21.0
+[0.20.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.18.2...v0.19.0
+[0.18.2]: https://github.com/XephyLon/immaterial-impulse/compare/v0.18.1...v0.18.2
+[0.18.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.17.6...v0.18.0
+[0.17.6]: https://github.com/XephyLon/immaterial-impulse/compare/v0.17.5...v0.17.6
+[0.17.5]: https://github.com/XephyLon/immaterial-impulse/compare/v0.17.4...v0.17.5
+[0.17.4]: https://github.com/XephyLon/immaterial-impulse/compare/v0.17.3...v0.17.4
+[0.17.3]: https://github.com/XephyLon/immaterial-impulse/compare/v0.17.2...v0.17.3
+[0.17.2]: https://github.com/XephyLon/immaterial-impulse/compare/v0.17.1...v0.17.2
+[0.17.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.16.1...v0.17.0
+[0.16.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.16.0...v0.16.1
+[0.16.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.9...v0.15.0
 [0.14.9]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.8...v0.14.9
 [0.14.8]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.7...v0.14.8
 [0.14.7]: https://github.com/XephyLon/immaterial-impulse/compare/v0.14.6...v0.14.7

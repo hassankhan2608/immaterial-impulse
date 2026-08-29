@@ -39,6 +39,7 @@ Rectangle {
             text: (parent as RailButton)?.symbol ?? ""
             iconSize: Appearance.font.pixelSize.larger
             horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
             color: Appearance.colors.colOnLayer1
         }
     }
@@ -245,6 +246,7 @@ Rectangle {
                             text: "download"
                             iconSize: Appearance.font.pixelSize.larger
                             horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
                             color: Appearance.colors.colPrimary
                         }
                     }

@@ -266,6 +266,7 @@ Item {
                     contentItem: MaterialSymbol {
                         anchors.centerIn: parent
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                         text: OciVps.loading ? "progress_activity" : "refresh"
                         iconSize: Appearance.font.pixelSize.large
                         color: Appearance.colors.colSubtext
@@ -324,6 +325,7 @@ Item {
                         contentItem: MaterialSymbol {
                             anchors.centerIn: parent
                             horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
                             text: "play_arrow"
                             iconSize: Appearance.font.pixelSize.large
                             color: Appearance.colors.colSubtext
@@ -339,6 +341,7 @@ Item {
                         contentItem: MaterialSymbol {
                             anchors.centerIn: parent
                             horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
                             text: "restart_alt"
                             iconSize: Appearance.font.pixelSize.large
                             color: Appearance.colors.colSubtext
@@ -354,6 +357,7 @@ Item {
                         contentItem: MaterialSymbol {
                             anchors.centerIn: parent
                             horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
                             text: "power_settings_new"
                             iconSize: Appearance.font.pixelSize.large
                             color: Appearance.colors.colError

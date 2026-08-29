@@ -16,6 +16,7 @@ TestCase {
         PhoneConnect.installed = false
         PhoneConnect.backend = "none"
         PhoneConnect.devices = []
+        PhoneConnect.persistedActiveDeviceId = ""
     }
 
     // ---- parseBusctlReply ----
@@ -83,7 +84,19 @@ TestCase {
             "type": { "type": "s", "data": "phone" },
             "isPaired": { "type": "b", "data": true },
             "isReachable": { "type": "b", "data": true },
-            "isPairRequestedByPeer": { "type": "b", "data": false }
+            "isPairRequestedByPeer": { "type": "b", "data": false },
+            "pairState": { "type": "i", "data": 3 },
+            "reachableAddresses": { "type": "as", "data": ["192.168.100.179"] }
+        }
+    }
+
+    // Captured shape: GetAll on org.kde.kdeconnect.device.connectivity_report
+    // at the device's /connectivity_report leaf.
+    function lteReport() {
+        return {
+            "cellularNetworkStrength": { "type": "i", "data": 4 },
+            "cellularNetworkType": { "type": "s", "data": "LTE" },
+            "iconName": { "type": "s", "data": "network-mobile-100-lte" }
         }
     }
 
@@ -124,6 +137,85 @@ TestCase {
         compare(device.type, "")
         compare(device.paired, false)
         compare(device.reachable, false)
+    }
+
+    // ---- connectivity_report and reachableAddresses (slice 2) ----
+
+    function test_normalize_kdeconnect_reads_reachable_addresses_and_the_cellular_report() {
+        const device = PhoneConnect.normalizeKdeconnectDevice("6131a746", pairedPhoneProps(), {
+            "charge": { "type": "i", "data": 85 },
+            "isCharging": { "type": "b", "data": false }
+        }, lteReport())
+        compare(device.reachableAddresses.length, 1)
+        compare(device.reachableAddresses[0], "192.168.100.179")
+        compare(device.cellularNetworkType, "LTE")
+        compare(device.cellularNetworkStrength, 4)
+    }
+
+    function test_normalize_kdeconnect_missing_connectivity_report_degrades_cleanly() {
+        // The leaf does not exist for an unpaired device, or where the plugin
+        // is off - its GetAll fails, parses to null, and the model says
+        // "unknown" rather than inventing a signal.
+        const device = PhoneConnect.normalizeKdeconnectDevice("x", {}, null, null)
+        compare(device.reachableAddresses.length, 0)
+        compare(device.cellularNetworkType, "")
+        compare(device.cellularNetworkStrength, -1)
+        // A report with the wrong shapes in it is the same as none.
+        const odd = PhoneConnect.normalizeKdeconnectDevice("x", {}, null, {
+            "cellularNetworkStrength": { "type": "s", "data": "four" },
+            "cellularNetworkType": { "type": "i", "data": 4 }
+        })
+        compare(odd.cellularNetworkType, "")
+        compare(odd.cellularNetworkStrength, -1)
+    }
+
+    function test_normalize_kdeconnect_keeps_only_string_addresses() {
+        const device = PhoneConnect.normalizeKdeconnectDevice("x", {
+            "reachableAddresses": { "type": "as", "data": ["10.0.0.5", 7, null, "fe80::1"] }
+        }, null, null)
+        compare(device.reachableAddresses.join(","), "10.0.0.5,fe80::1")
+        const scalar = PhoneConnect.normalizeKdeconnectDevice("x", {
+            "reachableAddresses": { "type": "s", "data": "not-a-list" }
+        }, null, null)
+        compare(scalar.reachableAddresses.length, 0)
+    }
+
+    // ---- pairing requests (slice 3) ----
+
+    function test_pairing_request_is_pair_state_requested_by_peer() {
+        // Device::PairState: 0 NotPaired, 1 Requested (by us), 2
+        // RequestedByPeer, 3 Paired. Only 2 is something to accept.
+        const asked = PhoneConnect.normalizeKdeconnectDevice("x", {
+            "pairState": { "type": "i", "data": 2 }
+        }, null, null)
+        compare(asked.hasPairingRequest, true)
+        compare(PhoneConnect.normalizeKdeconnectDevice("x", pairedPhoneProps(), null, null).hasPairingRequest, false)
+        compare(PhoneConnect.normalizeKdeconnectDevice("x", {
+            "pairState": { "type": "i", "data": 1 }
+        }, null, null).hasPairingRequest, false)
+        compare(PhoneConnect.normalizeKdeconnectDevice("x", {}, null, null).hasPairingRequest, false)
+    }
+
+    function test_pairing_request_reads_the_bool_a_daemon_without_pair_state_exposes() {
+        // isPairRequestedByPeer predates the pairState property; either
+        // spelling of "the peer asked" counts.
+        const asked = PhoneConnect.normalizeKdeconnectDevice("x", {
+            "isPairRequestedByPeer": { "type": "b", "data": true }
+        }, null, null)
+        compare(asked.hasPairingRequest, true)
+    }
+
+    function test_pairing_requests_lists_the_devices_asking() {
+        PhoneConnect.applyBackend("kdeconnect")
+        PhoneConnect.applyDevices([
+            device("phone1", { paired: true, reachable: true }),
+            device("laptop", { type: "laptop", reachable: true, hasPairingRequest: true }),
+            device("tablet", { type: "tablet", reachable: false })
+        ])
+        compare(PhoneConnect.pairingRequests.length, 1)
+        compare(PhoneConnect.pairingRequests[0].id, "laptop")
+        PhoneConnect.applyBackend("none")
+        compare(PhoneConnect.pairingRequests.length, 0)
     }
 
     // ---- Valent ----
@@ -167,6 +259,17 @@ TestCase {
         compare(tablet.paired, true)
     }
 
+    function test_normalize_valent_objects_carry_the_kdeconnect_only_fields_empty() {
+        // Valent's pairing and connectivity surfaces were not verifiable
+        // against a live daemon; the model still has the fields so the UI
+        // reads one shape, at the values that mean "unknown".
+        const phone = PhoneConnect.normalizeValentObjects(valentManagedObjects()).find(d => d.id === "abc123")
+        compare(phone.hasPairingRequest, false)
+        compare(phone.reachableAddresses.length, 0)
+        compare(phone.cellularNetworkType, "")
+        compare(phone.cellularNetworkStrength, -1)
+    }
+
     function test_normalize_valent_objects_ignores_non_device_paths() {
         const devices = PhoneConnect.normalizeValentObjects([{
             "/ca/andyholmes/Valent": { "org.freedesktop.DBus.ObjectManager": {} }
@@ -204,6 +307,8 @@ TestCase {
     function device(id, overrides) {
         return Object.assign({
             id: id, name: id, type: "phone", reachable: false, paired: false,
+            hasPairingRequest: false, reachableAddresses: [],
+            cellularNetworkType: "", cellularNetworkStrength: -1,
             batteryAvailable: false, batteryCharge: -1, batteryCharging: false
         }, overrides ?? {})
     }
@@ -317,6 +422,22 @@ TestCase {
             verify(PhoneConnect.signalChangesDevices({ iface: "org.kde.kdeconnect.device", member: member, args: [] }),
                    `device.${member} should re-read`)
         verify(PhoneConnect.signalChangesDevices({ iface: "org.kde.kdeconnect.device.battery", member: "refreshed", args: [true, 87] }))
+        // connectivity_report.refreshed(si) - the cellular type and strength.
+        verify(PhoneConnect.signalChangesDevices({ iface: "org.kde.kdeconnect.device.connectivity_report", member: "refreshed", args: ["LTE", 4] }))
+    }
+
+    function test_signal_changes_devices_hears_the_notification_signals() {
+        // Introspected off the live daemon's <device>/notifications object:
+        // three carry the public id (s), allNotificationsRemoved carries
+        // nothing. PhoneNotifications refetches on the coalesced change these
+        // cause rather than on a monitor of its own.
+        for (const member of ["notificationPosted", "notificationUpdated", "notificationRemoved"])
+            verify(PhoneConnect.signalChangesDevices({ iface: "org.kde.kdeconnect.device.notifications", member: member, args: ["70"] }),
+                   `notifications.${member} should re-read`)
+        verify(PhoneConnect.signalChangesDevices({ iface: "org.kde.kdeconnect.device.notifications", member: "allNotificationsRemoved", args: [] }))
+        // The leaf's own `ready` is not in the set: it fires per notification
+        // object as it is built, before the daemon has posted it.
+        verify(!PhoneConnect.signalChangesDevices({ iface: "org.kde.kdeconnect.device.notifications.notification", member: "ready", args: [] }))
     }
 
     function test_signal_changes_devices_reads_the_interface_out_of_properties_changed() {
@@ -397,6 +518,171 @@ TestCase {
         compare(unwanted.delay, 0)
         // A deliberate stop after a healthy run leaves no debt behind.
         compare(PhoneConnect.monitorExitPlan(3, 90000, false, 30000, 5).attempts, 0)
+    }
+
+    // ---- share (slice 4) ----
+
+    function test_shareable_urls_keeps_only_file_and_http_entries() {
+        const kept = PhoneConnect.shareableUrls([
+            "file:///home/me/photo.jpg",
+            "https://example.org/a?b=c",
+            "HTTP://EXAMPLE.ORG",
+            "  file:///with/spaces in it.txt  ",
+            "/home/me/not-a-url",
+            "ftp://example.org/x",
+            "",
+            "   ",
+            null,
+            42
+        ])
+        compare(kept.join("|"), "file:///home/me/photo.jpg|https://example.org/a?b=c|HTTP://EXAMPLE.ORG|file:///with/spaces in it.txt")
+        compare(PhoneConnect.shareableUrls(null).length, 0)
+        compare(PhoneConnect.shareableUrls("https://example.org").length, 0)
+    }
+
+    function test_clipboard_share_target_sends_a_url_as_a_link() {
+        // The fork's heuristic: a scheme, or something shaped like a host.
+        compare(JSON.stringify(PhoneConnect.clipboardShareTarget("https://example.org/a?b=c")),
+                JSON.stringify({ kind: "url", value: "https://example.org/a?b=c" }))
+        compare(PhoneConnect.clipboardShareTarget("HTTP://EXAMPLE.ORG").kind, "url")
+        compare(PhoneConnect.clipboardShareTarget("  https://example.org  ").value, "https://example.org")
+        // A bare host is a link too - but the daemon opens a QUrl, and a
+        // schemeless one is relative, so it leaves with https:// on it.
+        compare(JSON.stringify(PhoneConnect.clipboardShareTarget("example.org")),
+                JSON.stringify({ kind: "url", value: "https://example.org" }))
+        compare(PhoneConnect.clipboardShareTarget("docs.example.co.uk/path/to").value, "https://docs.example.co.uk/path/to")
+    }
+
+    function test_clipboard_share_target_sends_prose_as_text_and_refuses_nothing() {
+        compare(JSON.stringify(PhoneConnect.clipboardShareTarget("meet me at 5")),
+                JSON.stringify({ kind: "text", value: "meet me at 5" }))
+        // A host followed by more words is a sentence, not a link.
+        compare(PhoneConnect.clipboardShareTarget("example.org is down again").kind, "text")
+        compare(PhoneConnect.clipboardShareTarget("v1.2").kind, "text")
+        compare(PhoneConnect.clipboardShareTarget("  two words  ").value, "two words")
+        compare(PhoneConnect.clipboardShareTarget("").kind, "empty")
+        compare(PhoneConnect.clipboardShareTarget("   \n").kind, "empty")
+        compare(PhoneConnect.clipboardShareTarget(null).kind, "empty")
+    }
+
+    function test_picked_file_urls_turn_picker_lines_into_file_urls() {
+        // kdialog --multiple prints one path per line; a cancelled picker
+        // prints nothing. The daemon hands each URL to a QUrl, so a path is
+        // percent-encoded per segment - a raw "#" would become a fragment.
+        compare(PhoneConnect.pickedFileUrls("/home/me/a.jpg\n/home/me/with space #1.txt\n").join("|"),
+                "file:///home/me/a.jpg|file:///home/me/with%20space%20%231.txt")
+        compare(PhoneConnect.pickedFileUrls("  /home/me/a.jpg  \n\n   \n").join("|"), "file:///home/me/a.jpg")
+        compare(PhoneConnect.pickedFileUrls("").length, 0)
+        compare(PhoneConnect.pickedFileUrls(null).length, 0)
+        // A line that is not an absolute path is not a file.
+        compare(PhoneConnect.pickedFileUrls("relative/path\n/abs/ok").join("|"), "file:///abs/ok")
+    }
+
+    // ---- SFTP browse (slice 5) ----
+
+    function test_sftp_browse_target_prefers_the_phone_s_storage_when_it_exists() {
+        // The mount root is not the user's storage (the fork's 3a7f653b4);
+        // storage/emulated/0 is, when the phone exposes it.
+        const mount = "/run/user/1000/6131a746/kdeconnect_6131a746"
+        compare(PhoneConnect.sftpBrowseTarget(mount, true), mount + "/storage/emulated/0")
+        compare(PhoneConnect.sftpBrowseTarget(mount, false), mount)
+        compare(PhoneConnect.sftpBrowseTarget(mount + "/", true), mount + "/storage/emulated/0")
+        compare(PhoneConnect.sftpBrowseTarget("", true), "")
+        compare(PhoneConnect.sftpBrowseTarget(null, false), "")
+    }
+
+    function test_sftp_storage_path_is_where_the_probe_looks() {
+        // The directory the `test -d` probe is aimed at is the one the
+        // target prefers - one spelling of "storage/emulated/0".
+        const mount = "/run/user/1000/x/kdeconnect_x"
+        compare(PhoneConnect.sftpStoragePath(mount), mount + "/storage/emulated/0")
+        compare(PhoneConnect.sftpStoragePath(mount + "/"), mount + "/storage/emulated/0")
+        compare(PhoneConnect.sftpStoragePath(""), "")
+    }
+
+    // ---- persisted active device and MRU (slice 6) ----
+
+    function test_active_device_prefers_the_persisted_choice_while_it_is_usable() {
+        PhoneConnect.applyBackend("kdeconnect")
+        PhoneConnect.applyDevices([
+            device("phone1", { type: "phone", paired: true, reachable: true, name: "aaa" }),
+            device("tablet", { type: "tablet", paired: true, reachable: true, name: "zzz" })
+        ])
+        compare(PhoneConnect.activeDevice.id, "phone1")
+        PhoneConnect.persistedActiveDeviceId = "tablet"
+        compare(PhoneConnect.activeDevice.id, "tablet")
+    }
+
+    function test_active_device_falls_back_when_the_persisted_choice_is_not_usable() {
+        PhoneConnect.applyBackend("kdeconnect")
+        PhoneConnect.applyDevices([
+            device("phone1", { type: "phone", paired: true, reachable: true }),
+            device("tablet", { type: "tablet", paired: true, reachable: false }),
+            device("laptop", { type: "laptop", paired: false, reachable: true })
+        ])
+        PhoneConnect.persistedActiveDeviceId = "tablet"
+        compare(PhoneConnect.activeDevice.id, "phone1")
+        PhoneConnect.persistedActiveDeviceId = "laptop"
+        compare(PhoneConnect.activeDevice.id, "phone1")
+        PhoneConnect.persistedActiveDeviceId = "gone"
+        compare(PhoneConnect.activeDevice.id, "phone1")
+        compare(PhoneConnect.preferredActiveDevice([], "phone1"), null)
+    }
+
+    function test_recent_device_ids_is_a_capped_most_recent_first_list() {
+        compare(PhoneConnect.recentDeviceIdsAfterSelect([], "a", 5).join(","), "a")
+        compare(PhoneConnect.recentDeviceIdsAfterSelect(["a", "b"], "c", 5).join(","), "c,a,b")
+        // Re-selecting moves to the front rather than duplicating.
+        compare(PhoneConnect.recentDeviceIdsAfterSelect(["a", "b", "c"], "b", 5).join(","), "b,a,c")
+        // Capped at max, oldest dropped.
+        compare(PhoneConnect.recentDeviceIdsAfterSelect(["a", "b", "c", "d", "e"], "f", 5).join(","), "f,a,b,c,d")
+        compare(PhoneConnect.recentDeviceIdsAfterSelect(null, "a", 5).join(","), "a")
+        // An id that fails the validator is not remembered.
+        compare(PhoneConnect.recentDeviceIdsAfterSelect(["a"], "../x", 5).join(","), "a")
+        compare(PhoneConnect.recentDeviceIdsAfterSelect(["a", "b"], "c", 2).join(","), "c,a")
+    }
+
+    // ---- low-battery hooks (slice 6) ----
+    //
+    // The thresholds are the proposal's, literally: low once below 20 and
+    // not charging, recovered at 25 or above, or on charging.
+
+    function test_battery_notice_fires_once_below_twenty_while_not_charging() {
+        const low = PhoneConnect.batteryNoticeTransition(false, 19, false)
+        compare(low.notice, "low")
+        compare(low.notified, true)
+        // Twenty is not below twenty.
+        compare(PhoneConnect.batteryNoticeTransition(false, 20, false).notice, "")
+        compare(PhoneConnect.batteryNoticeTransition(false, 20, false).notified, false)
+        // Charging at 19 is not a low battery.
+        compare(PhoneConnect.batteryNoticeTransition(false, 19, true).notice, "")
+        // Once: already notified, still low, nothing more.
+        compare(PhoneConnect.batteryNoticeTransition(true, 19, false).notice, "")
+        compare(PhoneConnect.batteryNoticeTransition(true, 19, false).notified, true)
+        compare(PhoneConnect.batteryNoticeTransition(false, 0, false).notice, "low")
+    }
+
+    function test_battery_notice_recovers_at_twenty_five_or_on_charging() {
+        // 24 is inside the hysteresis band: still notified, no notice.
+        const band = PhoneConnect.batteryNoticeTransition(true, 24, false)
+        compare(band.notice, "")
+        compare(band.notified, true)
+        const recovered = PhoneConnect.batteryNoticeTransition(true, 25, false)
+        compare(recovered.notice, "recovered")
+        compare(recovered.notified, false)
+        // Plugging it in recovers at any charge.
+        const charging = PhoneConnect.batteryNoticeTransition(true, 10, true)
+        compare(charging.notice, "recovered")
+        compare(charging.notified, false)
+        // Nothing to recover from: no notice.
+        compare(PhoneConnect.batteryNoticeTransition(false, 25, false).notice, "")
+        compare(PhoneConnect.batteryNoticeTransition(false, 10, true).notice, "")
+    }
+
+    function test_battery_notice_ignores_an_unknown_charge() {
+        compare(PhoneConnect.batteryNoticeTransition(false, -1, false).notice, "")
+        compare(PhoneConnect.batteryNoticeTransition(true, -1, false).notice, "")
+        compare(PhoneConnect.batteryNoticeTransition(true, -1, false).notified, true)
     }
 
     // ---- device id guard ----

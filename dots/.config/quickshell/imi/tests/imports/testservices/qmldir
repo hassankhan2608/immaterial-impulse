@@ -4,7 +4,13 @@ singleton BluetoothStatus BluetoothStatus.qml
 singleton MediaCapture MediaCapture.qml
 singleton OciVps OciVps.qml
 singleton OpenRgb OpenRgb.qml
+singleton PhoneCamera PhoneCamera.qml
 singleton PhoneConnect PhoneConnect.qml
+singleton PhoneNotifications PhoneNotifications.qml
+singleton PhoneDeps PhoneDeps.qml
+singleton PhoneMic PhoneMic.qml
+singleton PhoneScrcpy PhoneScrcpy.qml
 singleton PluginStore PluginStore.qml
 singleton Tailscale Tailscale.qml
 singleton Vpn Vpn.qml
+singleton PhoneContacts PhoneContacts.qml

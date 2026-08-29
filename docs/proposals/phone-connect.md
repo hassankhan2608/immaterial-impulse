@@ -1,7 +1,8 @@
 # Proposal: Phone Connect (KDE Connect / Valent integration)
 
-> Draft / tracking proposal. The service, its sidebar surface and
-> signal-driven updates are implemented; the slices below are what remains.
+> Draft / tracking proposal. The service, its sidebar surface,
+> signal-driven updates, the connectivity report and pairing are
+> implemented; the slices below are what remains.
 
 ## Goal
 
@@ -75,6 +76,144 @@ as a `readonly property bool` read from `onBackendChanged`, which is AGENT.md's
 change-handler trap — it answered with the previous backend, the monitor never
 started, and nothing showed it because the poll kept the model correct. It is a
 function now.
+
+**Slices 2 and 3 have landed**, and the sidebar surface was reshaped with
+them:
+
+- **`connectivity_report` and `reachableAddresses`** (f7a2952ed
+  "feat(phoneConnect): read connectivity_report and reachableAddresses onto
+  the device model"). One more `GetAll` per device, at the report's own
+  leaf path, plus the device's `reachableAddresses` property it was already
+  fetching; the model gains `reachableAddresses` (string entries only),
+  `cellularNetworkType` and `cellularNetworkStrength` (-1 when unknown), and
+  `connectivity_report.refreshed` joins the monitor's allowlist. Shapes read
+  off the live daemon: `reachableAddresses ["192.168.100.179"]`, the report
+  `{cellularNetworkType "LTE", cellularNetworkStrength 4}`. The finding
+  worth keeping: a `GetAll` naming the report's interface on the *device*
+  path is not an error — Qt's adaptor answers with every device property —
+  so the contract pins the leaf path, not the interface name. Valent
+  carries the fields at their "unknown" values.
+- **Pairing requests** (9395932d3 "feat(phoneConnect): surface a peer's
+  pairing request, and answer it"). This closes the open question below:
+  pairing *is* driveable from the shell, and it is `acceptPairing` /
+  `cancelPairing` on `org.kde.kdeconnect.device` at the device path,
+  introspected live. A request is `pairState` 2 (`Device::PairState`: 0
+  NotPaired, 1 Requested by us, 2 RequestedByPeer, 3 Paired) or the older
+  `isPairRequestedByPeer` bool; the model carries `hasPairingRequest` and a
+  derived `pairingRequests` list. Neither answer falls back to the active
+  device the way `ring()` does — that device is the paired phone, which
+  never asked — and the id reaches the path as a validated argument, never
+  through a shell string (the fork splices `devId` unquoted into `bash -c`).
+  Valent stays at `hasPairingRequest: false`, unverified.
+- **The surface** (0c6429028 "feat(phoneConnect): the dialog becomes a device
+  chip, pills, one action row and a notification area"). It landed as the
+  device dialog and is the Phone tab now; the layout below is what the
+  maintainer rated on the fork and what the tab draws: the device on a
+  chip whose arrow opens the roster; a connection pill (the wireless address
+  from `reachableAddresses`, or Offline), a battery pill and a cellular
+  pill; ONE row of round actions — ring, ping, clipboard, the three the
+  model answers, where the fork's other three are scrcpy, a file picker and
+  SFTP and are not drawn; the notification area owning the remaining height
+  with a real empty state (it says why while there is nothing to show — no
+  busctl, no daemon, no devices, not mirrored yet); and the secondary
+  features as cards stacked at the bottom, today the pairing request with
+  Accept and Decline. The roster row a user picks becomes the device the
+  chip, the pills and the actions are about, for the session — the
+  persisted choice is slice 6. `tests/test_phone_connect_contract.py` holds
+  the surface to the actions the model declares, and
+  `tests/test_phone_tab_runtime.py` builds the real tab over
+  the real service against a fake daemon and reads all of it back,
+  including the notification list growing by exactly a card when that card
+  goes.
+
+**Slices 4, 5 and 6 have landed** on the service, and the buttons that reach
+them are the Phone tab's six-action row
+(`docs/superpowers/specs/2026-08-27-phone-tab-design.md`, W5). That tab
+replaced the right sidebar's dialog: `modules/imi/sidebarLeft/phone/` draws
+the surface, `modules/imi/phone/` holds the pieces any phone surface shares,
+and the quick toggle writes `GlobalStates.sidebarLeftTab` instead of raising
+a dialog of its own. `canBrowseFiles` joined `canShare` with it - the SFTP
+slice shipped without the gate the row needed.
+
+- **Actions queue** (c7e160da1 "feat(phoneConnect): actions queue behind one
+  another instead of killing the one in flight"). Measured first: `Process.exec`
+  on a Process still running terminates it (exit 15, status 1, no output), so
+  `runAction` fed straight from `exec` kept the last action of a burst and
+  killed the rest — and one `shareUrl` per file IS a burst. `runAction` pushes
+  onto a queue the Process's own exit pumps. Feedback is one channel
+  (d021d10b0 "feat(phoneConnect): lastActionError and an actionFeedback signal
+  for toasts"): every action raises `actionFeedback(message, ok)`, every
+  failure sets `lastActionError` through one `reportFailure`.
+- **Send** (39f359ad4 "feat(phoneConnect): shareUrls and shareText through
+  the share plugin"; 8c29fc2be "feat(phoneConnect): share the clipboard as a
+  link or as text"; 58f4cd225 "feat(phoneConnect): pick files with kdialog
+  and share each as a file URL"). `share.shareUrl`/`shareText` on the
+  device's `/share` leaf, one string argument each (busctl signature `s`),
+  never a shell — the fork's `_shellQuote` has no counterpart here.
+  `shareClipboard` reads `wl-paste --no-newline` as a constant argv and
+  decides through the fork's heuristic (`/^https?:\/\//i`, or a host-shaped
+  token that is the whole string or starts a path), with one correction: a
+  bare host leaves with `https://` on it, because the daemon hands the string
+  to a `QUrl` and `example.org` is relative to nothing. The picker is the
+  house `kdialog --getopenfilename $HOME --multiple` (the wallpaper picker's
+  shape), its lines percent-encoded per segment before `file://` for the same
+  `QUrl` reason — a raw `#` in a filename is a fragment. Not taken: the
+  zenity fallback, and the proposal's own "drop shelf rather than a picker":
+  the spec answered both, the picker here and a `DropArea` on the tab.
+- **SFTP** (c487842e4 "feat(phoneConnect): browse the phone over SFTP,
+  opening its storage when it has one"). `sftp.mount`, then — on the read
+  queue, not the action process — `isMounted` every 600 ms up to ten times
+  (`mount()` returns before sshfs is up), then `mountPoint`, then a `test -d`
+  argv on `<mount>/storage/emulated/0` (the fork's 3a7f653b4: the mount root
+  is not the user's storage), then `xdg-open` on whichever exists.
+  `sftpMounted` is the daemon's last `isMounted` answer. Not taken: `gio open`
+  ahead of `xdg-open`, and the unmount — nothing in the tab asks for it yet.
+- **Persisted device, MRU, battery** (b603cbeb7 "feat(phoneConnect):
+  remember the picked device, and the five picked before it"; cdad588f8
+  "feat(phoneConnect): a low-battery notice once, and a recovery notice").
+  `Persistent.states.phone.{activeDeviceId, recentDeviceIds}`; `activeDevice`
+  prefers the persisted device while it is paired and reachable, else the
+  rule that was there. The MRU walk goes by index because a `list<string>`
+  off a `JsonAdapter` fails `Array.isArray`. The thresholds are the
+  proposal's, literally, pinned as numbers in `tests/tst_phone_connect.qml`:
+  low once below 20 and not charging, recovered at 25 or on charging; the
+  fork's extra guard on the previous charge being ≥ 20 (which kept a phone
+  already at 15% at boot silent) is not carried.
+
+**The notification slice has landed** (5cad7ad40 "feat(phoneNotifications):
+mirror the phone's notifications off KDE Connect over busctl", 1cead70b8
+"feat(notifications): drop the daemon's copy of a notification the phone tab
+mirrors"), as the Phone tab design's W2:
+
+- `services/PhoneNotifications.qml`, a second singleton on the same transport
+  with a serialized busctl queue of its own and no monitor: the four
+  notification signals joined `signalChangesDevices`' allowlist and
+  `PhoneConnect.deviceChangeSettled()` is the refetch trigger, beside a change
+  of the active device and a 60s reconcile. A sweep is the device's
+  `activeNotifications` - a list of PUBLIC ids, captured live as
+  `{"type":"as","data":[["70"]]}` - and one `GetAll` per
+  `<device>/notifications/<publicId>` leaf; the package comes out of the
+  `internalId` (`0|com.truecaller|…`).
+- Dismiss is the leaf's own `dismiss()`, never `sendAction("cancel")`; a
+  reply is device-level `sendReply(replyId, text)` and a refetch 800ms later
+  (a declared constant); `sendAction` is keyed on the `internalId`, which is
+  the Android key the daemon relays - the daemon exposes no action names over
+  D-Bus, so the leaf's `actions` is empty on the daemon this was measured
+  against.
+- The list is cached per device in `Persistent.states.phone` and restored
+  once the active device is known, so the tab is not empty before the first
+  sweep.
+- The dedupe: `services/Notifications.qml` drops a desktop notification posted
+  as `kdeconnect` / `kde connect` / `org.kde.kdeconnect` or as a paired
+  device's name, at ingestion, only while the tab is enabled and the active
+  device is reachable.
+- Covered by `tests/tst_phone_notifications.qml` (on the captured replies),
+  `tests/test_phone_notifications_contract.py` (parser region synced with the
+  double, argv only, leaf dismiss, declared delay, one stream, the gate) and
+  `tests/test_phone_notifications_runtime.py` (a fake busctl serving one
+  notification whose monitor verb posts a second - the signal is the only
+  thing that can deliver it - with dismiss, sendReply and sendAction scored
+  off the fake's log on the leaf path).
 
 ## Prior art: P3DROVFX/ii-p3drovfx
 
@@ -190,41 +329,39 @@ Ordered by value. Each borrows the fork's shape and none of its transport:
 every read is a `busctl` argv, every write goes through `runAction`, and both
 backends stay behind the one model.
 
-**Slice 1 (signal-driven updates) is done** — see "Current state" above. The
-next slice is now notification mirroring, and it inherits the stream: its
-signals go in `signalChangesDevices`' allowlist and the match rule already
-covers the whole `/modules/kdeconnect` namespace, so nothing about the
-transport has to be rebuilt for it. What is still open from slice 1 is Valent:
-its signal set was not verifiable and it keeps the poll until it is.
+**Slices 1 (signal-driven updates) through 6 and the notification slice are
+done** — see "Current state" above. What is still open from slice 1 is
+Valent: its signal set was not verifiable and it keeps the poll until it
+is, and the notification mirror is KDE Connect only for the same reason.
 
-1. **Notification mirroring.** Borrow: the leaf `notification.dismiss` (not
-   `sendAction("cancel")`), `sendReply` with a re-fetch, `internalId` →
-   package, group-by-app, and the dedupe rule against kdeconnectd's own
-   desktop notifications with its "only while we are showing them" gate. Not:
-   the second `RemoteNotification*` list — the "Approach" below still says
-   route through the shell's own notification system, and that is the
-   decision to make first; the parallel-list design is what makes the dedupe
-   necessary. Not: the qdbus/`fetch_notifications.py` split; one `busctl`
-   `GetAll` per leaf covers it. Not: "open on phone" — that is scrcpy+adb,
-   out of scope.
-2. **`connectivity_report` and `reachableAddresses`.** One more `GetAll` on
-   the device path and one more signal, both already in the fork's event set;
-   the model gains cellular type/strength. Cheap now the stream exists.
-3. **Pairing requests.** Accept/decline banners in the device dialog, fed by
-   `pairingRequestsChanged` and `pairStateChanged`; the calls are
-   `acceptPairing`/`cancelPairing` on the device path. This closes the "Open
-   questions" item — the fork shows it wraps cleanly. Not: interpolating
-   `devId` into a shell string; the id is validated (`validDeviceId`) and
-   passed as an argument.
-4. **Send and receive.** `share.shareUrl("file://…")` for file send, drop
-   target on the drop shelf (`modules/imi/dropShelf/`) rather than a picker
-   dialog, and `share.shareReceived` surfaced as a notification. Not: the
-   kdialog/zenity picker chain.
-5. **SFTP mount/browse.** `sftp.mount`/`unmount` plus a file-manager open;
-   the fork's `3a7f653b4` records that the mount root is not the user's
-   storage — open `<mount>/storage/emulated/0` when it exists.
-6. **Persisted active device, MRU, and low-battery hooks.** Small; take the
-   thresholds (<20% not charging, recover at ≥25% or charging) as they are.
+1. **Notification mirroring.** Done — see "Current state". The design
+   (`docs/superpowers/specs/2026-08-27-phone-tab-design.md`) decided the
+   question this item left open: a dedicated list in the Phone tab, deduped
+   at the desktop server, rather than routing through the shell's own
+   notification system. Borrowed as planned: the leaf `notification.dismiss`,
+   `sendReply` with a re-fetch, `internalId` → package, group-by-app, and the
+   gated dedupe. Not borrowed: the qdbus/`fetch_notifications.py` split (one
+   `busctl` `GetAll` per leaf), and "open on phone" (scrcpy+adb, another
+   workstream).
+2. **`connectivity_report` and `reachableAddresses`.** Done — see "Current
+   state". One more `GetAll` per device, at the report's own leaf path, and
+   one more signal; the model carries the addresses and the cellular
+   type/strength.
+3. **Pairing requests.** Done — see "Current state". Accept/decline cards in
+   the device dialog, fed by `pairingRequestsChanged` and `pairStateChanged`
+   through the stream; the calls are `acceptPairing`/`cancelPairing` on the
+   device path, aimed only at a device that asked, with the id validated and
+   passed as an argument rather than interpolated into a shell string.
+4. **Send and receive.** Done for the send half — see "Current state":
+   `share.shareUrl("file://…")` per file, the clipboard as a link or text,
+   and the house kdialog picker (the spec overruled "rather than a picker":
+   the tab gets a `DropArea` as well). Still open: `share.shareReceived`
+   surfaced as a notification, which belongs with notification mirroring.
+5. **SFTP mount/browse.** Done — see "Current state". `sftp.mount`, a
+   bounded wait on `isMounted`, `mountPoint`, and `<mount>/storage/emulated/0`
+   when it exists. Unmount is not wired; nothing asks for it yet.
+6. **Persisted active device, MRU, and low-battery hooks.** Done — see
+   "Current state", thresholds taken literally.
 
 Still open regardless: media (`mprisremote`), clipboard *receive*, and Valent
 action coverage beyond `findmyphone.ring` (its other action names were not
@@ -281,11 +418,16 @@ would be both laggy and wasteful.
 
 ## Open questions
 
-- Whether pairing should be driveable from the shell or deferred to the
-  daemon's own UI. Pairing involves a confirmation on both ends and is
-  security-relevant; wrapping it badly is worse than not wrapping it.
-- Whether file-send should accept drops onto the drop shelf
-  (`modules/imi/dropShelf/`), which already handles mid-drag interaction.
+- ~~Whether pairing should be driveable from the shell or deferred to the
+  daemon's own UI.~~ Answered by slice 3: it is, as two methods on the device
+  path, and the wrapping is narrow on purpose — an answer is refused for any
+  device that has not asked, the card says to accept only a pairing the user
+  started on that device, and nothing about the id ever reaches a shell.
+- ~~Whether file-send should accept drops onto the drop shelf
+  (`modules/imi/dropShelf/`), which already handles mid-drag interaction.~~
+  Answered by the Phone tab spec: both — the picker landed with slice 4 on
+  the service, and the tab carries a `DropArea` that hands dropped `file://`
+  URLs to the same `shareUrls`.
 
 ## Out of scope
 

@@ -10,12 +10,14 @@ RippleButton {
     property bool showPing: false
     property bool vertical: Config.options.bar.vertical
     property bool aiChatEnabled: Config.options.policies.ai !== 0
+    property bool tailnetEnabled: Config.options.sidebar.tailnet.enable && Tailscale.installed
+    property bool ociVpsEnabled: Config.options.sidebar.ociVps.enable && OciVps.configured
     property bool translatorEnabled: Config.options.sidebar.translator.enable
     property bool animeEnabled: Config.options.policies.weeb !== 0
+    property bool phoneEnabled: Config.options.sidebar.phone.enable
     property bool isMaterial: Config.options.bar.cornerStyle === 3
     property real buttonPadding: Appearance.spacing.space50
-
-    visible: aiChatEnabled || translatorEnabled || animeEnabled
+    visible: aiChatEnabled || tailnetEnabled || ociVpsEnabled || translatorEnabled || animeEnabled || phoneEnabled
 
     implicitWidth: 32
     implicitHeight: 32

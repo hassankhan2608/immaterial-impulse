@@ -178,6 +178,9 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideRight
                 color: Appearance.colors.colOnLayer1
+                // A track change is an event the eye follows, not a tick - the
+                // material row's two labels already animate their swaps.
+                animateChange: true
                 text: Config.options.bar.media.onlyTitle ? root.cleanedTitle : `${root.cleanedTitle}${root.activePlayer?.trackArtist ? ' • ' + root.activePlayer.trackArtist : ''}`
             }
         }
@@ -380,6 +383,7 @@ Item {
                         colRipple: root.isPlaying ? Appearance.colors.colPrimaryActive : Appearance.colors.colPrimaryContainerActive
                         downAction: () => root.activePlayer?.togglePlaying()
                         contentItem: MaterialSymbol {
+                            verticalAlignment: Text.AlignVCenter
                             anchors.centerIn: parent
                             horizontalAlignment: Text.AlignHCenter
                             text: root.isPlaying ? "pause" : "play_arrow"
@@ -401,6 +405,7 @@ Item {
                         downAction: () => root.activePlayer?.next()
                         altAction: () => root.activePlayer?.previous()
                         contentItem: MaterialSymbol {
+                            verticalAlignment: Text.AlignVCenter
                             anchors.centerIn: parent
                             horizontalAlignment: Text.AlignHCenter
                             text: "skip_next"

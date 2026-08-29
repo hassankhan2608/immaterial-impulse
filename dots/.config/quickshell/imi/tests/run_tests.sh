@@ -16,6 +16,182 @@ cd "$PROJECT_ROOT" || exit 1
 # explicit value still wins, for anyone who needs a real platform plugin.
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 
+# ---------------------------------------------------------------------------
+# Serializing concurrent suite runs
+#
+# Several agents work this repo in parallel git worktrees and every worktree
+# runs this same script. Forty of the checks below are runtime harnesses -
+# test_edit_mode_runtime.py, test_widget_interaction_runtime.py,
+# test_phone_tab_runtime.py, test_settings_page_incubation_runtime.py, the
+# phone-connect pair, and the rest - and each one starts a nested weston and a
+# `dbus-run-session`. Two suites overlapping there costs the loser its
+# compositor mid-run, and what it reports is `The Wayland connection broke. Did
+# the Wayland compositor die?`, which is indistinguishable from a real
+# regression: five times in one day, three full re-runs, and one agent
+# "fixing" code that was never broken. Waiting used to be the caller's job -
+# `ps` for a running suite before starting one - and a rule every caller has to
+# remember is a rule that gets forgotten, including by the maintainer twice.
+#
+# So the waiting is the script's job now. `acquire_suite_lock` blocks until it
+# can have the machine to itself, says whose run it is waiting for, and never
+# fails: an agent handed a hard error retries in a loop, which is worse than
+# the collision.
+#
+# WHERE the lock is taken, and why it is not the whole run:
+#
+#   - Everything above the acquire is pure. Source-text lints and contract
+#     checks that parse QML, Python and shell: none of them start a process
+#     that competes for anything, so two suites are free to overlap there.
+#   - The harnesses are interleaved with more static checks all the way to the
+#     end of the file rather than grouped, so the honest contiguous critical
+#     section is "the first harness to the end of the run".
+#   - A lock taken and released around each harness would overlap more, and it
+#     is forty acquire/release pairs plus a rule every future harness has to
+#     remember. The failure mode is one unwrapped harness and a collision that
+#     looks exactly like the one this exists to remove. One acquire point
+#     cannot be forgotten, and `lint_suite_lock_scope.py` fails the suite if a
+#     harness is ever wired in above it.
+#   - The tail past the last harness is held too: a handful of contract checks,
+#     the DesignSystemCompile probe (which starts a real `qs` on the session's
+#     OWN display) and qmltestrunner. Releasing early would reclaim under a
+#     minute and add a second boundary that a harness appended below it would
+#     silently escape.
+#
+# Measured on this machine (2026-08-28, one full green run, every block timed
+# from the run's own output), because "how much could narrowing possibly buy"
+# is the load-bearing number and it is not what it looks like: of 16m40s of
+# work, the compositor harnesses are 15m19s, the free head above the acquire is
+# 23s, and everything else inside the lock is 1m21s. The run is harness-bound,
+# so even a per-harness lock could overlap only about a hundred seconds of a
+# seventeen-minute run. That is what settles the trade above, rather than the
+# argument about forty call sites on its own - and it is why the boundary is
+# not worth moving on the assumption that most of a run is static. On this tree
+# it is not.
+#
+# WHICH lock: one fixed name per user, never a hash of the checkout. What is
+# being serialized is this machine's ability to run a nested compositor, not a
+# repository - so every worktree and every clone has to contend for the same
+# one, which is exactly what "keyed to the repo, not the worktree" needs. On CI
+# it is uncontended by construction (one job, a fresh runner, nothing else
+# holding it), so `flock -n` succeeds on its first try and the whole mechanism
+# costs an open() and one ioctl. It can never turn a CI failure into a hang.
+#
+# HOW it is released: the lock lives on a file descriptor this shell holds
+# open, so the kernel drops it when the process ends for any reason - a failing
+# check's `exit 1`, a Ctrl-C, a SIGKILL. There is no lockfile to clean up and
+# no stale marker that can wedge the next run.
+#
+# The one residual is a DESCENDANT that inherits the descriptor and outlives
+# the suite - bash sets no close-on-exec on a `{fd}<>` redirection, so every
+# child has a copy. Measured while building this: a backgrounded holder
+# SIGKILLed while its child was still alive left the lock held with no suite
+# running. So the wait has a second strike - two consecutive minutes with the
+# record unchanged and naming no live process - after which it says so and runs
+# unserialized rather than waiting on nothing for ever.
+if [[ "${XDG_RUNTIME_DIR:-}" ]]; then
+    SUITE_LOCK_FILE="$XDG_RUNTIME_DIR/immaterial-impulse-test-suite.lock"
+else
+    # /tmp is shared between users; another account's file would be
+    # unopenable, which would read as "no lock available" rather than as a
+    # permission problem.
+    SUITE_LOCK_FILE="/tmp/immaterial-impulse-test-suite.$(id -u).lock"
+fi
+
+# Named in the record so a waiting run can say which checkout is ahead of it.
+SUITE_LOCK_WORKTREE="$(git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)"
+[[ -n "$SUITE_LOCK_WORKTREE" ]] || SUITE_LOCK_WORKTREE="$PROJECT_ROOT"
+
+if ! command -v flock >/dev/null 2>&1; then
+    echo "Warning: flock not found (it ships in util-linux)." >&2
+    echo "  Running without suite serialization: a suite started in another" >&2
+    echo "  worktree while this one is in its runtime harnesses can break both" >&2
+    echo "  with 'The Wayland connection broke'. Check by hand instead." >&2
+fi
+
+# The holder's own record, read by a waiter. It is written into the lock file
+# itself rather than a sidecar, which is why the descriptor below is opened
+# read-write (`<>`) and not `>`: a waiter opening with `>` would truncate the
+# record it is about to read.
+suite_lock_record() {
+    local record
+    record="$(head -n 1 "$SUITE_LOCK_FILE" 2>/dev/null)"
+    if [[ -z "$record" ]]; then
+        record="an unidentified run (it left no record)"
+    fi
+    printf '%s' "$record"
+}
+
+acquire_suite_lock() {
+    if ! command -v flock >/dev/null 2>&1; then
+        return 0
+    fi
+    # Re-entry: a run_tests.sh invoked from inside another one is a descendant
+    # of the holder, so blocking here would be blocking on ourselves. The outer
+    # run already owns the machine on this one's behalf.
+    if [[ -n "${IMI_SUITE_LOCK_HELD:-}" ]]; then
+        echo "[suite-lock] already held by this run's parent (pid ${IMI_SUITE_LOCK_HELD}); not re-taking it"
+        return 0
+    fi
+
+    if ! exec {SUITE_LOCK_FD}<>"$SUITE_LOCK_FILE"; then
+        echo "Warning: cannot open $SUITE_LOCK_FILE; running without suite serialization." >&2
+        return 0
+    fi
+
+    local start=$SECONDS
+    if ! flock -n "$SUITE_LOCK_FD"; then
+        echo "[suite-lock] another suite is running in $(suite_lock_record)"
+        echo "[suite-lock] waiting for it to finish - the runtime harnesses below each start a nested weston and cannot share this machine."
+        # -w rather than a bare blocking wait so the wait is not silent: a run
+        # queued behind a wedged one should say so every minute instead of
+        # looking hung itself. It still never gives up on a live holder,
+        # because a hard failure here is a retry loop in whatever started it.
+        local record="" previous="" abandoned=0
+        until flock -w 60 "$SUITE_LOCK_FD"; do
+            local note pid
+            previous="$record"
+            record="$(suite_lock_record)"
+            note=""
+            pid="$(printf '%s' "$record" | sed -n 's/.*pid \([0-9][0-9]*\).*/\1/p')"
+            # A descendant that inherits this descriptor keeps the lock after
+            # the run that took it has gone - measured: a backgrounded holder
+            # SIGKILLed while its `sleep` child was still alive left the lock
+            # held with nothing running the suite. That is the one way this can
+            # wedge, so it is the one case that gives up on the lock rather
+            # than on the run. Two strikes a minute apart, and only while the
+            # record has not moved: a real handoff writes a new record within
+            # milliseconds of taking the lock, so an unchanged record naming a
+            # dead pid sixty seconds later is a leak and not a race with
+            # somebody else's acquire. A record with no pid in it at all
+            # counts the same way and for the same reason: the only moment
+            # the file is empty is between one `flock` returning and the
+            # `printf` a few microseconds later, so an empty one that is
+            # still empty a minute on is not a suite either.
+            if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+                if [[ "$record" == "$previous" ]]; then
+                    abandoned=1
+                    break
+                fi
+                note=" - no live suite is running under that record; if the lock is still held a minute from now, something a finished run spawned is holding this descriptor open"
+            fi
+            echo "[suite-lock] still waiting after $((SECONDS - start))s for $record$note"
+        done
+        if (( abandoned )); then
+            echo "[suite-lock] giving up on the lock after $((SECONDS - start))s: it is held by something that outlived the run recorded as $record." >&2
+            echo "[suite-lock] no live suite matches that record, so this run continues unserialized. Check for a stray weston or qs if the harnesses below misbehave." >&2
+            # Deliberately no record and no IMI_SUITE_LOCK_HELD: this run does
+            # not hold the lock, and saying it does would tell the next waiter
+            # to wait for a run that is not the one blocking it.
+            return 0
+        fi
+        echo "[suite-lock] acquired after $((SECONDS - start))s"
+    fi
+
+    printf '%s (pid %s, started %s)\n' \
+        "$SUITE_LOCK_WORKTREE" "$$" "$(date -Is)" > "$SUITE_LOCK_FILE"
+    export IMI_SUITE_LOCK_HELD=$$
+}
+
 # Find Qt6 qmltestrunner
 QMLTESTRUNNER=""
 POSSIBLE_PATHS=(
@@ -128,6 +304,17 @@ if ! python3 "$SCRIPT_DIR/lint_interaction_motion_double.py"; then
     exit 1
 fi
 
+# Static lint: the third member of the doubled-channel family. A wave member's
+# opacity rides `appear`, so a root-level `Behavior on opacity` in the same
+# file turns StaggerWave.park()'s snap into an on-stage fade-out and freezes
+# the entrance while `appear` animates - the android quick toggles' "visible,
+# then the animation begins" pause.
+echo "Running wave-member opacity-Behavior lint..."
+if ! python3 "$SCRIPT_DIR/lint_wave_member_opacity_behavior.py"; then
+    echo "Wave-member opacity-Behavior lint failed."
+    exit 1
+fi
+
 # Static lint: an animation that names a motion tier's duration must take that
 # tier's easing with it. Leaving the curve behind hands the animation Qt's
 # default, Easing.Linear - the generic curve M3_GUIDELINES §2 forbids - and
@@ -160,6 +347,17 @@ fi
 echo "Running display isolation lint..."
 if ! python3 "$SCRIPT_DIR/lint_display_isolation.py"; then
     echo "Display isolation lint failed."
+    exit 1
+fi
+
+# ...and its sibling: a harness with a compositor of its own must also run
+# INSIDE the suite lock taken below, or two worktrees' suites still bring two
+# westons up at once and the loser reports a broken Wayland connection that
+# looks like a regression. One acquire point is what makes that rule simple;
+# this is what keeps a harness from being wired in above it.
+echo "Running suite lock scope lint..."
+if ! python3 "$SCRIPT_DIR/lint_suite_lock_scope.py"; then
+    echo "Suite lock scope lint failed."
     exit 1
 fi
 
@@ -267,6 +465,19 @@ fi
 echo "Running cava claim lint..."
 if ! python3 "$SCRIPT_DIR/lint_cava_claims.py"; then
     echo "cava claim lint failed."
+    exit 1
+fi
+
+# Config.readWriteDelay debounces the write of the whole schema and the reload
+# the shell's own write provokes. SettingsContent set it to 0 and never put it
+# back, and the settings host is built at Config.ready rather than at window
+# open - so every config write in the shell was undebounced from startup, for
+# the session, on every machine. The delay is resolved from declared claims now;
+# this refuses an assignment, a second writer of the count, a claim with no
+# stated condition, and a claim held unconditionally inside the shell's own tree.
+echo "Running config write delay claim lint..."
+if ! python3 "$SCRIPT_DIR/lint_config_write_delay_claims.py"; then
+    echo "Config write delay claim lint failed."
     exit 1
 fi
 
@@ -423,6 +634,26 @@ if ! python3 "$SCRIPT_DIR/test_clock_motion_contract.py"; then
     exit 1
 fi
 
+# Bar texts whose change is an event (a track change, a weather refresh) take
+# StyledText's animateChange swap; the clock's tick is pinned as a refusal - a
+# configurable time format makes it up to once per second, on a bar that stays
+# `visible` under a fullscreen window.
+echo "Running bar text change motion tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_text_change_motion.py"; then
+    echo "Bar text change motion tests failed."
+    exit 1
+fi
+
+# The todo lists ride StyledListView's own add/remove transitions, which only
+# works while the model's values keep their identity across updates: ScriptModel
+# diffs by strict equality, so a per-update wrapper reads as remove-all+add-all
+# and flies the whole list in on every change.
+echo "Running todo list transition tests..."
+if ! python3 "$SCRIPT_DIR/test_todo_list_transitions.py"; then
+    echo "Todo list transition tests failed."
+    exit 1
+fi
+
 # The clock's options page shows only the chosen style's rows. The predicate is
 # pinned by tst_option_visibility.qml; this is the adoption, which is what
 # decays - a 29th option added without a rule renders on every style again.
@@ -453,6 +684,24 @@ if ! python3 "$SCRIPT_DIR/test_exit_owned_surface_contract.py"; then
     exit 1
 fi
 
+# A persistent surface is one window per screen, pinned to its output, with
+# the open edge latching which of them shows - a window with no screen of its
+# own is created once, on the monitor focused at boot, and never moves (#297).
+echo "Running persistent surface screen contract tests..."
+if ! python3 "$SCRIPT_DIR/test_persistent_surface_screen.py"; then
+    echo "Persistent surface screen contract tests failed."
+    exit 1
+fi
+
+# The right sidebar's fill-height section clips and hides its list when the
+# column has no room for it - the notification list's unclipped pieces used to
+# paint over the media player and the bottom group.
+echo "Running sidebar center group contract tests..."
+if ! python3 "$SCRIPT_DIR/test_sidebar_center_group_contract.py"; then
+    echo "Sidebar center group contract tests failed."
+    exit 1
+fi
+
 # The shell has two password prompts - the lock screen and the polkit dialog -
 # and they were two different text fields, one of them Material's outlined
 # container with the prompt floating in a notch. The check derives the control
@@ -463,6 +712,11 @@ if ! python3 "$SCRIPT_DIR/test_polkit_dialog_contract.py"; then
     echo "Polkit dialog contract tests failed."
     exit 1
 fi
+
+# Everything from here down may start a nested compositor, so this is where the
+# run stops sharing the machine. See "Serializing concurrent suite runs" at the
+# top of this file for why the boundary is here and not around each harness.
+acquire_suite_lock
 
 # ...and the half the source cannot state: where the action row lands in the
 # card, whether the two buttons answer a real pointer, and whether the field
@@ -620,6 +874,17 @@ fi
 echo "Running settings page id tests..."
 if ! python3 "$SCRIPT_DIR/test_settings_page_ids.py"; then
     echo "Settings page id tests failed."
+    exit 1
+fi
+
+# The settings row grammar: the six widgets that carry it read tokens and
+# whole motion tiers for every visual value, and the one reference page
+# (Settings > Capture) uses every piece - a chip dropped from one toggle row
+# or an option added without its icon errors nowhere, the shape just stops
+# being the grammar. Other pages adopt it in later PRs and are pinned here.
+echo "Running settings row grammar tests..."
+if ! python3 "$SCRIPT_DIR/test_settings_row_grammar.py"; then
+    echo "Settings row grammar tests failed."
     exit 1
 fi
 
@@ -928,11 +1193,49 @@ if ! python3 "$SCRIPT_DIR/test_parallax_migration_runtime.py"; then
     exit 1
 fi
 
+# A register that exists but is not named in this file protects nothing;
+# checked before anything else so the report is not buried under a long run.
+echo "Running suite registration lint..."
+if ! python3 "$SCRIPT_DIR/lint_suite_registration.py"; then
+    echo "Suite registration lint failed."
+    exit 1
+fi
+
+# A glyph used as a Control's contentItem declares both alignments: anchors on
+# a contentItem are ignored, and an unaligned Text draws top-left of its rect.
+echo "Running icon glyph alignment lint..."
+if ! python3 "$SCRIPT_DIR/lint_icon_glyph_alignment.py"; then
+    echo "Icon glyph alignment lint failed."
+    exit 1
+fi
+
+# The bar popup's section wave: armed on a takeover from idle, released by
+# the gate, and never fired against a tree that was not parked. This register
+# existed for a while without being wired in here - the mutations it plants
+# were only ever caught by hand runs, which is the one failure mode a suite
+# cannot see about itself. The meta-check at the end of this file exists so
+# the next unwired register goes red instead.
+echo "Running bar popup section entrance tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_popup_section_entrance.py"; then
+    echo "Bar popup section entrance tests failed."
+    exit 1
+fi
+
 # One motion policy: that every tier still routes through it, and that the
 # reduce-motion floor stays a named state rather than the far end of a slider.
 echo "Running motion policy contract tests..."
 if ! python3 "$SCRIPT_DIR/test_motion_policy_contract.py"; then
     echo "Motion policy contract tests failed."
+    exit 1
+fi
+
+# The quick sliders' cards ride the shared wave, bottom-up, beside their fill
+# sweep: each card declares `appear`, sits in a dressed container, and is in
+# the wave's list in order. None of it builds under qmltestrunner and all of
+# it fails silently on screen, so the shape is pinned in the source.
+echo "Running quick sliders entrance contract tests..."
+if ! python3 "$SCRIPT_DIR/test_quick_sliders_entrance_contract.py"; then
+    echo "Quick sliders entrance contract tests failed."
     exit 1
 fi
 
@@ -990,6 +1293,27 @@ fi
 echo "Running Settings navigation tests..."
 if ! python3 "$SCRIPT_DIR/test_settings_navigation.py"; then
     echo "Settings navigation tests failed."
+    exit 1
+fi
+
+# WHEN the settings host builds its fifteen pages. It used to build all of them
+# synchronously in one turn at Config.ready - 622ms of frozen GUI thread paid by
+# the whole shell at startup, measured on the harness's own heartbeat, and
+# invisible to any `sync` timing around the write because the cost lands in the
+# turn after it. Brings its own headless weston and session bus.
+echo "Running settings page incubation runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_settings_page_incubation_runtime.py"; then
+    echo "Settings page incubation runtime tests failed."
+    exit 1
+fi
+
+# How long the settings window's faster config flush lasts, driven against the
+# real Settings scope: an open, a close, a second open, two claimants, and a
+# claim whose declaring object is destroyed under it. Brings its own headless
+# weston and session bus.
+echo "Running config write delay runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_config_write_delay_runtime.py"; then
+    echo "Config write delay runtime tests failed."
     exit 1
 fi
 
@@ -1268,6 +1592,14 @@ if ! python3 "$SCRIPT_DIR/test_clight_integration_runtime.py"; then
     exit 1
 fi
 
+# Brings its own headless weston and fake easyeffects/flatpak/pidof/pkill:
+# the toggle answers optimistically and the verify pass corrects a lie.
+echo "Running EasyEffects state runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_easyeffects_state_runtime.py"; then
+    echo "EasyEffects state runtime tests failed."
+    exit 1
+fi
+
 echo "Running shared widget contract tests..."
 if ! python3 "$SCRIPT_DIR/test_shared_widget_contracts.py"; then
     echo "Shared widget contract tests failed."
@@ -1478,6 +1810,16 @@ if ! python3 "$SCRIPT_DIR/test_phone_connect_contract.py"; then
     exit 1
 fi
 
+# The left sidebar's tab set: the tab-bar entries, the deep-link ids and the
+# SwipeView's pages are three literal arrays kept index-aligned by hand, and
+# a tab added to one of them alone shows the wrong page with nothing in any
+# log. Nothing else in the suite builds these widgets.
+echo "Running left sidebar tab set tests..."
+if ! python3 "$SCRIPT_DIR/test_sidebar_left_tabs.py"; then
+    echo "Left sidebar tab set tests failed."
+    exit 1
+fi
+
 # The stream's process lifetime, which no source check and no unit test can
 # reach: a real shell, a fake busctl whose monitor verb streams one signal in
 # one case and exits instantly in the other, and the spawn TIMESTAMPS read
@@ -1486,6 +1828,146 @@ fi
 echo "Running Phone Connect monitor runtime tests..."
 if ! python3 "$SCRIPT_DIR/test_phone_connect_monitor_runtime.py"; then
     echo "Phone Connect monitor runtime tests failed."
+    exit 1
+fi
+
+# The Phone tab against the real service and a fake daemon: the chip, the
+# pills in their priority order, one row of six model actions and which of
+# them answer, the sub-page overlay with no pages behind it, the
+# notification list's height, and the pairing card's two clicks read back
+# off the fake's log.
+echo "Running Phone tab runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_tab_runtime.py"; then
+    echo "Phone tab runtime tests failed."
+    exit 1
+fi
+
+# What the tab and its sub-pages DRAW, in a real window: the Contacts list
+# owning the room under its header, the Android Apps empty state staying
+# clear of the search row it used to paint over, and a notification card's
+# app icon resolving off the file kdeconnectd wrote. A page whose content
+# resolves to zero height renders its header and nothing else, and the
+# source of that reads perfectly.
+echo "Running Phone tab layout runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_tab_layout_runtime.py"; then
+    echo "Phone tab layout runtime tests failed."
+    exit 1
+fi
+
+# How wide the Webcam and Microphone sub-pages ASK to be, and where their
+# rows are drawn, at the panel's own width. Both are a `ContentPage`, whose
+# content column is `Math.max(baseWidth, implicitWidth)` and centred, and
+# that baseWidth default is the settings window's 600 - so in a 440px page
+# the column hung 80px off each side and every label was clipped at the
+# panel's left edge, with nothing in any log and a green suite.
+echo "Running Phone sub-page width runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_subpage_width_runtime.py"; then
+    echo "Phone sub-page width runtime tests failed."
+    exit 1
+fi
+
+# The webcam preview player's lifetime, scored as a process rather than as a
+# flag: a stub stream is ended five ways - the stop button, the watchdog
+# finding it dead, the user closing the player's window, the phone leaving the
+# daemon, and the shell itself exiting - and each one asks `kill -0` about the
+# pid the player wrote. It used to be spawned with execDetached, which returns
+# no handle, so every one of those left a window frozen on a dead /dev/videoN.
+echo "Running Phone preview lifetime runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_preview_lifetime_runtime.py"; then
+    echo "Phone preview lifetime runtime tests failed."
+    exit 1
+fi
+
+# The phone's notification mirror: the parser region synced with its double,
+# argv only, dismiss on the LEAF, the declared reply refetch delay, one
+# stream, the desktop dedupe gate at ingestion, and the cache key declared.
+echo "Running Phone Notifications contract tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_notifications_contract.py"; then
+    echo "Phone Notifications contract tests failed."
+    exit 1
+fi
+
+# The mirror against the real services and a fake daemon: the sweep's model,
+# the second notification arriving from a SIGNAL (the trigger chain's
+# oracle), the cache in Persistent, and dismiss/reply/sendAction read back
+# off the fake's log - on the leaf path, never as a cancel action.
+echo "Running Phone Notifications runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_notifications_runtime.py"; then
+    echo "Phone Notifications runtime tests failed."
+    exit 1
+fi
+
+# The contacts reader: the kpeoplevcard directory KDE Connect writes, parsed
+# against a fixture shaped after the real vCard 2.1 cards (soft-wrapped
+# QUOTED-PRINTABLE names, folded base64 photos, a card that is only a
+# number), the publish-only-on-change rule, and both watch modes.
+echo "Running Phone contacts monitor tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_contacts_monitor.py"; then
+    echo "Phone contacts monitor tests failed."
+    exit 1
+fi
+
+# The QML suite drives a logic-only double of PhoneContacts; this is the sync
+# check that makes its green transfer, plus the argv-only rule, the monitor's
+# lifecycle ladder, and the refusals the adb intents must make.
+echo "Running Phone contacts contract tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_contacts_contract.py"; then
+    echo "Phone contacts contract tests failed."
+    exit 1
+fi
+
+# The Phone tab's four SHELL scripts, run for real with stubbed pgrep,
+# pactl, v4l2-ctl, droidcam-cli, scrcpy and sudo first on PATH. Nothing had
+# ever run them: the contract check beside this one reads them as source text
+# and tst_phone_scrcpy.qml drives the QML that parses their output against
+# strings a human typed, so a producer that stopped emitting those strings
+# stayed green on both sides. What that cost: a `stop video` that sent
+# SIGTERM to the MICROPHONE, and a status probe whose JSON did not parse, so
+# every field in the payload was lost rather than one.
+echo "Running Phone shell script tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_shell_scripts.py"; then
+    echo "Phone shell script tests failed."
+    exit 1
+fi
+
+# The scrcpy supervisor over its real stdin/stdout, with fake scrcpy/adb/
+# hyprctl first on PATH: the exact argv, the events, focus by window title,
+# the USB-over-wireless rule, the app-list parse and its fallback, the cache
+# file, and stop-on-EOF.
+echo "Running Phone scrcpy session manager tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_scrcpy_manager.py"; then
+    echo "Phone scrcpy session manager tests failed."
+    exit 1
+fi
+
+# The four session services' process I/O, which their doubles omit: the
+# synced regions byte-identical, argv only (the constant probes are the one
+# shell), no running binding anywhere, the supervisor's marker, ladder and
+# idle timer, detached DroidCam launches, and the mic's swap undone on
+# every exit path.
+echo "Running Phone sessions contract tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_sessions_contract.py"; then
+    echo "Phone sessions contract tests failed."
+    exit 1
+fi
+
+# The Phone tab's pages, cards and settings page against what the services
+# and the config schema declare: every PhoneX.member resolved against its
+# service, every Config.options.phone.* path against Config.qml, the seam with
+# the sub-page host W5a owns, and the install guide's constant-argv copy.
+# The QML engine's JS dialect is the Qt version's, and CI installs an older
+# Qt than a developer here runs: syntax that compiles locally fails there as
+# `compile() Unexpected token`, naming neither the file's problem nor the
+# rule. Numeric separators cost this branch one CI round.
+echo "Running QML/JS dialect lint..."
+if ! python3 "$SCRIPT_DIR/lint_qml_js_dialect.py"; then
+    echo "QML/JS dialect lint failed."
+    exit 1
+fi
+
+echo "Running Phone tab surface contract tests..."
+if ! python3 "$SCRIPT_DIR/test_phone_tab_surface_contract.py"; then
+    echo "Phone tab surface contract tests failed."
     exit 1
 fi
 
@@ -1504,6 +1986,17 @@ fi
 echo "Running media layout contract tests..."
 if ! python3 "$SCRIPT_DIR/test_media_layouts_contract.py"; then
     echo "Media layout contract tests failed."
+    exit 1
+fi
+
+# The AI provider/model catalog (services/ai_catalog.js) and Ai.qml's built-in
+# model literals are two copies of one truth until the proposal's stage 2 wires
+# Ai.qml to the catalog; this pins them equal field by field so neither can
+# drift in the meantime, and pins the catalog's dialect vocabulary to the
+# strategy files that implement it. See docs/proposals/ai-assistant-upgrade.md.
+echo "Running AI catalog contract tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_catalog_contract.py"; then
+    echo "AI catalog contract tests failed."
     exit 1
 fi
 

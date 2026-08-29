@@ -380,6 +380,7 @@ fi`
                 contentItem: MaterialSymbol {
                     anchors.centerIn: parent
                     horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
                     text: "refresh"
                     iconSize: Appearance.font.pixelSize.large
                     color: Appearance.colors.colSubtext
@@ -434,6 +435,7 @@ fi`
         colRipple: Appearance.colors.colLayer4Active
         contentItem: MaterialSymbol {
             horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
             text: actionBtn.symbol
             iconSize: Appearance.font.pixelSize.larger
             color: Appearance.m3colors.m3onSurface

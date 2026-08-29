@@ -9,6 +9,13 @@ import QtQuick.Layouts
 Item {
     id: root
 
+    // The least height at which this list is worth drawing: its status row,
+    // the gap above it, and one line of the empty state (or the top of a
+    // card). Below this the owner hides it rather than let the unclipped
+    // pieces paint outside a rectangle with no area.
+    readonly property real minimumUsefulHeight: statusRow.implicitHeight
+        + Appearance.spacing.space100 + Appearance.font.pixelSize.large * 2
+
     NotificationListView { // Scrollable window
         id: listview
         anchors.left: parent.left
@@ -51,6 +58,33 @@ Item {
         }
     }
 
+    // The status bar's entrance is the fork's converging halves: the snooze
+    // icon slides in from the left, the clear icon from the right, the count
+    // fading between them, after the fork's own deliberate 250ms beat. The
+    // buttons are GroupButtons, whose opacity and transform are free
+    // channels (no interaction model, no dim) - the same reading that lets
+    // the toggle tiles be dressed.
+    property int entranceTrigger: -1
+    property real _convergeLeft: 0
+    property real _convergeRight: 0
+    property real _statusOpacity: 1
+    onEntranceTriggerChanged: {
+        statusConverge.stop();
+        root._convergeLeft = -40;
+        root._convergeRight = 40;
+        root._statusOpacity = 0;
+        statusConverge.start();
+    }
+    SequentialAnimation {
+        id: statusConverge
+        PauseAnimation { duration: Appearance.animation.scale(250) }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "_statusOpacity"; from: 0; to: 1; duration: Appearance.animation.scale(320); easing.type: Easing.OutCubic }
+            NumberAnimation { target: root; property: "_convergeLeft"; from: -40; to: 0; duration: Appearance.animation.scale(350); easing.type: Easing.OutCubic }
+            NumberAnimation { target: root; property: "_convergeRight"; from: 40; to: 0; duration: Appearance.animation.scale(350); easing.type: Easing.OutCubic }
+        }
+    }
+
     ButtonGroup {
         id: statusRow
         anchors {
@@ -63,6 +97,8 @@ Item {
             Layout.fillWidth: false
             buttonIcon: "notifications_paused"
             toggled: Notifications.silent
+            opacity: root._statusOpacity
+            transform: Translate { x: root._convergeLeft }
             onClicked: () => {
                 Notifications.silent = !Notifications.silent;
             }
@@ -70,11 +106,14 @@ Item {
         NotificationStatusButton {
             enabled: false
             Layout.fillWidth: true
+            opacity: root._statusOpacity
             buttonText: Translation.tr("%1 notifications").arg(Notifications.list.length)
         }
         NotificationStatusButton {
             Layout.fillWidth: false
             buttonIcon: "delete_sweep"
+            opacity: root._statusOpacity
+            transform: Translate { x: root._convergeRight }
             onClicked: () => {
                 Notifications.discardAllNotifications()
             }

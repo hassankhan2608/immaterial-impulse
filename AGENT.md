@@ -434,6 +434,61 @@ finding). A check that reads the `.in` is checking the wrong file and stays gree
 for the whole life of the bug; `tests/test_clock_depth_cache.py` reads both now.
 (fix(install): put onnxruntime in the lock the installer actually installs.)
 
+## Running the suite while another agent is running one
+
+**`tests/run_tests.sh` serializes itself — do not check `ps` for a running suite
+before starting one, and do not stagger runs by hand.** Everything up to the
+first runtime harness is pure (source-text lints, contract checks that parse QML
+and Python) and overlaps freely; from the first harness to the end of the run
+the script holds one exclusive `flock` on
+`${XDG_RUNTIME_DIR}/immaterial-impulse-test-suite.lock` — one fixed name per
+user, so every worktree and every clone on this machine contends for the same
+one. A second suite reaching that point prints which checkout is ahead of it and
+waits.
+
+That waiting used to be the caller's rule, and callers forgot it, the maintainer
+twice. What it costs is not a red test: forty of the checks start a nested
+weston and a `dbus-run-session`, and two of those up at once takes the loser's
+compositor away, so what it prints is `The Wayland connection broke. Did the
+Wayland compositor die?` — indistinguishable from a real regression in whatever
+it was testing. Five times in one day, three full re-runs, and one agent
+"fixing" code that was never broken.
+
+**The queueing is inherent, not a cost of where the boundary sits**, and that
+was measured before it was argued about: on one full green run here, of 16m40s
+of work the compositor harnesses are **15m19s**, the free head above the acquire
+is **23s**, and everything else inside the lock is **1m21s**. So even a
+per-harness lock — forty acquire/release pairs and a rule every new harness has
+to remember — could overlap about a hundred seconds of a seventeen-minute run.
+Do not re-open that trade on the assumption that most of a run is static.
+
+Four properties to know before changing any of it.
+
+- **The lock lives on a file descriptor the shell holds open**, so the kernel
+  drops it however the run ends — a failing check's `exit 1`, a Ctrl-C, a
+  SIGKILL. There is no lockfile to clean up and no stale marker to clear.
+- **What the kernel cannot drop is a descendant that inherited the
+  descriptor**: bash sets no close-on-exec on a `{fd}<>` redirection. Measured —
+  a backgrounded holder SIGKILLed while its child was alive left the lock held
+  with no suite running. So the wait gives up on the lock (not on the run) after
+  two consecutive minutes with the holder's record unchanged and naming no live
+  process, and says so.
+- **There is exactly ONE acquire point**, which is what makes the boundary cheap
+  and is also the thing that can silently break: a harness wired in above it
+  would run unserialized. `tests/lint_suite_lock_scope.py` fails the suite on
+  that, classifying "a harness that nests a compositor" with
+  `lint_display_isolation`'s own rule rather than a list of its own.
+- **CI never contends** — one job, a fresh runner, nothing else holding it — so
+  `flock -n` succeeds on its first try and the whole mechanism costs an `open()`
+  and one ioctl. It cannot turn a CI failure into a hang.
+
+The `run_*_probe.sh` scripts are **not** covered. They are run by hand, each
+nests its own weston, and two of those still collide with each other and with a
+suite's harnesses; `docs/handoff-2026-08-17-edit-mode.md`'s "re-run in
+isolation" is still the rule there.
+8b5f04d6e ("test(suite): serialize a run's compositor harnesses behind one flock"),
+d8ba5738b ("test(lint): fail on a compositor harness wired in above the suite lock").
+
 ## Directory map
 
 ```
@@ -443,6 +498,9 @@ ReloadPopup.qml, welcome.qml, killDialog.qml   Misc top-level overlays
 
 modules/common/             Shared, feature-agnostic building blocks
   Config.qml                 Singleton: the entire settings schema + JSON persistence (see below)
+  ConfigWriteDelayRef.qml    A surface's claim on an undebounced config write. Config.readWriteDelay
+                              is a readonly RESOLUTION over the live claims - nothing assigns it,
+                              and a claim's release is its own lifetime. See the Config section
   Appearance.qml              Singleton: design tokens - colors (M3 color roles), font sizes,
                               rounding, spacing, border widths, animation curves/durations, sizes.
                               Every widget reads from here rather than hardcoding values.
@@ -496,7 +554,24 @@ modules/imi/                 The "imi" (Immaterial Impulse) panel family - one d
                               popup's content on a single morphing card - it serves the vertical
                               bar too, which loads the same widget files
                               (d29cd6e45 ("feat(bar): add the static overlay surface the popup card will live on"))
-  sidebarLeft/, sidebarRight/ Slide-out panels (AI chat, quick settings, notifications, volume mixer)
+  sidebarLeft/, sidebarRight/ Slide-out panels (AI chat, translator, media, the Phone tab;
+                              quick settings, notifications, volume mixer). sidebarLeft/phone/ is
+                              the Phone tab - the paired phone's chip, six actions, two navigation
+                              cards, its notification list and a footer toolbar, over
+                              PhoneConnect + PhoneNotifications. It replaced the right sidebar's
+                              phone dialog, whose quick toggle now writes
+                              GlobalStates.sidebarLeftTab and opens this panel
+                              f7a6ef75a ("refactor(sidebar): the phone quick toggle opens the tab, and the dialog goes")
+                              The tab's bottom card stack (PhoneFeatureCard/PhoneFeatureCards
+                              over PhoneScrcpy/PhoneCamera/PhoneMic, with InstallGuidePopup
+                              for a feature whose tooling is missing) and its four sub-pages
+                              live beside it; phone_cards.js is everything those decide,
+                              because nothing drawn there is reachable from qmltestrunner
+                              3af38971c ("feat(phone): phone_cards.js, the feature cards' decisions as arithmetic")
+  phone/                      The pieces every phone surface draws, shared out of that dialog
+                              rather than owned by one panel: the device chip, the round action
+                              button, the roster row and the pairing card
+                              da7154a58 ("refactor(phone): the shared phone pieces move out of the right sidebar")
   onScreenDisplay/            Transient toast/OSD popups (volume, brightness, gamma, keyboard
                               layout, audio device switches) - see "OSD system" below
   screenCorners/              Decorative fake screen-rounding + corner hover/click zones that open
@@ -583,13 +658,111 @@ services/                  Singletons wrapping external state/processes - one pe
   PhoneConnect.qml             Paired-phone state from KDE Connect or Valent, driven over
                               `busctl --json=short` Process calls (the shell has no D-Bus
                               binding) - backend detection from the bus name list, one
-                              normalized device/battery model for both daemons, ring/ping/
-                              clipboard actions. KDE Connect's changes arrive as SIGNALS
+                              normalized device model for both daemons (battery, the
+                              reachable addresses, the cellular report, a peer's pairing
+                              request), ring/ping/clipboard actions, the two pairing
+                              answers, share (file URLs, text, the clipboard as a link or
+                              as text, the house kdialog picker), an SFTP browse that opens
+                              the phone's storage, the persisted pick + MRU
+                              (Persistent.states.phone) and the low-battery notices. Every
+                              action is a queued argv; feedback is one actionFeedback
+                              signal plus lastActionError. KDE Connect's changes arrive as SIGNALS
                               (`busctl monitor`, see the streaming note below); Valent's
                               still arrive on the poll, which stays on for both as the
                               reconcile. Its parser logic is kept byte-for-byte in
                               sync with a logic-only test double
-                              (tests/test_phone_connect_contract.py enforces it)
+                              (tests/test_phone_connect_contract.py enforces it, and holds
+                              the Phone tab to the actions the model declares - a button
+                              whose call the service does not answer is a fake action, and
+                              a button past Ring needs the BACKEND gate too, since Valent
+                              answers none of them). The tab itself is driven end to end by
+                              tests/test_phone_tab_runtime.py, and what its sub-pages
+                              DRAW - the lists' and the empty states' geometry, and a
+                              notification card's app icon - by
+                              tests/test_phone_tab_layout_runtime.py, and how wide the
+                              webcam and microphone pages ASK to be by
+                              tests/test_phone_subpage_width_runtime.py
+  PhoneNotifications.qml       The paired phone's notifications, mirrored off KDE Connect on
+                              the same busctl transport through a serialized queue of its
+                              own. No monitor of its own: the four notification signals sit
+                              on PhoneConnect's allowlist and its deviceChangeSettled() is the
+                              trigger (one stream). A sweep is activeNotifications - a list of
+                              PUBLIC ids - plus one GetAll per leaf; dismiss is the LEAF's own
+                              method (see the busctl notes below); the list is cached per
+                              device in Persistent.states.phone. Parser region synced with a
+                              logic-only double (tests/test_phone_notifications_contract.py);
+                              driven end to end by tests/test_phone_notifications_runtime.py
+                              5cad7ad40 ("feat(phoneNotifications): mirror the phone's notifications off KDE Connect over busctl")
+  PhoneContacts.qml            The active phone's contacts, for the Phone tab's Contacts card
+                              and page. Not on the bus: KDE Connect writes one vCard per
+                              contact under ~/.local/share/kpeoplevcard/kdeconnect-<id>/,
+                              and scripts/phone/contacts_monitor.py reads that directory
+                              as one streaming NDJSON process per session (gio-watched, a
+                              3 s poll when it cannot be), supervised on PhoneConnect's own
+                              backoff ladder. `filtered` is the list the page draws - the
+                              query, hide-unnamed and sort decisions are pure functions
+                              kept byte-for-byte in a logic-only double
+                              (tests/test_phone_contacts_contract.py enforces it). The
+                              dialer and SMS actions are `adb shell am start` intents,
+                              refused with `lastError` when adb cannot reach the phone
+  PhoneDeps.qml                What the Phone tab's OPTIONAL tooling looks like on this
+                              machine: scrcpy, adb, droidcam-cli, v4l2-ctl, pactl,
+                              avahi-browse, the preview players, the v4l2loopback module
+                              (loaded/installed), scrcpy's major version and the distro -
+                              every one a constant `command -v`/argv probe started at
+                              construction, never from a feature's own activation
+                              (lint_capability_probe_gating.py).
+                              missingFor(feature) is the install guide's rows with the
+                              sibling fork's per-distro commands verbatim; nothing here is
+                              an installer dependency (sdata/deps-info.md "Phone (optional)").
+                              A tool has THREE states, not two: the three binaries the tab
+                              SPAWNS (scrcpy, adb, droidcam-cli) are started as well as
+                              located, so `scrcpy`/`adb`/`droidcamCli` mean "installed and
+                              able to start" while `*Present` is the raw `command -v`
+                              answer and `*RunError` the soname the loader could not find
+                              - see the entry below
+                              `adbDevice` is the one LIVE fact in the file - whether
+                              `adb devices` lists a phone in the `device` state, started by
+                              the adb run probe's own exit and re-asked through
+                              refreshAdbDevices(), so a card can say "no device over ADB"
+                              before it is clicked
+                              b591575c4 ("fix(phone): a card that cannot start over ADB says so before the click")
+                              ...and it owns the two commands that CHANGE that fact -
+                              `adb pair` and `adb connect`, constant argv - plus the
+                              avahi lookup that finds the ports Android re-rolls, because
+                              every other adb fact the tab has is already answered here
+                              (feat(phone): PhoneDeps runs adb pair and adb connect, as constant argv)
+  PhoneScrcpy.qml              The screen mirror and app mode. QML holds no scrcpy handle:
+                              scripts/phone/scrcpy_session_manager.py is ONE supervisor
+                              speaking NDJSON on stdin/stdout that owns every scrcpy child
+                              and its imi-phone-<type>-<id> window title; this sends
+                              launch/stop/focus/list_apps and applies started/exited/
+                              apps_list. Started by the first command, stopped by a 10 s
+                              idle timer once nothing is live, restarted on the DiscordVoice
+                              ladder only while commands are queued. mirrorArgs()/
+                              appModeArgs() are the pure flag tables (tst_phone_scrcpy.qml).
+                              `started` means the supervisor SPAWNED scrcpy, so the mirror
+                              stays `mirrorLaunching` until it survives mirrorSettleMs or
+                              the supervisor reports an exit, and `mirrorError` is the
+                              mirror's OWN last failure beside the service-wide lastError
+                              b53c8c260 ("fix(phone): a spawned scrcpy is still launching, not a running mirror")
+  PhoneCamera.qml              The phone as a webcam through droidcam-cli into v4l2loopback,
+                              launched DETACHED by scripts/phone/droidcam_session.sh (the
+                              pidfile is the binary's own) so it outlives a shell restart
+                              and is re-adopted at boot from the session's state file.
+                              USB first: adb get-state, then KDE Connect's address.
+                              The preview PLAYER is the opposite arrangement and the
+                              only process this file owns: a Process, closed by one
+                              observer of `active`, because the user can close it and a
+                              recorded pid would go stale - see the execDetached entry
+                              below, and tests/test_phone_preview_lifetime_runtime.py
+  PhoneMic.qml                 The phone as a microphone: the stream lands on a null sink
+                              (DroidCam-Mic) whose .monitor is what applications record.
+                              scrcpy's SDL audio ignores PULSE_SINK on PipeWire, so the
+                              DEFAULT sink is swapped for exactly as long as the stream
+                              takes to appear, the original persisted in Persistent so a
+                              restart mid-swap still undoes it - see the entry under
+                              "External binaries the shell drives"
   SchemePreview.qml            Per-scheme swatches for the scheme pickers: one venv run of
                               scripts/colors/scheme_preview.py quantizes the wallpaper once and
                               builds every Material variant from it. Cached against the wallpaper
@@ -636,6 +809,31 @@ scripts/                   Standalone helper scripts (Python/bash) invoked via P
                               prompted mask's clicks live in a PNG text chunk it parses by hand for
                               exactly that reason; `run` and `select` need the uv venv
                               (subject-mask-venv.sh)
+  phone/contacts_monitor.py   Publishes a KDE Connect device's contacts from its kpeoplevcard
+                              directory as NDJSON (`ready`, `snapshot` only when the SHA-256
+                              of the parsed set moves, `error no_contact_source`). Stdlib
+                              only: `gio monitor -d` is a subprocess, not PyGObject. See the
+                              vCard 2.1 note under "busctl monitor" below before touching the
+                              parser; tests/test_phone_contacts_monitor.py drives it against
+                              a fixture tree and never the machine's own cards
+  phone/                      The Phone tab's process owners. scrcpy_session_manager.py is
+                              the NDJSON supervisor PhoneScrcpy speaks to (protocol in its
+                              docstring; tests/test_phone_scrcpy_manager.py drives it with
+                              fake scrcpy/adb/hyprctl on PATH, including a fake that fills
+                              the stderr pipe and a SIGTERM, which are two of the ways it
+                              really ends). The four SHELL scripts are driven by
+                              tests/test_phone_shell_scripts.py - see the entry on what
+                              nothing ever running them cost. droidcam_session.sh
+                              launches droidcam-cli / the scrcpy mic stream detached under
+                              ${XDG_STATE_HOME:-~/.local/state}/quickshell/imi/phone/ and
+                              answers status/stop by pidfile; droidcam_status.sh is the
+                              read-only JSON probe; setup_/teardown_droidcam_input.sh load
+                              and unload the DroidCam-Mic null sink; install_droidcam.sh
+                              is the per-distro installer the guide offers. Every process
+                              match is `pgrep -x` on the binary's name with the signature
+                              checked on the cmdline - the fork matched the full command
+                              line and adopted its own launcher; this repo's lint refuses
+                              that form (the map is a fenced block, so it counts as code)
 translations/              i18n string tables (Translation.tr(...) singleton)
 assets/                    Static images/fonts bundled with the shell
 ```
@@ -647,7 +845,8 @@ assets/                    Static images/fonts bundled with the shell
 `JsonAdapter`/`JsonObject` machinery automatically:
 
 1. Loads `~/.config/immaterial-impulse/config.json` into `Config.options` on startup.
-2. Persists any property write back to that file (debounced by `Config.readWriteDelay`, 50ms).
+2. Persists any property write back to that file (debounced by `Config.readWriteDelay`, 50ms by
+   default — see the claim entry below for what that debounce is for and who may shorten it).
 
 Consequences for making changes:
 
@@ -756,6 +955,48 @@ Consequences for making changes:
   add a local `Timer` (600ms is the convention already used, see `BarConfig.qml`'s
   `mediaDebounceTimer` and `BackgroundConfig.qml`'s `quoteDebounceTimer`) that assigns to
   `Config.options.x.y` only after typing pauses, instead of assigning directly in `onValueChanged`.
+- **...and that debounce is not a nicety, it is what keeps `watchChanges` from feeding the shell's
+  own write back at it — so `readWriteDelay` is a RESOLUTION over declared claims now, and nothing
+  assigns it.** `writeAdapter()` serializes the *whole* schema and `configFileView` watches the file
+  it just wrote, so one property write is a full serialization, an inotify event, a full re-read and
+  a full deserialize; the two timers coalesce a burst into one of each. At a delay of 0 the write
+  comes straight back as a reload, and a second property written in between is deserialized away by
+  a file that does not carry it yet.
+  Three surfaces used to set the delay to 0 by assignment. Two of them (`welcome.qml`,
+  `killDialog.qml`) are standalone `qs -p` processes whose whole life is one window, so the global
+  they mutated was their own; the third was `SettingsContent.qml`, inside the shell, and it never
+  restored it — **every config write from anywhere in the shell had been undebounced for the whole
+  session**. Worse than "once Settings has been opened", which is how the line reads: the panel
+  family loads `Settings` behind a `LazyLoader` gated on `Config.ready` and declares the content
+  statically inside the window, so `Component.onCompleted` ran at startup. Measured with the window
+  never opened, the delay read 0. The premise was true where it was written — 50e73d4a3 ("set config
+  read/write delay to 0 where delay is unnecessary") put it in a standalone `settings.qml` — and
+  came along unchanged when Settings became an in-shell panel with bb6e174be ("Supersede
+  dots-hyprland ii with the pC theme").
+  A surface that wants an undebounced write declares a `ConfigWriteDelayRef` (in `modules/common/`,
+  beside `Config`, so anything that can say `Config` can say it with no new import) bound to the
+  condition under which that is really true; `Config.readWriteDelay` is a readonly derivation over
+  the live claims. **"Restore the previous value" is the shape to refuse here**: a saved value is a
+  second thing to keep in sync, it has no answer when two surfaces want the delay at once, and it
+  still needs somebody alive to run the restore — which a destroyed surface has not got. A claim's
+  release is its own lifetime, which is the same reasoning as the derived idle inhibitor in
+  83544dedb ("feat(idle): a deliberately blanked monitor holds the keep-awake"). It is a count
+  rather than a list of per-claim values because every claimant wants the same thing.
+  `active` is `required` and defaults to nothing, because the defect was a claim whose condition was
+  "the surface exists" written where the real condition was "the window is on screen": the settings
+  claim is `active: settingsWindow.visible` in `Settings.qml` — the window, not the host, since the
+  host lives for the session. `tests/lint_config_write_delay_claims.py` fails on an assignment, on a
+  second writer of the claim count, on a claim with no stated condition, and on a claim held
+  unconditionally inside `modules/`, `services/` or `panelFamilies/` — that last rule is the one
+  that would have caught this. `ConfigWriteDelayRuntimeTest.qml` builds the real `Settings` scope
+  **without opening its window** and reads the delay back across an open, a close, a second open,
+  two claimants at once and a claim whose declaring object is destroyed under it (a hot reload);
+  the source contract can say the claim is in the wrong file, only the harness can say what the
+  delay actually was.
+  8de9c2cdd ("fix(config): resolve the write delay from claims instead of a global assignment"),
+  2fa736625 ("fix(settings): the faster config flush lasts as long as the window, not the session"),
+  24ff433f4 ("test(lint): fail on an assigned config write delay, and on a claim held for the session"),
+  e7c5e7a9f ("test(config): drive how long the settings window's faster flush lasts").
 
 `GlobalStates.qml` is the sibling singleton for state that should **not** persist (is this sidebar
 currently open, is the bar in autoHide-triggered-show state, etc.) - don't add ephemeral UI state to
@@ -778,6 +1019,39 @@ reading `name`, and on any `GlobalStates.settingsPage` write in the tree whose v
 declared id — the realistic regression is a fifteenth page or a third deep link copied from whatever
 sits beside it, not someone rewriting the resolver.
 1c674c8f5 ("fix(settings): address a settings deep link by page id, not by its label").
+
+**The left sidebar's tabs are three literal arrays kept index-aligned by hand, and its deep link
+learned the same lesson the settings one did.** `SidebarLeftContent.qml` has no registry behind its
+tabs: `tabButtonList` (what the tab bar draws), `tabIdList` (the untranslated ids a link names) and
+the `SwipeView`'s `contentChildren` are three literals, and a tab added to one of them alone shows
+the **wrong page** — silently, because every index is still a valid index, the QML suite never
+builds these widgets, and a mis-aligned `SwipeView` renders perfectly. Two asymmetries make that
+easy to get wrong: the placeholder page sits between the last real tab and Anime with no tab-bar
+entry of its own, and closet mode (`policies.weeb === 2`) puts an Anime *page* in the view with no
+entry either — so the lists are legitimately different lengths, and only the entries before the
+placeholder are aligned. `GlobalStates.sidebarLeftTab` is a **string id** rather than an index for
+the paragraph above's reason and one more: an index goes stale the day a tab is inserted, which is
+the alternative that paragraph already rejected. It is *consumed* on open, the way
+`GlobalStates.settingsPage` is — left set, the sidebar returns to that tab on every later open and
+the link stops being a link. `tests/test_sidebar_left_tabs.py` pins all of it; before it the tab set
+was unpinned, so adding a tab broke no test at all.
+31b58f7f9 ("test(sidebar): pin the left sidebar's tab set, which nothing pinned"),
+ba63a5eea ("feat(sidebar): the Phone tab joins the left sidebar, and the gate opens").
+
+**And the tab bar beside those lists asks for an index rather than owning one.** The `SwipeView`
+carried `currentIndex: tabBar.currentIndex`, naming an id declared inside
+`modules/common/widgets/VerticalTabBar.qml` - a different component, so the id is not in scope and
+the binding threw a `ReferenceError` on every evaluation while the view was really driven by the
+tab bar's own `onCurrentIndexChanged` write-back. Deleting the dead binding is only half of it: that
+write-back went through a `property alias currentIndex: tabBar.currentIndex`, so the first tab click
+destroyed the call site's `currentIndex: swipeView.currentIndex` binding and the bar stopped
+following the view - a swipe, or a deep link through `GlobalStates.sidebarLeftTab`, moved the page
+and left the bar showing the old tab. That is #158's defect in a second widget, and it takes #158's
+answer: the bar's `currentIndex` is a plain property it never writes, a click raises
+`currentIndexRequested(index)`, and the call site moves the `SwipeView`, which is the one source of
+truth. The vestigial QQC2 `TabBar` the alias pointed at (`z: -1`, `background: null`, empty
+`TabButton`s behind the drawn cards) went with it.
+(fix(sidebar): the left sidebar's tab bar asks for an index instead of naming one it cannot see.)
 
 ## Hyprland integration
 
@@ -819,6 +1093,31 @@ hyprctl dispatch 'hl.dsp.workspace.toggle_special("special")'
 This is purely a manual-testing/CLI concern - IPC events, layer-shell behavior, and everything the
 QML code touches are unaffected by this; only raw `hyprctl dispatch <dispatcher> <args>` calls typed
 by a human/agent need the Lua-call form on this particular machine.
+
+**...and "typed by a human/agent" includes a harness, which is where it went unnoticed for the life
+of a probe.** `tests/run_persistent_surface_focus_probe.sh` starts a NESTED Hyprland - the same
+binary, so the same Lua config layer - and moved the focus between its two outputs with
+`hyprctl dispatch focusmonitor WAYLAND-2 >/dev/null`. The compositor answered
+`[string "return hl.dispatch(focusmonitor WAYLAND-2)"]:1: ')' expected near 'WAYLAND'` into the
+redirect, the focus never moved, and the probe reported 18 checks passing while comparing the
+shell's answer with the same monitor eighteen times. Two rules fall out of it, and the second is
+the one that matters: a `hyprctl dispatch` in a script needs the Lua form as much as one in a
+terminal (`hl.dsp.cursor.move({x=..,y=..})` is the working spelling here, and moving the POINTER is
+also the gesture the user makes), and **a probe that moves something has to assert it moved** - the
+run fails now if fewer than two monitors were ever focused. Sibling of the "a measurement without a
+control measures something else" family already recorded for the notification blur probe and the
+weather sweep. (test(surfaces): the focus probe actually moves the focus, and says so when it did
+not.)
+
+**A panel closing hands the focused monitor back, so a probe that places the pointer once and then
+opens three surfaces measures the first one.** Same probe, immediately after the above was fixed:
+with one cursor move per round the overview landed on the pointer's monitor and both sidebars
+landed on the *other* one, which reads exactly like two of three surfaces being broken and cost a
+round of instrumenting the shell to disbelieve. What actually happens is that the first panel's
+close returns keyboard focus, and Hyprland's focused monitor goes with it, before the next open.
+The pointer is placed again before every open now. Anything else driving several focus-taking
+surfaces in one run has the same question to answer. (test(surfaces): the focus probe re-places the
+pointer before every open.)
 
 **`hyprctl` picks its target instance from `HYPRLAND_INSTANCE_SIGNATURE` and from nothing else — so
 a `hyprctl` inside a nested-compositor harness talks to the *user's* session.** `WAYLAND_DISPLAY` is
@@ -924,10 +1223,21 @@ freshly-spawned daemon now starts in the right state with no window where it's w
 *record* of what the settings page last chose; the compositor never reads it. The value reaches
 Hyprland through `~/.config/hypr/hyprland/shellOverrides/main.lua`, generated by
 `scripts/hyprland/hyprconfigurator.py` (via `services/HyprlandConfig.qml`), and the only thing that
-regenerates that file is the Hyprland settings page's `Component.onCompleted` - an on-demand
-`Loader` (`SettingsContent.qml`, `active: Config.ready && (currentPage === index || item !== null)`).
-A user who never opens that page keeps the old value indefinitely, so the two files drift apart, and
-the lua one is the one that matters.
+regenerates that file is the Hyprland settings page's `Component.onCompleted`, and the same is true
+of `pages/CursorConfig.qml`. So the push is tied to when that page is BUILT, and that has never been
+what this paragraph used to say it was: it called the page's `Loader` "on-demand" and quoted its
+`active` binding, while a loop beside that binding assigned `active = true` to every page at
+`Config.ready`. Measured in a harness with the window never opened, all fifteen pages are
+instantiated there, so both handlers have in fact been running on every launch. The settings host's
+warm-up is gated on `Config.ready` for exactly that reason — see the page-incubation entry under
+[Dynamic/data-driven QML gotchas](#dynamicdata-driven-qml-gotchas) — so anything that moves that gate
+to the settings window takes this away, silently, on the file the compositor actually reads.
+2581cafae ("fix(settings): the warm-up is gated on Config.ready, not on the window").
+
+The sentence that stood here — "a user who never opens that page keeps the old value indefinitely" —
+is therefore not what the code does, and it is left recorded rather than quietly rewritten because
+issue #69 is real and its cause is now open again: whatever let a stale `input.kbOptions` survive, it
+was not that the page never ran. Re-derive it before relying on either half.
 
 Issue #69 is the worked example, and it shipped broken twice for this reason: a migration cleared a
 stale `input.kbOptions = grp:win_space_toggle` from `config.json` and the compositor went on
@@ -1403,6 +1713,19 @@ ce41c4f9c ("feat(cava): give CavaService the producer it always implied"),
 bcf5f9ca1 ("refactor(cava): move every band consumer onto the one service"),
 004a17745 ("test(cava): pin the producer, the gate and the band contract").
 
+**A signal nothing connects to is that same hole from the other side, and only a surface can
+find it.** `PhoneScrcpy.feedback(message, ok)`, `PhoneCamera.errorOccurred(message)` and
+`PhoneMic.errorOccurred(message)` have been raised on every failure since those services landed,
+and the Phone tab's toast was connected to `PhoneConnect.actionFeedback` and to nothing else — so
+a scrcpy that could not attach, a webcam that never connected and a microphone whose routing
+failed all reported themselves into a channel with no other end. Nothing errors: a signal with no
+connections is a perfectly legal signal, and there is no log line, no warning and no failing test.
+What it looks like on screen is the feature ignoring the click, which is how it was reported.
+Note which direction the existing check runs: `tests/test_phone_tab_surface_contract.py` derives
+its allowlist from what the services declare, so it answers "does this call reach a service" —
+the half that needed a harness is "does this signal reach a surface".
+85df64825 ("fix(phone): the tab hears the three session services' failures").
+
 **Resampling a spectrum by picking one index per bar drops most of it.**
 `Math.floor(i * source.length / barCount)` reads like the obvious way to fit 50 bands into 20 dots
 and reaches exactly 20 of them; the other 30 are unreachable on screen no matter how loud they are,
@@ -1450,6 +1773,44 @@ while *building* belong there; what a row's `execute` closure reads is read when
 row. ("perf(search): rebuild the launcher results once per turn, not per input change").
 
 ## Dynamic/data-driven QML gotchas
+
+- **A clickable card that contains buttons puts its control BEHIND the
+  content, not around it.** Rooting the card on a `RippleButton` nests its
+  own buttons inside a control that dims itself when disabled, and opacity
+  composites - two dims render at x*x, not x, which is what
+  `lint_disabled_opacity.py` fails on. `ExpandablePanel` shows the shape:
+  a non-dimming root, a `RippleButton` filling it for the gesture, and the
+  other controls as that surface's siblings. Reached by measuring in
+  `PhoneFeatureCard.qml`, whose three cards were the only controls in this
+  shell a keyboard could not reach until they became controls at all.
+
+- **A `Flow` with no width of its own and an incubated parent wraps once and
+  stays wrapped.** `Flow` takes its `implicitWidth` when a layout does not
+  give it a width, and computes that implicit width from the width it
+  currently has - the two define each other. Built in one pass it settles
+  on one line; built a few frames at a time, which is what
+  `SettingsContent`'s page host does since it stopped blocking on
+  construction, it latches at the narrow intermediate width and never
+  re-flows, because the wrap is what keeps the implicit width narrow.
+  Measured on `ConfigSelectionArray` at 628px: 43px synchronous, 154px
+  incubated, and every segmented row on every settings page looked like
+  the second one. Give such a Flow a `Layout.preferredWidth` summed from
+  its children's own implicit widths - an answer rather than a circle.
+  Note also that `Layout.alignment` hands a child its preferred size and
+  positions it, never resizes it, so an aligned Flow overflows a narrow
+  row instead of wrapping; that is a separate, older question.
+
+- **CI's Qt is older than yours, and its JS parser is too.** The workflow
+  installs Ubuntu's `qt6-declarative-dev`; a developer here runs Arch's
+  current one. Syntax the newer parser accepts is a COMPILE error on the
+  older one, and in a `tst_*.qml` it surfaces as
+  `FAIL!  : ...::compile() Unexpected token `identifier'` - naming neither
+  the construct nor the line. Numeric separators (`1_090_000`, ES2021) cost
+  one CI round this way. `tests/lint_qml_js_dialect.py` now fails the suite
+  on them, on logical assignment (`??=`, `||=`, `&&=`) and on optional catch
+  binding, with strings and comments stripped first so a device name like
+  `alsa_output.pci-0000_00_1f.3` is not mistaken for one
+  8402b3de5 ("test(phone): the sub-page shim becomes a symlink to the host it stood in for")
 
 Relevant to anything that instantiates QML components from external data (JSON manifests, config
 arrays, etc.) rather than static declarations - e.g. the plugin system in
@@ -1596,6 +1957,115 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   keyboard's rows agreed before there was anything to the right of the spacebar.
   afd3bf661 ("fix(osk): make the key pitch a multiple of four, so a quarter unit is whole pixels"),
   e119c7b1d ("refactor(osk): no key fills the row any more").
+- **`Layout.*` is inert in an item no layout manages, and the failure is a page that draws
+  its header and nothing else.** A component whose `default property alias` points at a plain
+  `Item` invites every caller to state `Layout.fillWidth`/`fillHeight` on the child it puts
+  there - the attached properties exist on every Item, they are accepted, they are never read,
+  and nothing is logged. `PhoneSubPage` was that shape: measured in a real window, the Contacts
+  page's root column sat at its IMPLICIT height, **73px inside an 836px slot**, so the region
+  holding the list was handed 0 while the list itself reported `count` 2, `contentHeight` 110
+  and a first delegate 52px tall. On screen that is "147 of 150 contacts" over an empty body.
+  Its sibling is the same defect on the page whose list happens to be *empty*: `PagePlaceholder`
+  centres its column in itself and clips nothing, so a zero-height region at y=117 drew that
+  column from y=32 to y=202 - over the search field at 44-86 and the status line at 94-109,
+  which reads as an empty state painted on top of its own header rather than as a missing
+  height. If a slot's callers are meant to fill it, the slot is a layout.
+  da09d103b ("fix(phone): the sub-page's content slot is a layout, not a plain Item").
+- **...and making it a layout is only half of it, because a nested layout holding a filling
+  child grows to whatever is going.** `Layout.fillHeight` defaults to **true** for an item that
+  is itself a layout, and a `RowLayout`'s own maximum height is derived from its children - so a
+  row whose only children are content-sized cannot grow and needs nothing said about it, while
+  the same row holding one `Layout.fillHeight: true` child becomes unbounded and takes the
+  column's entire leftover. `ToolbarTextField` declares that flag **in the shared widget**, so
+  every search row in this tree is the second case and looks exactly like the first. Probed with
+  `qml6` against the same skeleton rather than reasoned about: 35px for the row and 286 for the
+  region below it, against **313 and 8** with one filling child, and back to 35/286 with
+  `Layout.fillHeight: false` stated on the row. Watch the direction of the failure - the list
+  does not disappear, it comes back eighteen pixels tall, which reads as a scroll bug.
+  f29079c51 ("fix(phone): the search row is content-height, so the list keeps the leftover").
+- **Neither of those is reachable from a source check, and the source check that existed was
+  green over the first one.** `test_phone_tab_surface_contract.py` already required that slot to
+  be a `ColumnLayout` and said why; it asked `assertRegex(host, r"ColumnLayout \{")`, which is
+  "does a ColumnLayout appear anywhere in this file", and the file has one - the title bar's.
+  A check about ONE object has to resolve that object: it reads the id the default alias names
+  and then that declaration's type. The consequence is measured separately
+  (`PhoneTabLayoutRuntimeTest.qml` reads the drawn boxes back out of a real window under
+  headless weston), because a height is not in the source and a rule about the source is a long
+  way from the pixel it protects.
+  b0e8f8af6 ("test(phone): the host check reads the slot's own type, not any ColumnLayout"),
+  1a2e39ee4 ("test(phone): measure what the tab's sub-pages actually draw").
+- **A row sized from a constant fits ONE script, and an aligned layout child
+  answers a cell that is too small by OVERFLOWING it rather than by
+  shrinking.** Third in the same family, on the same page, reported from a
+  screenshot of a real contact list. `PhoneContactsPage`'s row header stated
+  `Layout.preferredHeight: Appearance.font.pixelSize.huge * 2` (44) and a
+  `Control` sizes its content item to the PADDED rect, so the row's contents
+  had 36px. What a row holds is not a constant: measured in a real window with
+  both scripts on screen at once, the name-and-number column is **34px** tall
+  for "Alice Rivers" and **47** for an Arabic name at the same `pixelSize`,
+  because `Google Sans Flex` carries no Arabic and the fallback face sets 32px
+  against the Latin face's 19. Before: the Latin card is 52 tall with its 38px
+  avatar drawn at 8-46 - six pixels short of the card's own edge, under the
+  8px base unit, which is the "flush against the bottom border" in the
+  photograph - and the Arabic card is the same 52, with the avatar at 13-51
+  and the NUMBER at 8-55, three pixels **below** the card. Nothing errors and
+  nothing is logged, because `Layout.alignment` means the layout hands the
+  child its preferred size and aligns it, and a cell smaller than that is
+  simply overflowed. After: 58 and 67, each avatar 10 and 14 pixels clear.
+  The header states no height at all now and says its vertical padding out
+  loud in `Appearance.spacing.*` rather than inheriting whatever the Basic
+  style's `padding` happens to be, and the card's own padding is one
+  `rowPadding` rather than `space50` on the content column's anchors plus
+  `space100` added to the height - two spellings that agree only while one is
+  twice the other, which is 4fb2a7f02 ("refactor(widgets): a dialog's content
+  padding gets a name of its own")'s coupling one widget down.
+  Two things about measuring it generalise past this row. **A harness that
+  redirects `XDG_CONFIG_HOME` redirects the developer's own
+  `~/.config/fontconfig` with it**, and that file is what puts an Arabic face
+  in front of the fallback here - measured, without a replacement the same
+  string sorts to DejaVu Sans and sets at the Latin height, so both cards come
+  out equal, every check passes, and the harness reports a defect it never
+  measured. `tests/test_phone_tab_layout_runtime.py` writes a `fonts.conf` of
+  its own and skips with a reason when the face is absent, rather than
+  reddening over a machine's font list. And the check a per-row assertion
+  cannot make is that the two cards **differ**: two rows that both fit because
+  both were made generously tall are still a constant, and the constant is the
+  defect. The sibling pages own the same idiom -
+  `PhoneMicPage`/`PhoneWebcamPage` state `huge * 2 + space150` on a header of
+  their own - so the shape is worth looking for rather than assuming it was
+  one row's.
+  2b921d8da ("refactor(phone): a contact card's padding gets a name of its own"),
+  d9a9162ec ("test(phone): drive a contact card's box against what it holds, in two scripts"),
+  07b819f07 ("fix(phone): a contact card is sized by what it holds, not by a constant").
+- **The third one in that family is a WIDTH, and it comes from `ContentPage.baseWidth` being 600
+  because the settings window is.** `ContentPage` sizes its content column
+  `Math.max(baseWidth, implicitWidth)` and anchors it to the flickable's horizontal CENTRE, which is
+  right in that window - the leftover is symmetric margin - and is an overflow on any surface
+  narrower than 600. The Phone tab's Webcam and Microphone pages are the only `ContentPage`s outside
+  the settings window, and the panel hands a sub-page 440: measured in a real window, a column of
+  600 drawn from **-80 to 520**, so the whole page hung off both edges and every row was clipped at
+  the panel's left edge - the error banner read "m did not start - is the DroidCam app open on the
+  phone?", the section headers "ra" and "ra settings" - while the page rendered perfectly, logged
+  nothing and left the suite green. A `ContentPage` on a panel states `forceWidth: true` and a
+  `baseWidth` bound to the width it is really given.
+  **The other half of that `Math.max` is the banner beside it**: a `NoticeBox` sizes itself from a
+  `StyledText` that wraps, and a wrapping `Text` still reports its string's UNWRAPPED width as its
+  implicit width - so the banner carrying `PhoneCamera.lastError` asked for **495** in a 440px page,
+  and a page-widening error string was one sentence away. The cap is a `Layout.maximumWidth` at the
+  call site, which is what a `QQuickLayout` clamps a child's preferred width to; it does not belong
+  in `NoticeBox`, which is shared with the settings pages, where a banner asking for its own
+  string's width is the right answer.
+  Nothing static can see any of this, and `qmltestrunner` builds neither a laid-out box nor a
+  `ContentPage`, so `PhoneSubPageWidthRuntimeTest.qml` reads the two numbers off the real pages
+  opened by the real sub-page loader - where each row is DRAWN, and what each row ASKS for
+  (`Math.min(implicitWidth, Layout.maximumWidth)`) - at two panel widths, because a column pinned to
+  a literal 440 passes every check at one. Its stubs are the other half of what it is for: `PhoneMic`
+  runs `pactl get-default-sink` from its own `Component.onCompleted` and can go on to
+  `set-default-sink`, which is why `PhoneTabLayoutRuntimeTest.qml` does not drive these two pages -
+  every tool `PhoneDeps` probes is a stub first on PATH there, `pactl` included.
+  94c92757a ("test(phone): drive how wide the webcam and microphone pages ask to be"),
+  01b9871b0 ("fix(phone): the webcam and microphone pages take the panel's width"),
+  1edb61495 ("fix(phone): a long service error wraps in its banner instead of widening the page").
 - **A keyboard is a LATTICE, not a stack of rows, and a `GridLayout` does not
   hand out equal columns on its own.** The numpad's `+` and its Enter are one
   key two rows tall, which a `RowLayout` cannot say — so each of them shipped
@@ -1642,6 +2112,74 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   `Binding loop detected for property "implicitWidth"` and gives up re-evaluating it. Leave the
   Loader unanchored so it mirrors the item's natural size instead; set explicit width/height via the
   item's own properties (e.g. manifest `props`) when a fixed size is actually wanted.
+- **A `Loader` whose `active` is declared as a binding and then ASSIGNED has no binding, and an
+  assignment to `active` is where a whole tree's build cost hides.** `SettingsContent.qml`'s fifteen
+  page loaders declare `active: Config.ready && (currentPage === index || item !== null)`, which
+  reads as "built on the first visit and kept". They were not: a `Component.onCompleted` →
+  `Qt.callLater` walked the repeater and assigned `loader.active = true` to every one of them, which
+  destroyed that binding — [#158](https://github.com/XephyLon/immaterial-impulse/issues/158)'s defect
+  under [The Config system](#the-config-system-settings-page--persisted-json), in a place where what
+  it costs is not a lie about state but a build. So **all fifteen pages, ~24500 items, were
+  constructed inside one turn of the event loop at `Config.ready`** — during the shell's own startup,
+  whether or not the window was ever opened. Six things are worth carrying.
+  **The instrument is a heartbeat, because a timing around the write cannot see this at all.** The
+  cost lands in the turn *after* the assignment, so `Date.now()` either side of it reports 2-6ms
+  while the GUI thread is about to be gone for two thirds of a second. A `Timer { interval: 1 }`
+  whose longest gap between ticks is recorded measures what a hitch actually is — the GUI thread
+  being unavailable — and it needs no `QSG_RENDER_TIMING` parsing to do it. Measured under headless
+  weston, pooled over twelve runs: **618ms** (599-631), against **63.5ms** (59-69) once the binding
+  is left alone. Every switching metric is unchanged between the two arms - 3ms of synchronous work,
+  1ms median to the page being on screen, 33ms median block - which is the point: the fix is not
+  visible from the switch, in either direction.
+  **It also means the reported symptom was not the defect.** Switching pages was *cheap* — 2-6ms of
+  synchronous work and one extra frame on a page's first draw — precisely because nothing was ever
+  left to build. Anything measuring the switch would have found nothing wrong with it. Follow the
+  instrument to where the time is, not to where the complaint points.
+  **`asynchronous: true` is what makes a large page's build not a stall.** The incubator spends what
+  is left of each frame on it and the window keeps drawing; measured, the worst block over thirty
+  switches drops to the compositor's own frame period. What it costs is that `item` is null for the
+  frames the build takes, and every reader has to tolerate that: `GlobalStates.currentPageInstance`
+  is cleared while a page incubates rather than left naming the page the user just left, because a
+  stale answer cannot be told from a current one.
+  **A keep-alive term must not read what `active` produces.** `item !== null` in `active`'s own
+  binding is a circle through that binding. It never fired while the assignment was destroying the
+  binding, and logged `Binding loop detected for property "active"` fourteen times per pass the
+  moment the binding was left alone — and Qt answers a loop by dropping the re-evaluation rather
+  than erroring, so what it costs is a page quietly not kept. A plain `built` flag written from
+  `onLoaded` is the term.
+  **A placeholder for a build is gated on a settle, not on the status.** `PagePlaceholder` fades on
+  `elementMoveEnter` (400ms) and most pages incubate faster than that, so a placeholder shown the
+  instant `status === Loader.Loading` fades in and straight back out on every first visit — a flash
+  the switch does not otherwise have. One `elementMoveFast` of quiet first.
+  **And building ahead of the user is idle work, which means its gate is not the obvious one.** The
+  warm-up walks the pages one at a time (the engine incubates in the order it was asked, so queueing
+  all fifteen puts the page just clicked behind fourteen nobody asked for), never while another is
+  incubating, and stands down for one motion tier after every navigation — the hold is a `Timer` of
+  its own because `restart()` writes `running` and would destroy a binding on it. Its gate is
+  `Config.ready` and **not** `GlobalStates.settingsOpen`: `pages/HyprlandConfig.qml` and
+  `pages/CursorConfig.qml` push their whole config block into
+  `hypr/hyprland/shellOverrides/main.lua` from their own `Component.onCompleted`, so *when a
+  settings page is built* is load-bearing outside this window, and the eager loop is why nobody had
+  noticed. What that warm-up costs is the one thing the numbers DO separate besides the block: pooled
+  over two interleaved A/B sessions (six runs an arm, the first of each discarded, 168 switches an
+  arm), the block measured over a whole 900ms step is over 40ms on 8 switches of 168 and peaks at
+  158ms, against 2 of 168 and 108ms without the warm-up. Inside the 300ms a click is blamed for, the
+  two arms are the same distribution — 33ms median, 34ms p95, one or two outliers each — so the
+  warm-up's completions land between clicks and not in them. An earlier single session read that as
+  108ms → 35ms *in favour of* the warm-up; it did not reproduce, and one session of a two-per-168
+  event is not a measurement.
+  `tests/test_settings_page_incubation_runtime.py` drives all of it and `PageIncubationContractTests`
+  in `tests/test_settings_navigation.py` is the half that runs without a compositor. The runtime
+  check reads the un-warmed state ONE TURN after the host is built and counts LOADERS ASKED rather
+  than pages finished: with `asynchronous: true` in place, a restored eager loop's fifteen are
+  `Loading` rather than built, and a count of finished pages reports the same zero as the fix.
+  dfcaef781 ("perf(settings): stop assigning every page loader's active in one turn"),
+  135cc98a0 ("fix(settings): the page loader's keep-alive term stops reading what it produces"),
+  ea055d21e ("perf(settings): incubate a settings page across frames instead of inside one"),
+  a1f23c80f ("feat(settings): a page still building says so, after a settle"),
+  39c70df85 ("perf(settings): warm the pages one at a time, while the window is open"),
+  2581cafae ("fix(settings): the warm-up is gated on Config.ready, not on the window"),
+  de2b31b13 ("test(settings): drive when the settings host builds its pages").
 - **Do not put dynamic object maps in a `JsonAdapter`, including through a `property var`.** Plugin
   ids and monitor names are not known when QML compiles, while `JsonObject` only supports declared
   properties. Writing undeclared children caused `JsonAdapter::deserializeRec` to segfault on the
@@ -2107,6 +2645,24 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   below. Any source-text check over a QML property has the same question to answer: is the value a
   line or a block?
   test(widgets): sweep for the settled-span rule instead of naming three files.
+- **Three more traps in that family, all found by planting against the check that was supposed to
+  catch them.** A source-text check is code with no tests of its own, so it fails the way this
+  repo's silent bugs do: green over the thing it exists to refuse.
+  **`^(\s*)` written to capture indentation matches a NEWLINE**, because `\s` does - so with
+  `re.M` the group swallows the blank lines above its match and the LEAST-indented block in a file
+  measures as the deepest. `Config.qml` has two `phone` JsonObjects (`sidebar.phone`, and the
+  top-level one), and a check picking the shallower of them by that group picked the wrong one and
+  reported every key on the Phone tab's pages as undeclared. `[ \t]*`.
+  **Pairing quotes with `"([^"]+)"` across a `String(x || "")` guard turns the code between them
+  into a match** - the "keys" a sweep of two decision functions came back with were `' : '` and
+  `').length > 0 ? '`. Match the shape of the thing being extracted (`"([a-z][a-zA-Z_]*)"` for a
+  key) rather than "whatever is between quotes".
+  **And a check that reads a file whose own header comment explains the interface reads the
+  prose.** The Phone sub-pages' stub documents `signal back()` in its header; renaming the actual
+  declaration to `signal notBack` left the check green, because the sentence describing it still
+  matched. Strip comments first - which every other check in that file already did.
+  c8810d5ef ("fix(test): the sub-page stub check reads its code, not its own header"),
+  ffac945aa ("test(phone): hold the tab's surfaces to what the services actually answer").
 - **A widget the host does not size gets neither of the host's two resize services, and the
   absence of both is silent.** `PluginWidget`'s `Behavior on width`/`height` is
   `enabled: gridResizeAnimated`, which is `gridSized && PluginState.ready`, and `boxInMotion`
@@ -2442,6 +2998,82 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   transform, press scale included, cancels out — and set the target to pressStart + delta, as
   `widgetCanvas/AbstractWidget.qml` now does. d2ebb5aeb ("fix(widgetCanvas): compute the drag by
   hand - MouseArea.drag cannot track it").
+- **A `BarGroup` whose content has collapsed paints nothing, and the row's ends follow what is
+  showing.** The standalone pills (`TimerPill`, `SubmapIndicator`, `PrivacyIndicator`) animate
+  their `implicitWidth` to 0 when idle and hide themselves — and the group around one kept its
+  padding, so any layout ending in a pill carried a small empty stub beside its last widget all
+  day (user-reported, 2026-08-26). `BarGroup.collapsed` reads the grid's implicit size on the axis
+  the bar runs along, and `visible` follows it, except in edit mode, where every slot has to stay
+  on the bar to be dragged. The end radii used to come from `currentIndex`/`totalCount`, which
+  still count a collapsed neighbour; they now walk the parent's children for the nearest group
+  that is showing (`showingBefore`/`showingAfter`), so the widget beside a collapsed pill gets the
+  full end radius. `tests/tst_bar_group_collapse.qml` pins both.
+  (fix(bar): a group whose content collapsed paints nothing, and the row's ends follow.)
+- **A `MaterialSymbol` used as a `Control`'s `contentItem` declares both alignments; anchors on it
+  are ignored.** A Control sizes its content item to the padded rect and positions it itself, so
+  `anchors.centerIn: parent` on the glyph is decoration, and a Text with no alignment draws its
+  glyph at the top-left of that rect — the icon sits up-left of centre. Eight buttons had that
+  spelling (the presets "save" button is the one photographed, 2026-08-27), one of them hiding it
+  with a hand `horizontalCenterOffset: -2`. `IconToolbarButton.qml` is the spelling that is right —
+  `horizontalAlignment: Text.AlignHCenter` and `verticalAlignment: Text.AlignVCenter` on the glyph —
+  and `tests/lint_icon_glyph_alignment.py` fails any `contentItem: MaterialSymbol` block without
+  both. (fix(widgets): every contentItem glyph is centred by alignment, not by an anchor the
+  Control ignores.)
+- **An icon-only button written as a labelled one sizes itself from the label it has not
+  got.** `RippleButtonWithIcon`'s contentItem is a glyph slot beside a `Layout.fillWidth: true`
+  slot for the label, so `mainText: ""` does not make it an icon button — it makes it a button
+  whose empty label absorbs whatever width its ROW has left, from inside. The Phone tab's footer
+  is where that bites, because its two actions flank a `Layout.fillWidth` count pill: measured
+  at the sidebar's 460px they came out 44x35, near enough square to read as a circle under
+  `rounding.full`, with the drawn glyph **1.5px left of the button's own centre** — so widening
+  them would have moved the glyph further off rather than centring it. An icon-only button is a
+  `RippleButton` whose `contentItem` is a `MaterialSymbol` declaring both alignments (the entry
+  above), with both dimensions stated, since nothing about its content can decide them. None of
+  this is visible from the source and none of it is reachable from `qmltestrunner`, which builds
+  neither a laid-out box nor a `RippleButton`; `PhoneTabRuntimeTest.qml` measures the drawn
+  glyph's centre through `mapToItem`. It was the only `mainText: ""` call site in the tree, so
+  this is a note rather than a check.
+  bd35286c3 ("fix(phone): the footer's two actions become soft rectangles, glyphs centred").
+- **...and the same slot from the other end: a labelled icon button that FILLS its row cannot be
+  `RippleButtonWithIcon` either, because that fillWidth label slot left-packs a real label
+  exactly as it did an empty one.** A `RowLayout` written as a content item is stretched to the
+  padded rect the same way a `MaterialSymbol` is, so a glyph-plus-label pair declared there lays
+  out from the button's LEFT edge — and a two-child row with room to spare opens the gap between
+  the two rather than keeping them together. The Phone tab's running-card Stop button is the
+  case: measured at card widths of 200 and 460, the pair sat **35.48px and 117.98px left of the
+  button's own centre** and grew from 97.03px to 192.03px wide as it went. An anchor on the
+  content item cannot repair it (the entry two up), so what centres a PAIR is a plain `Item`
+  stretched to that rect with the row centred INSIDE it — an ordinary parent-child anchor the
+  Control never touches; re-measured, 57.03px wide and 0.48px off centre at both widths, the
+  residual being the glyph's box against its painted extent. `RippleButtonWithIcon` was measured
+  rather than reasoned about before it was declined: one at 460px carrying the same glyph and the
+  same word reads **191.46px left of centre**, so it is the component for a button sized by what
+  it holds and not for one that fills a row. Measure the DRAWN extent when checking this, never
+  the boxes — a `Text` a layout has stretched still paints at its content width from its left
+  edge, so the box of a left-packed pair reaches the right border and reports itself centred.
+  df9794dbd ("fix(phone): the running card's Stop button centres its glyph and its label"),
+  238757407 ("test(phone): measure the Stop button's pair at two widths, against a control").
+- **A `Text` positioned with `anchors.centerIn` has no box, so `elide` cannot fire and the
+  label paints over its neighbours instead.** Eliding needs a width, and `centerIn` gives a Text
+  its implicit one — which is however wide the string happens to be, drawn straight out past its
+  parent's edges. The Phone tab's count pill was written that way: it is the only
+  `Layout.fillWidth` item in its row, so it could never push the two buttons off, and a longer
+  string (a translation, a count in the hundreds) would simply have been drawn on top of them.
+  `anchors.fill` plus `horizontalAlignment` is the spelling that both centres and bounds.
+  8f8f14c8c ("fix(phone): the footer's count pill spells \"notifications\" out").
+- **The same family from the container's side: a box sized by its content, centred on a
+  panel, has no width of its own to elide against — the panel's is the one to derive from.**
+  The Phone tab's toast is `implicitWidth: toastRow.implicitWidth + <padding>` under
+  `anchors.horizontalCenter`, so its width was whatever the message wanted; with the label
+  inside it carrying no width, no wrap and no elide either, a long service error drew a
+  full-width bar clipped at the panel edge with the text running off the end (the real one
+  is "DroidCam did not start - is the DroidCam app open on the phone?"). Cap it from the
+  PANEL's width and the spacing tokens rather than from a guess about the longest string —
+  any service's error can reach a toast — and measure the label's own bound off the panel
+  too, never off the container, because the container's width is derived from the label and
+  reading it back closes that circle. Check it with a control: a cap only proves something
+  against a message it did not cap.
+  e2d1dcb70 ("fix(phone): the toast wraps inside the panel instead of running off it").
 - **The two bars load the same widget files out of `modules/imi/bar/`, and each used to decide
   which file for itself.** `Config.options.bar.layouts.*` is shared and Settings > Bar offers a
   plugin's bar widget whatever the orientation, but only `BarContent.qml` ever learned the
@@ -2450,7 +3082,9 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   `plugin:docker_plugin` resolved to `Plugin:docker_plugin.qml` - measured with a `qml6` probe, the
   `Loader` reaches `Loader.Error` with a null `item`, and the only evidence is one
   `No such file or directory` line per widget. That is neither a `WARN scene:` nor an `ERROR:`, so
-  the configuration still loads and the bar simply draws the empty `BarGroup` stub around nothing.
+  the configuration still loads and the bar simply drew the empty `BarGroup` stub around nothing
+  (an empty group collapses now - see the bar-group point below - so that evidence is gone too;
+  the parity test is what catches it).
   `modules/imi/bar/bar_widget_source.js` is the one mapping now; it answers with a **file name**
   and the caller prepends its own directory, because the two bars reach that directory by different
   relative paths and a `.pragma library` has no engine context to assume for `Qt.resolvedUrl`.
@@ -3950,6 +4584,84 @@ across daemon restarts. Four more things about that path, each of which cost a m
   `linksChanged`, `deviceAdded`, `deviceListChanged`), and each re-read is a chain of `busctl`
   spawns. The settle timer also has to **re-arm** rather than fire while a sweep is in flight,
   because the sweep declines then and firing would drop the change that asked for it.
+- **A `GetAll` naming an interface the object does not implement is not an error on a Qt
+  adaptor — it answers with every property of the object.** KDE Connect's connectivity report
+  is a child object (`<device>/connectivity_report`), and a `GetAll` naming its interface on
+  the DEVICE path came back with the device's own properties, measured live. A sweep reading
+  a leaf off the wrong path therefore parses a report with no cellular fields in it and shows
+  "unknown" for ever, with nothing in any log. Read a leaf at its own path, and pin the path
+  rather than the interface name (`tests/test_phone_connect_contract.py` does; the runtime
+  fake answers the report at the leaf only). f7a2952ed ("feat(phoneConnect): read
+  connectivity_report and reachableAddresses onto the device model").
+- **Pairing is two methods on the device path, and an answer is aimed only at a device that
+  asked.** `acceptPairing`/`cancelPairing` on `org.kde.kdeconnect.device`, introspected live;
+  the request itself is `pairState` 2 (`Device::PairState`: 0 NotPaired, 1 Requested *by us*,
+  2 RequestedByPeer, 3 Paired) or the older `isPairRequestedByPeer` bool, and either spelling
+  counts. Neither answer falls back to the active device the way `ring()` does — that device
+  is the paired phone, which never asked — so the guard refuses a device without a request
+  and the contract pins the absence of the fallback. 9395932d3 ("feat(phoneConnect): surface a
+  peer's pairing request, and answer it").
+- **A notification is dismissed on its LEAF, and the daemon's `sendAction` is keyed on the
+  internalId.** `<device>/notifications` answers `activeNotifications` with a list of PUBLIC
+  ids (`"70"`), and each `<device>/notifications/<publicId>` leaf carries the fields and a
+  `dismiss()` of its own - introspected live. The device-level `sendAction(key, action)`
+  invokes a named Android action button, so the fork's first dismiss, `sendAction(id,
+  "cancel")`, removed the card and left the phone showing it ("cancel" is not a button); and
+  its `key` is the Android notification key the daemon relays as `internalId`, not the public
+  id. The daemon exposes no action names over D-Bus at all, so `actions` is whatever a leaf
+  happens to carry - empty on the daemon this was measured against.
+  `services/PhoneNotifications.qml` runs no monitor of its own: its four signals are on
+  `signalChangesDevices`' allowlist and `deviceChangeSettled()` is its trigger, which the
+  runtime harness proves by seeding both timers far out so only the signal can deliver the
+  second notification. Two traps from that harness: a second `exec()` on a running `Process`
+  is refused rather than queued, so writes share the serialized read queue (dismissAll is one
+  call per leaf); and a bash fake that strips a suffix off `$*` directly strips it per
+  argument, which left the fake's state file untouched and the driver's dismiss list red.
+  5cad7ad40 ("feat(phoneNotifications): mirror the phone's notifications off KDE Connect over
+  busctl"), dbe6e73d5 ("test(phoneNotifications): drive the sweep, a signal, dismiss and reply
+  against a fake busctl").
+- **A mirrored notification's `iconPath` is a PATH the daemon wrote, so it is the picture slot
+  and never the icon-theme one.** kdeconnectd saves the posting app's icon payload to a file -
+  40 of them under `/tmp/kdeconnect_<user>/` on this machine, PNGs at 90-128px - and hands the
+  absolute path over as `iconPath`; `PhoneNotifications.groupsForList` already carried it as
+  each group's `appIcon`, the same derivation `services/Notifications.qml` makes for a desktop
+  group, and the tab's card simply never drew it. It goes through
+  `modules/common/widgets/NotificationAppIcon.qml`, which is the shell's own notification icon,
+  through `image` (a URL to a file) rather than `appIcon` - that slot resolves through
+  `Quickshell.iconPath`, i.e. the icon THEME, which knows nothing about a path a daemon wrote
+  and would answer `image-missing` for every notification. An empty `iconPath` leaves the slot
+  empty and the widget falls back to the glyph it guesses from the title, which is the fallback
+  the desktop cards have always had. What separates "the icon is not drawn" from "the file did
+  not load" is `Image.status`, and nothing else, so the check for it is a runtime one.
+  9cc805f9b ("feat(phone): a phone notification card draws the posting app's icon").
+- **kdeconnectd's desktop copy of a mirrored notification is dropped at ingestion, behind the
+  mirror gate.** `services/Notifications.qml`'s `onNotification` asks
+  `PhoneNotifications.mirrorsDesktopNotification(appName)` before tracking - the daemon posts
+  relayed notifications as "KDE Connect" or as the phone's own name - and the gate is
+  `mirrorActive` (tab enabled AND the active device reachable), because with the tab off or
+  the phone away the daemon's copy is the only one the user gets. The tab switch is read as
+  `Config.options.sidebar?.phone?.enable ?? true`: the key is declared by another workstream,
+  and an undeclared key reads `undefined`, not an error. 1cead70b8 ("feat(notifications): drop
+  the daemon's copy of a notification the phone tab mirrors").
+
+- **`Process.exec` on a Process that is still running terminates it first, so one Process fed
+  straight from `exec` keeps the last action of a burst and kills the rest.** Measured under
+  headless weston: a 2s command followed 500ms later by a second `exec` on the same Process
+  came back `exited code=15 status=1` with no output, and only the second ran. `PhoneConnect`'s
+  `runAction` was exactly that shape and would have dropped every `shareUrl` of a multi-file
+  send but one — silently, since a killed busctl prints nothing. It is a queue now
+  (`actionQueue`, pumped from the Process's own `onExited`); the contract refuses an `exec`
+  outside the pump. Anything else here that answers several clicks with one `Process` has the
+  same question. c7e160da1 ("feat(phoneConnect): actions queue behind one another instead of
+  killing the one in flight").
+- **A string the daemon hands to a `QUrl` is parsed as one, so a share URL is built like one.**
+  `share.shareUrl` takes a string and `QUrl`s it: a schemeless host (`example.org`, which the
+  fork's clipboard heuristic sends as-is) is relative to nothing, and a raw `#` or `?` in a
+  filename spliced after `file://` is a fragment or a query. `clipboardShareTarget` puts
+  `https://` on a bare host and `pickedFileUrls` percent-encodes each path segment; both are
+  in the synced region so `tst_phone_connect.qml` pins the strings. 8c29fc2be
+  ("feat(phoneConnect): share the clipboard as a link or as text"), 58f4cd225
+  ("feat(phoneConnect): pick files with kdialog and share each as a file URL").
 
 The gate deciding whether to start it was first written as a `readonly property bool` derived from
 `backend` and read from `onBackendChanged` — the change-handler trap under
@@ -3963,6 +4675,633 @@ true of six spawns in six milliseconds, which is the bug.
 (feat(phoneConnect): drive updates from the daemon's signals, not from the poll,
 fix(phoneConnect): the monitor's gate is a function, because a handler cannot read its own binding,
 test(phoneConnect): drive the monitor's start, its stream, its backoff and its ceiling.)
+
+**A phone's contacts are not on the bus - they are vCards KDE Connect writes to disk, and the
+vCards are version 2.1.** KDE Connect's contacts plugin answers no "list the contacts" call; it
+writes one `.vcf` per contact into `~/.local/share/kpeoplevcard/kdeconnect-<deviceId>/` for
+KPeople. `services/PhoneContacts.qml` reads that directory through
+`scripts/phone/contacts_monitor.py`, one streaming Python process per session on the same
+lifecycle as the busctl monitor above (`exec()`, no `running` binding, the restart-safe marker,
+and every exit through `PhoneConnect.monitorExitPlan` - *reused*, so the shell has one spelling
+of the backoff ladder rather than three). A device change restarts it from the top of the ladder,
+and Quickshell does raise `exited` for a deliberate `running = false`, measured in a headless
+`qs` before the restart was written that way. Three things measured against the 150 cards on this
+machine, none visible from the fork's parser:
+
+- **Android's exporter soft-wraps QUOTED-PRINTABLE names with a trailing `=` continued on an
+  UNINDENTED line** - 32 such lines in one export. An RFC 2425 unfold joins only indented
+  continuations, so every long non-ASCII name was truncated at the wrap and the remainder
+  parsed as a line with no `:` and skipped, silently. The unfolder joins a QP line ending in
+  `=` with the physical line after it.
+- **Photos travel inline as `data:` URIs.** The whole export carries 140 KB of photo base64,
+  so a snapshot stays small and there is no avatar cache to sweep or bust; the fork wrote each
+  photo to a cache file and emitted a path.
+- **A raw contact that never had a name arrives with its number as FN and N** (SIM imports,
+  call-blocker lists - three here, about a thousand on the fork author's phone). They are
+  flagged `nameless` rather than dropped, so `hideUnnamed` can hide them and a starred one
+  still shows: starring is an explicit statement that the number matters.
+
+The dialer and SMS actions are `adb [-s <serial>] shell am start -a <DIAL|SENDTO> -d <tel:|sms:>`
+with the serial re-resolved from `adb devices` on every intent (the wireless-debugging port
+moves on every toggle and reboot), a USB serial ahead of an ip:port, and refused with
+`lastError` when adb is absent or no device is in the `device` state - never `execDetached`,
+because a refused intent has to say so. The tests never read the machine's own cards:
+`tests/test_phone_contacts_monitor.py` builds a fixture tree shaped after the real files.
+209852182 ("feat(phone): contacts_monitor.py reads the vCards KDE Connect writes"),
+b7b8ffcda ("feat(phone): PhoneContacts.qml, the contacts model over a supervised monitor").
+**scrcpy's microphone stream cannot be aimed at a sink, so the DEFAULT sink is swapped under it,
+and the swap is undone by evidence rather than by a timer.** `scrcpy --audio-source=mic` plays
+through SDL, whose PulseAudio backend opens its stream on the default sink and ignores
+`PULSE_SINK` on PipeWire (the sibling fork measured this; `droidcam-cli -a` does honour it).
+`services/PhoneMic.qml` therefore reads `pactl get-default-sink`, records it in
+`Persistent.states.phone.mic.originalDefaultSink`, sets `DroidCam-Mic` as the default, launches
+scrcpy detached, and restores the original the moment `pactl list sink-inputs` names scrcpy -
+polled every 250 ms with a 3 s ceiling, because every millisecond past the stream's creation is
+silence on the user's speakers, and a blind wait muted the desktop on every launch. Three exit
+paths also restore it (`becomeActive`, `fail`, `stop`) and the boot reconciliation undoes a swap a
+dead shell left behind (`restorePlan`: default is `DroidCam-Mic`, no live mic session, so back to
+the saved sink or `@DEFAULT_SINK@`). The persisted field is the whole reason a restart mid-swap
+does not strand the user on a null sink. `tests/test_phone_sessions_contract.py` holds all four
+restores and the persistence.
+("feat(phone): PhoneMic - the phone as a microphone, routed through a null sink").
+
+**A `Process` whose binary is not on PATH never emits `exited`; `running` still drops.** Measured
+with a `qs -p` probe under headless weston: `["definitely-not-a-binary"]` produced one
+`runningChanged(false)` and no `exited` at all, while `["true"]` produced both. So a probe
+counter that waits for `exited` to come back to zero waits for ever on the one machine the probe
+exists for - the one missing the tool. `services/PhoneDeps.qml` hangs its pending count off
+`onRunningChanged` and writes the flag from `onExited`, and its `ready` is what a card reads to
+show "checking" rather than "install" while the sweep runs.
+("feat(phone): PhoneDeps - one probe singleton for the tab's optional tooling").
+
+**The four session services and their doubles are one more synced-region pair, and the pattern
+now has a generator's worth of shape.** `PhoneDeps`, `PhoneScrcpy`, `PhoneCamera` and `PhoneMic`
+each keep everything decidable between `BEGIN/END <name> logic` markers - flag tables, argv
+builders, state ladders, the event handler - and `tests/imports/testservices/<Name>.qml` carries
+the region byte-for-byte with the process I/O replaced: `send()` records what the supervisor
+would have been written, `run(argv, cb)` answers synchronously from a test-provided `responder`
+and records every argv, timers become counters. That is what lets `tests/tst_phone_scrcpy.qml`
+drive a whole launch (probe adb, launch detached, swap the sink, verify the stream) as a list of
+argv strings compared literally, and it is why the synced region may reference sibling
+singletons (`PhoneConnect.activeDevice`, `PhoneScrcpy.targetArgs`) - the doubles module carries
+them too. The one-shot serialized queue (`run`/`pump`/one `Process` with `exec`) is
+`PhoneConnect`'s busctl queue, reused rather than one Process per command.
+("test(phone): pin the four session services' process I/O to their doubles").
+
+**`Quickshell.execDetached` returns no handle, so a process spawned with it can
+only ever be stopped by the user - and "detach it and record the pid" is the
+wrong repair for anything the user can close.** The webcam PREVIEW was the
+case. `PhoneCamera.openPreview()` detached its player, so `stop()` - which
+clears `device` and runs `droidcam_session.sh stop video` - had nothing to stop
+it with: ending the session left the player holding a window on a
+`/dev/videoN` that had stopped producing frames, frozen on its last frame,
+until the user closed it by hand. Nothing errors, nothing logs, and the QML
+reads correctly.
+
+The player is a `Process` the service owns now, and which of the two shapes a
+process here takes is decided by **who can end it**, not by how long it should
+live. The stream is detached and tracked by pidfile
+(`scripts/phone/droidcam_session.sh`) because only this shell ever stops it, so
+a recorded pid is good until it is used, and because a webcam other
+applications are using has to survive a shell restart. A player is closed by
+the USER at any moment, so a pid recorded when it started is a number the
+kernel is free to reissue, and a later stop would spend it on a stranger - the
+sibling of the `pgrep -f` trap under
+[Where to look when something goes wrong](#where-to-look-when-something-goes-wrong),
+arriving through a pid rather than through a pattern. A `Process` cannot
+address anything it did not start, which removes that failure by construction.
+What it costs is that the player does not outlive a shell restart the way the
+stream deliberately does; a preview is one click to reopen, and an unstoppable
+one is the worse bug.
+
+Three more things from it.
+
+- **Which ending closes it is ONE observer.** `onActiveChanged` in the synced
+  region, not a `closePreview()` spelled into `stop()`, into `checkSession()`'s
+  death branch and into `fail()` - `active` IS the session and every ending
+  writes it, including the device disappearing, which arrives through
+  `onActiveDeviceIdChanged`'s own `stop()`. Three call sites is three places
+  for a fourth ending to be forgotten in, which is
+  [State propagation is reactive](#state-propagation-is-reactive-or-it-is-a-bug-waiting)
+  applied to a teardown.
+- **`Component.onDestruction: root.closePreview()` is belt and braces, and the
+  measurement says so.** Planted out and re-run, the player is still reaped at
+  shutdown, because Quickshell kills a Process it owns. The line stays as a
+  statement of intent and is pinned by the source contract rather than by the
+  harness, since removing it reddens nothing at runtime - do not read it as the
+  mechanism.
+- **A state flag is not evidence a process died, and here it is exactly what
+  the bug already reported.** Every ending set the service's flags correctly
+  while the window stayed on screen, so
+  `tests/test_phone_preview_lifetime_runtime.py` scores `kill -0` against the
+  pid the player itself wrote, five ways: the stop button, the stream killed
+  under the shell and found by the watchdog, the player's window closed by the
+  user (after which a later stop must reap nothing - a control process is
+  asked), the phone leaving the daemon, and the shell exiting, which is the
+  driver's half with a control of its own. `droidcam-cli` cannot run on this
+  machine at all - built against ffmpeg 8 where the system has 9, so it dies on
+  `libswscale.so.9` - so the stream is a stub of that name, launched by the
+  REAL session script; it deliberately does not `exec`, because
+  `droidcam_session.sh` refuses to kill a pid whose cmdline has stopped looking
+  like droidcam's.
+45d0afbdd ("fix(phone): the webcam preview is a player the shell owns, not a detached spawn"),
+661189c35 ("test(phone): score the preview player's death against its pid, five ways"),
+96574ee7f ("test(phone): say which half of the shutdown reap is measured, and stop leaking a sleep").
+
+**A feature card reported its TOOLING and nothing else, so "the phone is reachable" was
+answering the wrong question.** The Phone tab's three cards gate on
+`PhoneConnect.activeDevice.reachable` — KDE Connect's link — while the mirror, and the
+microphone's preferred backend, drive the phone over **ADB**, which is a different link
+entirely. On a phone paired over LAN with USB debugging never set up, `adb devices` lists
+nothing and both cards read `ready`: "Opens a floating window for the active phone", "Tap to
+start". `PhoneDeps.adbDevice` answers that now, beside the `command -v` sweep. Three rules from
+wiring it up:
+
+- **it is drawn as `offline`, never as a sixth rung.** The card is not running and cannot be
+  started, which is what offline already means, and the SUBTITLE is what says which of the two
+  links is missing — a rung is a thing the card draws differently, and there is nothing
+  different to draw.
+- **the flag is TRI-STATE.** `undefined` means the probe has not answered yet and must not read
+  as a refusal: every `PhoneDeps` flag starts `false`, so a plain falsy test puts both cards on
+  "no device" for the first frames of every session, and refuses for ever at any call site that
+  forgets to pass it — `undefined` is a value (see the `Appearance` and `Config` entries under
+  [Dynamic/data-driven QML gotchas](#dynamicdata-driven-qml-gotchas)).
+- **the webcam does not ask for it, and that asymmetry is the point.** `droidcam-cli` reaches
+  the phone over Wi-Fi when adb has nothing, so `needsAdbDevice` is a term the caller supplies
+  rather than an assumption; claiming a refusal a service can still work around is the "do not
+  fake a state a service cannot report" rule in reverse.
+
+**And the other half of the same complaint: a failed launch's reason was written where nothing
+drew it.** `PhoneCamera` and `PhoneMic` end a failure by setting `lastError` and dropping back to
+`ready`, and `PhoneFeatureCard` draws `lastError` only inside its `active` rung — so nine seconds
+after a click the card was back on "Tap to start · settings to configure" with the reason sitting
+in a property no binding read. The mirror's own ladder already had that arm (`mirrorSubtitleKey`
+returns `"error"`); the two siblings did not, and the card's own header comment claimed they did.
+Every one of these decisions is a pure function in
+`modules/imi/sidebarLeft/phone/phone_cards.js` precisely so `tests/tst_phone_cards.qml` can drive
+it; what needed the runtime harness is whether the click reaches the service at all, and whether
+the card or its settings chip is what a click at the card's centre lands on.
+b591575c4 ("fix(phone): a card that cannot start over ADB says so before the click"),
+cf945864c ("fix(phone): a failed webcam or microphone launch reaches its card's subtitle").
+
+**And the third: the mirror card believed the supervisor's `started`, which
+means "I spawned scrcpy" and not "a mirror is on screen".**
+`scripts/phone/scrcpy_session_manager.py` emits that event the instant
+`subprocess.Popen` returns; it has no way to know a window appeared. On a phone
+`adb devices` does not list, scrcpy prints `Could not find any ADB device` and
+exits about a second later — so for that second the card read **"scrcpy Mirror /
+Mirror is running · click to focus its window"**, with a filled check mark and a
+detail line saying "Active for 0s", on a machine where no mirror could exist,
+and then dropped back to the line it had before the click. A spawn keeps the
+mirror `launching` now and arms a settle (`PhoneScrcpy.mirrorSettleMs`);
+surviving the window in which a launch fails is the only evidence the three
+events there are can offer, and erring long only costs a beat more of
+"Connecting scrcpy…". `alreadyRunning` is exempt — that is the supervisor
+answering about a child it has been watching since an earlier launch — which is
+also why `launchMirror()` refuses while a launch is in flight: a second click
+inside the settle would otherwise get exactly that answer back about the child
+spawned a moment ago, i.e. the same weak evidence wearing the strong event's
+name. Three more things fall out of it:
+
+- **`mirrorError` is a second string on purpose.** `lastError` is written by
+  any session's exit and by the supervisor's own restart ladder, so a failed
+  *app* launch an hour ago was already reaching the mirror's card. Scoped to the
+  mirror and cleared by every `launchMirror()`, a non-empty one means "the click
+  you just made did not take" — which is what lets the subtitle ladder ask the
+  error BEFORE the ADB precondition. That ordering was the other way round, with
+  a test asserting it and a comment explaining it, and both were right while the
+  flag carried `lastError`: the repair is not the ordering but what the flag
+  means. Preferring the precondition made a failed launch byte-identical to no
+  launch at all — the card flashes and comes back to the words it started with.
+- **An exit with no stderr line still reports.** A launch that never settled
+  produced nothing whatever the exit code says, and an empty error string is
+  drawn as silence.
+- **None of it is reachable from a settled reading.** `PhoneTabRuntimeTest.qml`
+  drives the real supervisor (`Directories.scriptPath` resolves to the checkout,
+  so a `qs -p` harness really spawns the fake `scrcpy` on its PATH) and samples
+  the card every 25ms across the launch; the driver asserts the sample count
+  first, because a watch that never ran reports "nothing bad happened" exactly
+  as loudly as a correct one.
+
+b53c8c260 ("fix(phone): a spawned scrcpy is still launching, not a running mirror"),
+940c4c3be ("fix(phone): a failed mirror launch says why, instead of snapping back"),
+597e7a2cd ("test(phone): watch the three transitions a settled reading cannot see").
+
+**A deferred text swap fades the GLYPH and not the shape behind it, so on a
+badge it is an empty badge.** `StyledText`'s `animateChange` — the
+`Behavior on text` ending in a bare `PropertyAction` documented under
+[Design language](#design-language) — fades the Text to zero, applies the
+pending string there, and fades it back. Inside
+`MaterialShapeWrappedMaterialSymbol` the shape does not fade with it, so every
+frame of the swap is a painted blob with nothing in it. Two things made that a
+defect rather than a flourish on the Phone tab's feature cards. The card's other
+three elements (title, subtitle, trailing mark) change in one frame, so the
+glyph was the only part out of step with the state it labels. And a five-rung
+ladder can move twice inside one tier — `offline → connecting → offline` is what
+a launch that cannot start does — which retriggers the fade from wherever the
+first write had got to: measured in the runtime harness, the glyph sat at or
+under 0.02 opacity for over **200ms of a 150ms tier** and came out still drawing
+the icon it went in with, having swapped nothing. Before reaching for
+`animateChange`, ask whether the thing behind the glyph fades with it and how
+often the value can change.
+3c82747df ("fix(phone): the feature card's glyph stops blanking its own badge").
+
+**...and on a `Control`'s content item that same swap also LATCHES the glyph off
+its own centre, permanently, because the coordinates it animates back to were
+read before the Control had placed it.** `StyledText` records
+`originalX`/`originalY` in its own `Component.onCompleted`, and a content item
+completes BEFORE the Control that owns it — so those are (0, 0), the swap ends
+by writing them onto the glyph's `x`/`y`, and the glyph sits on the top-left
+corner of the padded rect for the rest of the session rather than in the middle
+of it. The Phone tab's footer is the case: the clear action's glyph is a ternary
+on the notification count, so it is the one glyph on that bar whose text ever
+changes, and after a single swap it settled **4.00px left and 4.00px above** the
+button's own centre — exactly the Control's padding — having travelled 10.00px
+off it on the way, at a measured minimum opacity of **0.00** inside a button
+background that does not fade with it. The sync action beside it, whose text
+never changes, read (0.00, 0.00) throughout, which is what makes the two look
+like one broken button rather than one broken idiom. Note that none of it is
+reachable from a settled reading taken before the value first moves: a harness
+has to DRIVE the change and watch it, in both axes and signed — the first
+version of this check returned `|dx|` and could not have seen either half.
+`modules/common/widgets/IconToolbarButton.qml` carries the same
+`animateChange` on a content-item glyph and is the open neighbour: several of
+its call sites give it a `text` that really does change (`DockerPopup`'s
+expand chevron, `RecordingRegionPanel`'s play/pause, the wallpaper
+selector's dark/light mark, `FpsLimiterContent`'s state switch), so the same
+latch is available to every toolbar button in the shell. Unmeasured here on
+purpose — it is a shared widget with call sites in a dozen files and the
+repair is somebody's whole change, not a line in a phone fix.
+be89b6614 ("fix(phone): the footer's clear action stops latching its glyph off centre"),
+d9cc8acc9 ("test(phone): drive the count and watch the footer's one glyph swap").
+
+**A roster is a list, and this shell has one component for a multi-item
+selectable list — reaching for a `Repeater` writes a third variant of it.** The
+Phone tab's device roster was a `Repeater` of `PhoneDeviceItem`s in a
+`ColumnLayout`, while the Wi-Fi and Bluetooth device lists in
+`modules/imi/sidebarRight/` draw exactly this shape as a `StyledListView` whose
+delegate is a `DialogListItem` — which `PhoneDeviceItem` already was. Only the
+container differed, and what the view adds past one shape for three lists is its
+own add/remove transitions on the shared tier, so a device joining or leaving
+the network is a row that arrives or leaves instead of a column that jumps.
+Three things about wiring one into a `ColumnLayout` are worth not re-deriving.
+**A `ListView` told it is zero pixels tall builds no delegates**, so it reports a
+`contentHeight` of zero and can never grow out of one: a height that reveals the
+list has to be a box AROUND it, with the list at its own `contentHeight` inside
+(the `implicitHeight: contentHeight` idiom `NotificationGroup.qml` and
+`StyledComboBox.qml` already use). **The reveal rides ONE scalar with ONE
+`Behavior`** — `rosterProgress` beside the tab's own `subPageProgress` — on
+`Appearance.animation.elementMove` taken whole, so the motion-speed slider and
+the reduce-motion floor reach it; `elementMoveEnter`/`Exit` are the wrong tiers
+for a toggle the user reverses, because their curves are directional. And **a
+`QQuickLayout` stops writing the height of a child it has excluded**, so a folded
+box keeps whatever its last laid-out frame left on it (measured: 1.38px) — a test
+reading that number back sees a mid-flight height for the rest of the run and its
+"did this animate" check passes on a snap. Sample only while the box is drawn,
+and read the settled state off the scalar. Measured across the chip's click: the
+box travels 0 → 116 over 7 sampled frames, peaking at 117.61 because
+`expressiveDefaultSpatial` leaves the unit box, and back down over 8; with the
+`Behavior` planted out, both mid-flight counts go to 0 while both settled checks
+stay green, which is why the settled ones alone were never enough.
+ddb0546f8 ("refactor(phone): the device roster is drawn by the shell's own list view"),
+248474b8e ("feat(phone): the roster unrolls and folds instead of appearing whole"),
+3577cf4d8 ("test(phone): watch the roster's reveal in both directions").
+
+**And where the missing link is the whole page rather than one card's subtitle,
+it is drawn as a panel that says what to do.** The Phone tab's Android Apps
+page is another reader of `PhoneDeps.adbDevice` and the first where the answer
+is everything on screen: with a phone paired to KDE Connect over the LAN and
+nothing under `adb devices`, App Mode has no transport, so the page has no list,
+and what it drew was the session manager's own sentence - "Phone not reachable
+over ADB", `scrcpy_session_manager.py`'s `apps_error` - as one line of red text,
+with a "No apps yet" empty state underneath saying the same thing in weaker
+words and offering no way out of it. Four things from repairing it.
+
+- **The state is read off `PhoneDeps.adbDevice`, never off
+  `PhoneScrcpy.appsError`.** That string is a *consequence*: it exists only
+  after a list request has been made and failed, so it is absent on a page
+  nobody has asked yet and present for reasons that are not this one, and a
+  surface matching on its text is a second answer to a question the probe
+  already answers. The tri-state rule b591575c4 records carries unchanged -
+  `PhoneDeps.ready ? PhoneDeps.adbDevice : undefined`, because every flag in
+  that singleton starts `false` and a plain falsy test draws the panel for the
+  first frames of every session.
+- **Two messages about one fact is one message too many, and the one that goes
+  is the one that cannot act.** `PagePlaceholder` is kept for the state it is
+  actually about - a phone the shell can reach that came back with no apps -
+  and the status line stands down while the panel is up rather than repeating
+  the supervisor's sentence above it. Both are `visible`/`shown` gates on the
+  same derivation, so there is no ordering between them to get wrong.
+- **A panel naming a state owes the ways out of it, and only the ones that
+  exist.** Both routes are on it because the machine this was reported from has
+  neither: USB debugging over a cable (Developer options, then the fingerprint
+  prompt), and wireless debugging, which on Android 11+ picks a **new port
+  every time the switch is toggled** - so the `adb pair`/`adb connect` pair is
+  typed by hand and typed again after each toggle and each reboot. The fork
+  polls mDNS for that port; this shell does not, and the panel therefore
+  promises no button. What it does promise is what the shell really does: the
+  card stack's own five-second poll keeps re-asking `adb devices` while the tab
+  is open (it stays loaded under a sub-page, so this page adds no second
+  poller), and the page asks for the app list once when a device appears -
+  an observation of that one state change, not a timer and not a binding, which
+  is what keeps `--list-apps` from starting a scrcpy per turn.
+- **A `PagePlaceholder` description handed the page's whole width is a
+  paragraph at a measure nobody chose.** `dropIconWhenCramped` widens that
+  column to the page - only so the fit decision measures against a width that
+  cannot move under it - and the description, which fills, inherited it: 63
+  characters across 440px, drawn edge to edge and aligned left. The clamp is
+  `descriptionMaximumWidth` on the shared widget, opt-in at -1 so the callers
+  drawing a two-word description keep exactly what they drew, and it carries
+  the centring with it because a clamped paragraph left against the column's
+  edge reads as a margin on one side only. The other three cramped call sites
+  (Contacts, and both notification lists) have the same paragraph problem and
+  are left alone here.
+
+None of it is reachable from a source check or from `qmltestrunner`: which
+message is on screen is a question about three states at once.
+`PhoneTabLayoutRuntimeTest.qml` walks all three in one run - no device, a
+device with no apps, a device with apps - behind a fake `adb` and a fake
+`scrcpy` that answer off two files the harness creates between steps. The fakes
+are the load-bearing part: both tools are really installed on the maintainer's
+machine, so without them the page reads whatever a real `adb devices` answers
+and the reported state vanishes the moment a phone is plugged in.
+(feat(widgets): NoticeBox draws in whichever container role it is given,
+feat(widgets): PagePlaceholder can hold its description to a measure,
+fix(phone): the Apps page says what to turn on when ADB has no device,
+fix(phone): the Apps page's empty state stands down while the panel is up,
+fix(phone): the Apps page's empty state reads as a paragraph, not a rule,
+test(phone): drive the Apps page through its three ADB states.)
+
+**`command -v` answers presence, and presence is not "this feature can start" - a package
+linked against a library the system has moved past is on PATH and dies before `main`.**
+`droidcam-cli` was exactly that here: on PATH, and `error while loading shared libraries:
+libswscale.so.9: cannot open shared object file`, because the package was built against
+ffmpeg 8 on a system that had moved to ffmpeg 9's `libswscale.so.10`. So the webcam card
+read `ready`, the click did nothing, and the message the user got - "is the DroidCam app
+open on the phone?" - sent them to look at the wrong machine entirely. Note the shape:
+nothing errors, nothing is logged, the QML is correct, and the flag is a perfectly good
+answer to the question it was asked.
+
+`services/PhoneDeps.qml` has three states now. The three binaries the tab SPAWNS - scrcpy,
+adb, droidcam-cli - are started as well as located, each run probe kicked by its own
+presence probe rather than by a feature's activation (which is
+`lint_capability_probe_gating.py`'s rule one hop along, since that check only sees the
+`command -v` half). Five things about it are worth not re-deriving.
+
+- **The classifier needs BOTH halves of the loader's signature.** The loader writes its
+  sentence to stderr and the process comes back **127**; `droidcam-cli` with no arguments
+  prints a page of usage and exits **1**, which is a tool that ran and refused. Matching the
+  phrase alone would classify that as broken, and matching 127 alone names no library, so
+  there is nothing to tell the user. 127 cannot be a shell's "command not found" here
+  because every probe is a constant argv with no shell on the path.
+- **A tool that BLOCKS is neither state, and must not become a probe that never answers.**
+  Each run probe carries a kill guard; a killed process is not a loader failure, so it lands
+  on "it runs". Erring that way is deliberate - calling a slow tool broken is a worse lie
+  than the one this replaced.
+- **The plain names stay the ones consumers read.** `scrcpy`/`adb`/`droidcamCli` mean
+  "installed and able to start", which is the question every one of them was really asking;
+  `*Present` and `*RunError` are the two halves. That is what makes the fix reach
+  `PhoneCamera.available` and the webcam card without either of them learning a new word.
+- **A broken tool is missing, and its install-guide row says what it actually is.**
+  `missingDeps` counts it as missing - the click does nothing either way - and
+  `brokenDependency` swaps the description for the loader's own missing library and a note
+  that the package needs rebuilding, keeping the install commands, because on Arch
+  `yay -S droidcam` IS the rebuild.
+- **Only the tools the tab spawns are asked.** `pactl`, `v4l2-ctl` and the preview players
+  keep a presence probe alone: their failure is a message on a page rather than a feature
+  that silently does nothing, and three extra processes per sweep buys nothing.
+
+`tests/tst_phone_scrcpy.qml` drives the classifier from both sides through the double, and
+`PhoneTabLayoutRuntimeTest.qml` walks the real page through all three states behind a fake
+adb the driver copies in between steps. **That harness strips `adb` out of PATH entirely**,
+which is the only way a test on this machine can say what `command -v adb` answers - the
+maintainer's own lives in `/opt/android-sdk/platform-tools`, and `command -v` searches the
+whole of PATH, so a non-executable placeholder in front is skipped rather than shadowing.
+(feat(phone): PhoneDeps tells a tool that cannot run from one that is absent,
+test(phone): drive the loader failure and the dependency row it produces,
+test(phone): drive adb's three states and the pairing panel end to end.)
+
+**...and where a page's whole content is "a link is missing", the link is a job the shell
+can do rather than a command line to retype.** The Apps page's panel printed `adb pair
+host:port code` and `adb connect host:port` and told the reader to open a terminal. It runs
+them now, as a form: two address fields, a six-digit code field, and a button per step. Five
+things measured rather than assumed, all against the installed platform-tools (1.0.41,
+Version 37.0.1-15733141):
+
+- **`adb pair HOST:PORT CODE` takes the code as an ARGUMENT and does not prompt.** `adb
+  help` documents `pair HOST[:PORT] [PAIRING CODE]`, and `adb pair 127.0.0.1:1` with no code
+  and stdin closed answers `Enter pairing code: adb: No pairing code provided` and exits 1.
+  So the code has to be on the command line, and it is one argv element - the address and
+  the code are the user's own typing and there is no shell anywhere on this path. The
+  sibling fork's every adb helper is a `bash -c` string with values pasted through a
+  hand-rolled quoter, one of them a *translated* string pasted into single quotes; that is
+  the shape this may not take.
+- **`adb connect` exits 0 whatever happens.** `adb connect 127.0.0.1:1` prints `failed to
+  connect to '127.0.0.1:1': Connection refused` and exits **0**; so does a host that does not
+  resolve. The exit code is therefore not evidence and the printed line is - and the line is
+  still only a claim, so what takes the panel down is the phone turning up under `adb
+  devices`, which the connect handler re-asks. `adb pair` reports through both, so both are
+  required: a success sentence with a non-zero exit is not a pairing.
+- **Android re-rolls BOTH ports on every toggle of the switch**, and they are different
+  ports: the pairing screen advertises `_adb-tls-pairing._tcp` only while it is open, and
+  `_adb-tls-connect._tcp` is up for as long as wireless debugging is. `avahi-browse -rpt`
+  finds them; its parsable resolved record puts the address in field 8 and the port in field
+  9 (the layout the fork reads with `awk -F';' $8":"$9`). **That layout could not be
+  confirmed against a live daemon here** - avahi-daemon is not running on this machine - so
+  the parser validates the port rather than trusting the position and skips a record it
+  cannot read, because an address offered confidently and wrongly is worse than none.
+- **What is honestly prefillable is the HOST, and it is offered as a head start rather than
+  as an address.** `PhoneConnect.activeDevice.reachableAddresses` is where KDE Connect
+  reaches the phone, which is the same LAN address wireless debugging listens on; the ports
+  are not derivable from it. So the field is prefilled with the bare host and the Pair button
+  stays refused until a port is there. The six-digit code is never prefillable - it is
+  generated per pairing and advertised nowhere - and with no avahi-browse installed the
+  discovery row is simply not drawn rather than being a button that cannot work.
+- **Every prefill is an ASSIGNMENT guarded on the field still holding the shell's last
+  suggestion.** A binding on a `TextField.text` is destroyed by the first keystroke
+  ([#158](https://github.com/XephyLon/immaterial-impulse/issues/158)'s shape), and the guard
+  is what stops a discovery that lands after the user has typed from taking their typing
+  away.
+
+The panel also answers **which** link is missing, which used to be one message covering three
+facts: adb absent (the old wording assumed it away and sent the reader to their phone), adb
+present and unable to start (the entry above), and adb working with nothing on it. Only the
+third is a pairing job. And the runtime harness measures the form at **two page widths**,
+because a column pinned to one passes every check at that one - `ContentPage.baseWidth` is
+the case that already cost a round - scoring items that are DRAWN rather than lit, since a
+disabled `RippleButton` dims to 0.4 through the interaction model and still occupies the
+width it asked for.
+(feat(phone): the Apps page pairs over Wi-Fi instead of printing a recipe,
+test(phone): pin the pairing argv, the two parsed results and the mDNS records.)
+**The Phone tab's four SHELL scripts had never been RUN by anything, and what
+that cost is the reason this section exists.** `test_phone_sessions_contract.py`
+reads them as source text - the state directory, the `pgrep -x` rule - and
+`tst_phone_scrcpy.qml` drives the QML that parses their output against strings a
+human typed into the test. So the producer and the consumer were each checked
+against a description of the other, and a producer that stopped emitting those
+strings stayed green on both sides.
+`tests/test_phone_shell_scripts.py` runs all four for real with stubbed
+`pgrep`, `pactl`, `v4l2-ctl`, `droidcam-cli`, `scrcpy` and `sudo` on PATH; the
+stubs are the process TABLE and the sound server, while the processes are real
+(launched through `droidcam_session.sh launch`, with real pids and real
+`/proc/<pid>/cmdline`), so the signature matching, the port disambiguation and
+the kill guard all run against what they run against in production. Eight
+defects were sitting in them, and six of the traps generalise past this feature:
+
+- **`exit` inside a shell function ends the SCRIPT, and neither a redirection
+  nor a `|| true` on the call makes a subshell of it.** `cmd_stop`'s two
+  non-kill paths ended with `exit 0`, so `cmd_killall`'s loop over
+  video/audio/scrcpy-mic stopped at the first session with no state file, never
+  stopped the other two, and exited 0 - which the caller reads as success. A
+  command function returns; the dispatch at the bottom of the file is what sets
+  the status. a0b5d84c4 ("fix(phone): killall stops every session instead of
+  exiting on the first").
+- **A substring cannot express a negative, and the two things being told apart
+  here are one binary with and without a flag.** `video`'s signature was
+  `droidcam-cli` and `audio`'s was `droidcam-cli -a`, so the microphone's
+  cmdline matched the WEBCAM's signature; the port could not break the tie
+  because `find_running` is called with an empty port whenever there is no state
+  file. Reachable with no pid reuse at all: a shell restart with only the mic up
+  and `video.json` absent made `status video` answer with the mic's pid, so the
+  tab drew a stream that did not exist and turning it off sent SIGTERM to the
+  microphone. It is a predicate now, and the kill guard asks the same one - it
+  was `*droidcam-cli*|*scrcpy*`, the same over-broad test one function along and
+  the half that pulls the trigger. 44e496940 ("fix(phone): a session signature
+  tells the webcam from the microphone").
+- **`IFS=$'\n\t'` drops space, so an unquoted expansion does not split a
+  cmdline at all.** `cmdline_of` turns NULs into spaces and the rediscovery
+  paths passed `$cl` unquoted to `extract_port`/`extract_ip`, which therefore
+  saw ONE non-numeric argument: every session rediscovered after a restart
+  reported an empty port and an empty address. Split under a local `IFS` and
+  keep the callers on argv arrays rather than putting space back into the global
+  one. d98959eb7 ("fix(phone): a rediscovered session reports the port and
+  address it was given").
+- **`cmd | grep -oE ... | tail -n1 || echo 0` never falls back**, because the
+  pipeline's status is `tail`'s and `tail` succeeds on empty input. This is the
+  sibling of the `cmd | grep -q` trap under
+  [External binaries the shell drives](#external-binaries-the-shell-drives),
+  arriving from the other side. Watch what the empty value then does: the port
+  is printed with an unquoted `%s` because it is a JSON *number*, so the line
+  came out as `"video_port":,`, the QML `JSON.parse` threw, and EVERY field in
+  the payload was lost rather than one. A producer emitting JSON by `printf`
+  needs each unquoted field to be a value it can always emit.
+  c3837b1aa ("fix(phone): the status probe always emits a port, so its payload
+  parses").
+- **`pgrep` answers with the process table as it was when it sampled it**, so
+  `/proc/<pid>/cmdline` needs the `[ -r ]` guard `find_running` already carried.
+  Without it the read fails, the cmdline is empty, and an empty string matches
+  the `*)` default - which was the video arm, so a dead pid was reported as a
+  running webcam. The `2>/dev/null` on that line covers `tr` and not the
+  redirection that opens the file, so the shell's own error reached stderr too.
+  7ad0dc204 ("fix(phone): a process that exited between pgrep and the read is
+  not a webcam").
+- **Two lookups for one fact drift, and here the drift LOADS something.**
+  `setup_droidcam_input.sh`'s idempotence check asked for `DroidCam-Mic.monitor`
+  while the lookup twenty lines below it, for the same fact, tried
+  `alsa_output.DroidCam-Mic.monitor` first - so on a server using the prefixed
+  form that does not also propagate `device.description`, every call missed the
+  sink it had loaded itself and loaded another under the same name, while
+  teardown's awk `exit`ed after the first match and removed one per call. Three
+  setups, three null sinks. It is one `find_monitor` now, and the module index
+  `pactl load-module` prints - the handle teardown otherwise reconstructs by
+  grepping - is captured rather than discarded, so the failure path can take
+  back what it loaded. 5cebeccaa ("fix(phone): the null sink is resolved once,
+  however the server names its monitor"), 9631f2e4e ("fix(phone): setup unloads
+  the null sink it loaded when the monitor never appears"), ec0f42792
+  ("fix(phone): teardown unloads every DroidCam-Mic sink, not just the first").
+
+`install_droidcam.sh` is the fourth, and its defects are the same shape one
+level up: an unchecked `$AUR_HELPER -S` under a `✓ DroidCam installed` and a
+footer telling the user the cards should read "Ready", and an unchecked `unzip`
+followed by an unchecked `cd`, so a failed extract ran `sudo ./install-client`
+in the CALLER's working directory. Its Arch branch also installed neither
+`v4l-utils` nor `android-tools` - both of which the Fedora and Debian branches
+install, both of which `PhoneDeps.missingFor("webcam")` names, and without the
+first of which `droidcam_status.sh` cannot resolve the webcam's `/dev/videoN` at
+all - so on Arch the installer could complete and the webcam still not be found.
+Its dispatch is a `main()` behind the usual `BASH_SOURCE` guard now, because a
+branch nobody can select is a branch nobody can test: the maintainer is on Arch,
+CI is on Ubuntu, and `detect_distro` reads `/etc`.
+bf49d3f72 ("refactor(phone): the installer's dispatch becomes main(), so it can
+be driven"), ce86796d6 ("fix(phone): a failed extract no longer runs
+install-client as root elsewhere"), 0c1b9d31a ("fix(phone): the Arch branch
+stops reporting a failed install as a success"), 6712ce64b ("fix(phone): the
+Arch branch installs the tools the webcam actually needs").
+
+**And the supervisor beside them had three of the same family, all of them
+about a process's OTHER ends.** `scripts/phone/scrcpy_session_manager.py` is one
+long-lived process speaking NDJSON, so every one of these is silent:
+
+- **`stderr=subprocess.PIPE` must be drained WHILE the child runs.** It was read
+  after `proc.wait()`, and a pipe holds about 64 KiB - past that scrcpy blocks
+  in `write()` with nobody reading, so it never exits, `wait()` never returns,
+  no `exited` event is ever emitted, and the card sits on "running" over a
+  mirror that has frozen or died. Measured with a fake writing ~300 KiB: no
+  `exited` in twelve seconds against ~0.1s when the same fake is quiet. A drain
+  thread with a bounded tail, so `wait()` still decides when the event fires and
+  a grandchild holding stderr open delays nothing.
+  b64dd2147 ("fix(phone): drain scrcpy's stderr while it runs, not after it
+  exits").
+- **`print(x, flush=True)` is two writes, and every reaper thread emits.** Under
+  the GIL two small writes are effectively atomic, which is why this hid: the
+  corruption needs an event large enough to flush part way, and an `apps_list`
+  for a real phone is tens of kilobytes. Observed at roughly one in three runs
+  of a stress harness - `{...apps_list...}{"event": "exited", ...}` on one line -
+  which is too rare to be a check, so the check swaps in a stdout whose `write`
+  is deliberately not atomic and requires every line to parse. Note what
+  interleaving costs: the QML parser returns null and BOTH events are dropped,
+  and a lost `exited` leaves a session row live with no window behind it.
+  9121bb5f6 ("fix(phone): one lock around one write, so an event is never half a
+  line").
+- **A blocking command handler blocks the whole protocol.** `list_apps` ran on
+  the command loop and is worth ~26s of subprocesses (`adb connect` 4s +
+  `adb devices` 4s + `scrcpy --list-apps` 10s + `pm list` 8s), during which
+  `stop`, `stop_all` and `focus` were not read off stdin - measured, a focus
+  sent 0.3s into a 4s scan was acted on at 4.01s. A queue with ONE worker, not a
+  thread per request: two scans would run `adb` at each other, and a request
+  dropped as a duplicate is an `apps_list` the page waits for and never gets.
+  The emit lock is a prerequisite for making anything here concurrent.
+  c1caf34ad ("fix(phone): the app scan runs off the command loop").
+- **The docstring's promise held only on the clean-EOF path.** There was no
+  signal handler, and `PhoneScrcpy.stopManager()` sets the Process's
+  `running = false`, which Quickshell sends as SIGTERM - so Python's default
+  handler exited without `stop_all()` and every window the supervisor owned was
+  orphaned. When a script promises something about how it is shut down, ask how
+  its caller shuts it down. 76d9f863d ("fix(phone): a SIGTERMed supervisor stops
+  its scrcpy children").
+
+The one finding there that did NOT stand is worth recording, because it is
+AGENT.md's own rule about a removal being a decision, applied to a preference.
+`resolve_adb_target` returning a USB serial in preference to a wireless one the
+caller named reads as "the tab's device selection is silently ignored", and it
+is not: `PhoneScrcpy.targetArgs()` only ever produces a wireless `-s ip:port`,
+and only when the "use wireless" setting is on - it never names a USB serial, so
+the tab's active device does not reach that function as a serial at all. The
+preference is stated in two docstrings and pinned by a test, and it stays. What
+was fixed is the half with no argument behind it: `usb_devices[0]` is whichever
+`adb devices` printed first, so a named serial adb really lists is honoured now
+and the unsteered pick is sorted. e7c042c19 ("fix(phone): a named USB serial
+wins, and the unsteered pick is deterministic").
+
+**And the surfaces that DRIVE those services get their allowlist derived rather than written
+down.** "A button whose call no service answers is a fake action" is stated for the right
+sidebar's phone dialog as a hand-typed `MODEL_ACTIONS` set. The Phone tab's pages reach five
+services and a whole `Config.options.phone` subtree, which is more than a hand-typed set survives:
+`tests/test_phone_tab_surface_contract.py` parses each `services/PhoneX.qml` for the properties,
+functions and signals it declares and resolves every `PhoneX.member` in
+`modules/imi/sidebarLeft/phone/` and the settings page against it, and does the same for every
+config path against `Config.qml`'s own block. The sibling fork is what makes it worth the parsing
+rather than a rule: its cards offer a phone screenshot, a phone power toggle and a "hear yourself"
+loopback that nothing here answers (`PhoneMic` only ever *unloads* a `module-loopback` - it clears
+one a previous session left behind - and never loads one), and its webcam and microphone pages
+carry six config keys this schema does not declare. Every one of them is one copied block away,
+and each fails quietly: a `ReferenceError` per binding into `log.log`, or `undefined` taking its
+fallback for ever until the `JsonAdapter` destroys the key. A card that draws the state machine
+must therefore reach NO service at all - `PhoneFeatureCard` announces `clicked`/`settingsClicked`/
+`stopClicked` and `PhoneFeatureCards` is the one place they become calls, which is what keeps the
+derivation worth having.
+ffac945aa ("test(phone): hold the tab's surfaces to what the services actually answer"),
+5f32c13e8 ("feat(phone): PhoneFeatureCards, the three cards wired to the services that answer them").
 
 **A player on the MPRIS bus may be a proxy for another player, and every field you would match on
 is the borrowed one.** `playerctld` is `playerctl`'s daemon, not a player: it re-publishes whichever
@@ -4036,6 +5375,28 @@ box. Derive the growing axis too, but compute it *arithmetically* from the input
 child layout's `implicitWidth`: the content is anchored to this item's width, so reading its implicit
 size back would bind width to itself. Cap the result and let the grid wrap instead of growing forever.
 
+**Discord's RPC sends `"data": null`, and `.get("data", {})` does not default on it.** A dict default
+applies only when the key is absent; an explicit null comes through as `None`, and leaving a voice
+channel is exactly that — a `VOICE_CHANNEL_SELECT` dispatch and then a `GET_SELECTED_VOICE_CHANNEL`
+reply, both null. Four `.get()` sites in `scripts/discordVoice/discord_voice_bridge.py` raised on
+it, the read loop died with the bridge, and after five backoff restarts `services/DiscordVoice.qml`
+reported "Discord bridge stopped after repeated failures" — for the most ordinary thing a user does
+in a call. Read a nullable field as `payload.get("data") or {}`. The sibling trap is in the service:
+its restart ladder covers the bridge *process* only, and the two answers that mean "nothing to talk
+to" (`unavailable`, `disconnected`) come from a bridge that is alive and idle, so nothing retried
+them and a Discord started after the shell sat unconnected until the popup's manual connect. The
+service carries a second ladder for those now — the same arithmetic (`backoffDelay`, 1s doubling to
+a 30s cap), one shot per answer so the bridge's reply decides the next rung, disarmed by
+`connected`, by `authenticated` (the Vesktop companion backend never says `connected`), by the
+manual connect, and by the process exit handler, because a retry landing on a dead bridge goes
+through `send()` → `start(true)`, which zeroes the process ladder's ceiling.
+`tests/tst_discord_voice_reconnect.qml` drives the real singleton for it — the `Process` and
+`SplitParser` mocks under `tests/mocks/Quickshell/Io` grew the bridge's surface so it loads under
+`qmltestrunner` — and `tests/test_discord_voice_plugin.py` pins the one-shot shape, the shared
+ladder and the exit-handler disarm, beside the read-loop test that feeds the null frames.
+874311484 ("fix(discordVoice): treat a null data field from Discord as an empty payload"),
+8d8d97965 ("fix(discordVoice): retry the connection with backoff when Discord is not there").
+
 **A Wayland client is never told about keys aimed at something else, so the OSK's
 physical-key highlight reads /dev/input — and its LIFETIME is the safeguard, not
 a promise in a comment.** `scripts/keyboard/key_monitor.py` needs membership of
@@ -4085,6 +5446,19 @@ cosmetic error: when the missing token feeds a positioner's `spacing`/`margin`, 
 freezes the shell (this is exactly what a bulk token migration did to `ConfigRow.qml`,
 `NotificationListView.qml`, `PluginOptions.qml`, and `StyledPopupMenu.qml`). `tests/lint_qml_imports.sh`
 (run by `tests/run_tests.sh` and CI) guards against reintroducing it.
+
+**`Translation` is a `qs.services` singleton, not a `qs.modules.common` one, and the same
+non-transitivity applies.** A `modules/` file rewritten without `import qs.services` while
+keeping every `Translation.tr(...)` passes every static check and logs `ReferenceError:
+Translation is not defined` per binding at runtime — the phone panel's roster row did exactly
+that, and only the runtime harness that builds the real dialog saw it; the chip beside it had
+the same hole behind a ternary no device-full run evaluates, which no harness could have seen.
+`tests/lint_qml_imports.sh` covers `Translation` now (its table is one line per singleton), and
+it skips files that live IN the declaring module, since a sibling type is in scope on its own —
+every `services/*.qml` that translates a string would otherwise be an offender.
+0c6429028 ("feat(phoneConnect): the dialog becomes a device chip, pills, one action row and a
+notification area"), f37d0ac9e ("test(lint): a bareword Translation needs import qs.services,
+and a module's own files do not").
 
 **Strict UI Guidelines:** See [`docs/M3_GUIDELINES.md`](docs/M3_GUIDELINES.md) for the definitive rules on tokens, rounding, layering, and expressive motion that all new components must follow.
 
@@ -4172,6 +5546,18 @@ scrolling surface here eased on `Appearance.animation.scroll`, whose duration, t
 both `StyledFlickable`s and both `StyledListView`s already write out. Naming two tiers in one
 animation is the tell.
 (fix(overview): the niri overview scrolls on the scroll tier, whole.)
+
+**A programmatic scroll goes through `StyledFlickable.scrollToY()`; a direct `contentY` write
+snaps wherever the `Behavior` is off.** `StyledFlickable`'s `Behavior on contentY` is disabled
+under `expressiveScroll` and `momentumScroll` — those paths drive `contentY` per input event and a
+Behavior would fight them — and `ContentPage` is a momentum flickable, so all fifteen settings
+pages' `goTo(term)` wrote `contentY` and jumped to the section in one frame (the maintainer's
+request, 2026-08-27). `scrollToY(y)` clamps, stops the settle/bounce/programmatic animations,
+records `scrollTargetY` and runs one `NumberAnimation` on the scroll tier taken whole; the three
+wheel paths and `onMovementStarted` stop it, so user input always wins.
+`tests/test_settings_navigation.py` pins the helper's tier, the five stop sites, and that no page
+writes `contentY` itself. (feat(settings): a section pick scrolls the page there on the scroll
+tier.)
 
 **...and the sibling defect is the one that lint deliberately waved through: a duration read out
 of `animationCurves` is the tier's BASE, and the speed multiplier is not in it.**
@@ -4483,6 +5869,43 @@ arrived.
 ("feat(widgets): StaggerWave, the one runner for a group's arrival";
 "feat(editMode): the drawer arrives as a surface and then fills").
 
+**What a member's ARRIVAL looks like is one spelling too — `StaggerEntrance`, beside the wave.**
+The three-channel entrance (opacity, a scale from a derived near-1 start, and a small rise, all on
+the one `appear` scalar the wave animates) lived only as Edit Mode's drawer's local dressing,
+spelled out per member nine times — the template the next adopter would copy, and a hand-copied
+dressing is how a member arrives on two channels out of three. `modules/common/widgets/
+StaggerEntrance.qml` is the promotion: declared beside the `StaggerWave`, aimed at the same
+container, it installs the three channels once on every child declaring `appear` — a member's whole
+opt-in is the property the runner already requires. The scale's START is derived, not picked:
+`motion_policy.js`'s `entranceScaleFrom(rise, reference)` matches the scale's excursion to the rise
+(the survey's raw 0.85 is a popup number that reads as a zoom on a full-width row) with the
+measured 0.85 as the floor, and `Appearance.animation.entranceRise` is the rise
+(`spacing.space250` — a distance on the shell's rhythm, not a duration). Two refusals are
+load-bearing: a child without `appear` is not a member, and a child owning an `interactionMotion`
+is skipped whole — a `RippleButton` already folds `appear` into the opacity binding that carries
+its disabled dim and owns `scale` through the model, so a writer here would REPLACE those bindings
+rather than compose with them. The runtime skip cannot see an ANCESTOR, so both composition lints
+learned the spelling: `lint_interaction_motion_double.py` fails a `StaggerEntrance` inside a
+scale-channel control and `lint_disabled_opacity.py` fails one anywhere in a file whose root dims —
+at ANY indent, because the realistic placement is a direct child at one level, which the ≥5-space
+nested-dim convention never sees (the plant proving the rule landed exactly there and the first
+version stayed green over it). A wave whose members are not one container's children — GroupedList
+reparents each row into its own plate — hands the runner the declared list via `StaggerWave.items`,
+which REPLACES the children walk. The desktop menu's rows adopted the entrance on the drawer's
+argument (its card's opacity IS a QML-readable container progress, so the wave gates with no
+`leadIn`; enter-only, since the close destroys the window); dialog content was assessed beside it
+and REFUSED — a dialog's content is the question the user was interrupted to read, and the polkit
+prompt focuses a password field the cascade would leave parked invisible under real keystrokes —
+with the full argument in `STAGGER_DECLINED`'s entry.
+("feat(motion): a wave member's entrance scale is derived, in the policy",
+"feat(widgets): StaggerEntrance, one spelling of a wave member's arrival",
+"refactor(editMode): the drawer's entrance dressing becomes the shared spelling",
+"test(lint): the two composition lints see the shared entrance dressing",
+"fix(lint): a dresser one indent deep is inside the control too",
+"feat(widgets): a StaggerWave can take its members as a list",
+"feat(desktopMenu): the menu's rows arrive in sequence, gated on the card",
+"test(motion): dialogs decline the group entrance, in the register".)
+
 **A wave asked for while its container is off screen writes nothing, and leaves the surface blank
 for ever.** Ranking asks each member whether it is on screen, and `visible` is EFFECTIVE visibility
 (see the `GroupedList` entry under
@@ -4498,6 +5921,48 @@ the call site, because the next adopter has the same beat to get wrong and the s
 A surface whose trigger is already the container's own `visible` (`ContentPage`, which follows the
 settings window's page switch) never showed it.
 ("fix(widgets): a wave waits for its container to be on screen").
+
+**A wave member must not carry a `Behavior on opacity`, because the member's opacity IS the wave's
+channel.** The wave assigns `appear = 0` to park a member — a snap, deliberately — and animates
+`appear` to bring it in, with opacity riding that scalar through a binding. A root-level
+`Behavior on opacity` in the member's file intercepts every write that binding makes: the park
+becomes a 200ms **on-stage fade-out** (measured live: `appear=0` with drawn opacity still 1.000 at
+the open), and the wave's own per-frame animation retargets the Behavior every frame — b710ef731's
+frozen-Behavior shape — pinning drawn opacity at 0.147 while `appear` was already at 0.955, so the
+member lands a whole fade-length after its slot. The android quick toggles shipped exactly that:
+their old `opacity: 0` + `onCompleted` self-fade was retired in favour of the wave and the Behavior
+that had animated it was left behind, which on every right-sidebar open drew the first-ranked tiles
+fully lit as the panel edge appeared, dimmed them on stage, held a blank beat as the slide landed,
+and then ran the cascade — read by the maintainer as "three quick toggles visible at all times,
+then the animation begins", through several attempted fixes aimed elsewhere.
+`tests/lint_wave_member_opacity_behavior.py` fails the suite on a root-level `appear`/`Behavior on
+opacity` pair; nested Behaviors (a ripple overlay, a scroll shadow) animate a child's own opacity
+and stay free.
+15688f7c ("fix(quickToggles): drop the tile's leftover opacity Behavior that swallowed the wave"),
+a5ef0c29 ("test(lint): fail on a wave member carrying a Behavior on opacity").
+
+**A quick slider is two entrances on one trigger, and the card's is the shared wave.** The fill
+sweep's reading of the fork — 4a8ddce51 ("feat(sidebar): every widget owns its entrance - the
+fork's real motion language"), "sliders never fade" — is true of the FILL and not of the card
+around it: the fork's `AndroidSliderWidgetBase` fades, zooms (0.85 → 1) and rises (20px) every
+slider card after a per-index delay, with the sweep running inside it. `QuickSliders.qml` gives
+its three cards exactly that through `StaggerWave` + `StaggerEntrance` rather than a fourth
+hand-copied dressing — each `Loader` declares `appear`, and that is its whole opt-in. Three things
+about the wiring are worth not re-deriving. **The members are handed in as a list**
+(`StaggerWave.items`): the bottom row packs volume and mic side by side, so a wave walking
+`children` would find the row and the row is not a member — and the list is the only place the
+bottom-up order is written. **The dressing is per container** (one `StaggerEntrance` in the column
+and one in the row), because it installs itself on a container's children and a list is not a
+container. **The card wave runs on the sidebar's `entranceTrigger`**, park-and-enter, ungated,
+beside the fill sweep that already runs on it, so the two channels cannot start on different
+gestures; it carries the toggle grid's 80ms lead-in for that grid's reason. The sliders' section in
+`SidebarRightContent` stays out of the section wave — a fading section over fading cards is the
+compound the toggle grid paid for. `tests/test_quick_sliders_entrance_contract.py` walks the file
+per MEMBER: `appear` at its own top level, a dressed container, the list in order, no `Behavior on
+opacity`/`scale` anywhere (the tree-wide lint above sees only root-level members, and these are
+nested Loaders), and the sweep still there.
+d1dc6671d ("feat(sidebar): the quick sliders' cards fade, zoom and rise into place, bottom-up"),
+4f6a95dff ("test(sidebar): pin the quick sliders' cards to the wave, and register the adopter").
 
 **The adoption is the thing that decays, so the adoption is what is pinned.**
 `docs/p3drovfx-motion-measured-2026-08-22.md` §4.2 measured the sibling fork's motion off screen and
@@ -4519,7 +5984,23 @@ REFUSED — and a register that only grows is a target.** 9e10b8a9c ("feat(sideb
 sidebar's sections arrive in sequence") gave the right sidebar a wave; the user's verdict was *"I
 don't like the cascading animation effect in the sidebar… This one feels slow. There's a frame drop
 the moment it opens and the moment it closes."* It is off that surface again, and
-`STAGGER_DECLINED` in `tests/test_motion_policy_contract.py` reddens if it comes back. Take the
+`STAGGER_DECLINED` in `tests/test_motion_policy_contract.py` reddens if it comes back.
+**It since came back, the register's way — argued, at the maintainer's request, after both
+refusal facts had been repaired by unrelated work**: the persistent EdgeSlide surface removed the
+per-gesture teardown that was the measured frame drop, and the slide's in-client `progress`
+scalar gave the wave something real to coordinate with. The first re-adoption gated on that
+scalar through `contentsArrived` — correct-sounding, and measured on screen as ruined: parked
+content plus a gate puts the whole construction ON STAGE, the panel arriving empty and visibly
+building itself. The design that stuck is the opposite, read object-by-object off the fork's
+re-recorded sidebars: the wave runs UNGATED, park-and-enter on the open's rising edge, UNDER the
+slide — whose `reveal` curtain (EdgeSlide's 15%-plateau opacity ramp) masks the early frames, so
+the panel materializes already composed and only the last-ranked members visibly land after it —
+and the tile wave carries a small leadIn so no member is mid-fade as the panel edge arrives
+(1f254a158b ("fix(motion): the entrance runs under the slide - the panel materializes
+composed"); a0035941 ("fix(motion): the first tiles wait their turn - lead-in restored, curtain
+dimmed")). The register entry moved from `STAGGER_DECLINED` to `STAGGER_ADOPTERS` with
+the history kept in place — the round trip is the register doing its job, not the refusal being
+overridden. Take the
 reasoning rather than the removal, because both halves of the complaint were right and only one of
 them was the wave's:
 
@@ -4627,6 +6108,61 @@ a surface picked from the END of the list, and with the bar/OSK after the panel,
 never activates and every keypress is silently dropped (the persistent-sidebar contract pins the
 order; fix(sidebars): route the focus grab's keyboard to the opening panel). `SessionScreen` still
 maps per open and pays this same 61ms.
+
+A fourth cost, found by the first multi-monitor user to update (#297): **a persistent surface has
+to say which screen it lives on.** A `PanelWindow` with no `screen:` asks the compositor to choose
+— Quickshell passes a null output — and Hyprland answers with the monitor focused *at creation*. A
+window rebuilt on every open therefore followed focus, silently, and nobody had ever written that
+down; a window created once at boot lands on whichever monitor had focus at boot and never moves.
+The overview is one window per screen now (`Variants` over `Quickshell.screens`, `screen:
+modelData`), and the scope latches the focused monitor's name at the open edge and opens only that
+screen's window — latched, not live, so focus moving mid-open does not teleport the card. Two
+gates follow from having siblings: `keyboardFocus` and the `mask` read the target predicate as
+well as the flag, or every screen's surface turns OnDemand on one open and the compositor picks
+which gets the keyboard. `tests/test_persistent_surface_screen.py` pins the shape. **The latch is
+taken at every open edge, by a function that does nothing else.** The first version resolved the
+target through the prefix toggles' helper, whose "already open? then the window that is showing"
+shortcut is right for a toggle pressed while the overview is up — and always taken at the open
+edge, where the flag has just flipped, so every open after the first reused the first screen's
+window. One monitor cannot show that; #297 reopened on two. The shell's `WM.focusedMonitor` was
+following every `focusedmon` event the whole time (verified against Hyprland's event socket on a
+nested two-output session). `tests/run_persistent_surface_focus_probe.sh` is that session, run by
+hand: two wayland outputs, focus moved between them, and each surface's own `activeScreen` compared
+with `hyprctl monitors` `focused` on each open. (fix(overview): every open latches the focused
+monitor afresh; the toggles alone keep the already-open shortcut.) (fix(overview): one surface per
+screen, and the open picks the focused monitor's.)
+
+**Both sidebars are that family now too**, and converting them is where the shape stopped being the
+overview's alone. Four things they added to it. The left sidebar's content is ONE tree that MOVES
+rather than one per screen: it is the AI chat, the translator, the media pane and the Phone tab, all
+of which hold something the user is in the middle of, so N copies would mean the panel forgetting
+what it was showing whenever it opened on another monitor - and the reparent already existed,
+because detaching into a floating window has always moved that same tree. The gesture is a
+per-window `panelOpen` written only by the scope's dispatcher, never an `EdgeSlide` bound straight
+to the global flag: a binding on that flag re-evaluates on the frame it flips, *before* the latch
+has moved, so the PREVIOUS target starts an entrance the latch then cancels. An `exclusiveZone`
+needs the target predicate as much as the mask does - the left sidebar's pin would otherwise reserve
+its width on every monitor at once. And the IPC handlers and global shortcuts moved out of the right
+sidebar's window to its `Scope`: an `IpcHandler` registers by `target` and a `GlobalShortcut` by
+`name`, both process-wide, so a second instance inside a `Variants` delegate is a startup failure
+rather than a duplicate. Each of the four is a check.
+(fix(sidebar): both sidebars become one surface per screen, opening on the focused monitor.)
+
+**And the rule is swept rather than listed.** Every `.qml` under `modules/imi/` that declares a
+`PanelWindow` has to name its screen one of four ways: the per-screen family above, a `screen:` on
+the window itself, a type whose every call site passes one (`ClockDepthSelectSurface`,
+`EditModeChromeSurface`, `BarExclusiveZoneReserver`, `RegionSelection`, `ScreenTranslatorPanel` and
+`ScreenCorners`' inline `CornerPanelWindow` are all pinned that way, and the sweep follows the call
+sites rather than trusting the file), or a reasoned entry in `EXEMPT`. Almost every exemption is the
+same sentence - the window is built by a `Loader`/`LazyLoader` gated on the gesture that asks for
+it, so "the monitor focused at creation" IS "the monitor focused when the user asked"; the bug is a
+surface that OUTLIVES the gesture, and those do not. `modules/imi/overlay/Overlay.qml` is the
+exception and the one residual instance of #297 in the tree: its loader is `overlayOpen ||
+OverlayContext.hasPinnedWidgets`, so pinning a widget makes the surface persistent, and
+`OverlayContext` holds ONE list of widget `Item`s that exactly one window can host - per-screen
+needs that store split first, which is a change to the context rather than a wrap around the
+window. The register runs both ways, so an exemption whose file has since been pinned fails too.
+(test(surfaces): sweep every persistent surface for the screen it names.)
 (feat(widgets): EdgeSlide, the runner for a panel whose surface stays mapped;
 fix(sidebar): the right sidebar's surface outlives the gesture;
 fix(sidebar): the left sidebar's surface outlives the gesture;
@@ -4675,7 +6211,8 @@ header button and the rail button must stay the same height, or that shared cent
 Shared building blocks to reach for before writing something from scratch: `StyledText`,
 `StyledComboBox`/`StyledComboBoxSearch`, `StyledSlider`, `StyledToolTip`/`StyledToolTipContent`,
 `RippleButton`, `MaterialSymbol`, `ResourceCard`, `GroupedList` + `ConfigSwitch`/`ConfigSpinBox`/
-`ConfigSelectionArray`/`ConfigComboBox`/`ConfigTextArea` (settings rows), `StyledPopup` (a bar
+`ConfigSelectionArray`/`ConfigComboBox`/`ConfigTextArea` (settings rows - see the row-grammar entry
+below for the opt-in shapes they carry), `StyledPopup` (a bar
 widget's hover popup: a declaration plus a hover state machine, *not* a window - its content is
 hosted on `modules/imi/bar/BarPopupOverlay.qml`'s shared card, b22a923a5 ("refactor(bar): delete
 the per-popup layer surface")), `StyledRectangularShadow`, `DockIconMotion` (wraps a dock icon's visuals with hover-lift /
@@ -4753,6 +6290,65 @@ and the disabled row still dimmed exactly once at 0.400.
 "refactor(editMode): the drawer's five row shapes become one",
 "refactor(store): a store card's identity is the shared catalogue row",
 "test(editMode): hold every drawer row body to the shared catalogue row").
+
+**The settings rows have a GRAMMAR, and Settings > Capture is its reference page.** The maintainer
+rated the sibling fork's settings rows on a one-day trial (2026-08-27: "UI components are much
+cleaner overall - very subtle details"; the notes are in `docs/p3drovfx-feature-delta-2026-08-24.md`'s
+family), and what transfers is the grammar, not their numbers - theirs are hand-typed, ours come from
+`Appearance.spacing.*`, `Appearance.rounding.*`, `Appearance.font.pixelSize.*` and the motion tiers,
+and the lints refuse a literal. Seven pieces, each an OPT-IN on a widget that already drew rows rather
+than a new widget: (a) a subsection header with a leading icon (`ContentSubsection.icon`); (b) a
+segmented single-choice row whose every option carries an icon and a label (`ConfigSelectionArray`
+options' `icon`); (c) a computed live hint under such a row (`ConfigSelectionArray.detailContent`, a
+full-width slot whose gap follows what is DRAWN in it, so a hint that hides itself takes its gap with
+it); (d) a toggle row with a leading icon chip (`ConfigSwitch.iconChip`, drawn by
+`CatalogueRow.iconChip`); (e) a dropdown with a leading icon and a "(Recommended)" suffix on its
+default choice (a `recommended: true` entry in `ConfigComboBox`'s model - the widget suffixes it
+through `Translation.tr`, so no call site spells the word); (f) a text field with a floating label
+(`ConfigTextArea.floatingLabel` - the label rests where the value goes, floats to the top edge on
+focus or content, and the field takes the row the label column used to hold); (g) an (i) affordance
+on any row that has a rationale (`infoText`, on every settings-row control now - a paragraph under a
+label is a rationale, and a rationale is the (i)'s). Three things about it are not obvious.
+
+- **The chip must not size the row.** `CatalogueRow`'s glyph wrapper reports width only (the entry
+  above), so the chip is drawn around the glyph and the wrapper stays width-only - a chip that
+  reported its height would stretch the 159 rows that share the component. That is also why every
+  piece defaults off and is adopted page by page: the grammar arriving on one page must not move a
+  row on any other.
+- **The hint is computed from real values or not drawn.** `modules/common/functions/record_bitrate.js`
+  turns the screen the settings window is on - `HyprlandData.monitors` matched by
+  `QsWindow.window.screen.name`, so width, height and refresh rate are hyprctl's - and the quality
+  tier into an estimate anchored on a measured recording (a 1554x892 region at 60 fps, `very_high`,
+  8.59 Mbps), with the frame rate capped at the screen's refresh because a capture cannot outrun it.
+  gpu-screen-recorder's default mode is constant quality, so it IS an estimate and the (i) says so.
+  A machine hyprctl has not answered for hides the hint; an earlier draft fell back to 1920x1080@60,
+  which is a confident number for a screen that does not exist, and
+  `tests/test_settings_row_grammar.py` refuses that literal.
+- **The adoption is the thing that decays, so the adoption is what is pinned.** The same test holds
+  the six widgets to tokens and whole tiers for every radius, font size, colour, duration and curve,
+  and holds the reference page to every piece - a chip dropped from one toggle row or an option
+  added without its icon errors nowhere, the shape just stops being the grammar. A page adopting it
+  later is a line there. `tst_record_bitrate.qml` drives the arithmetic.
+- **...and that line is a RATCHET running both ways, because the first later adopter arrived.**
+  Settings > Devices & Phone is it. `ADOPTERS` in the same file names each page and where its own
+  adoption is checked - the reference page in full there, a later page's page-shaped checks
+  wherever that page's other contracts already live, so the file does not grow one class per page
+  while the reference stays the thing that defines the grammar. It fails in both directions: a page
+  carrying the opt-ins without an entry (the grammar adopted and nothing holding it there) and an
+  entry whose page has dropped them (a register nobody rechecks). The marker is `iconChip: true`,
+  which is the one opt-in no page carries by accident - it defaults off precisely because 159
+  `ConfigSwitch` call sites draw that row.
+  4c7fe3e1f ("test(settings): the row grammar gets an adopter register, running both ways"),
+  1d2823bf4 ("feat(settings): a Devices & Phone page, on the row grammar").
+
+("feat(widgets): a subsection header leads with an icon",
+"feat(widgets): CatalogueRow draws its glyph on an opt-in chip",
+"feat(widgets): ConfigSelectionArray grows a hint slot and an info affordance",
+"feat(widgets): ConfigComboBox says which choice is recommended",
+"feat(widgets): ConfigTextArea floats its label into the field",
+"feat(capture): record_bitrate.js, what a quality tier costs on this screen",
+"feat(settings): the Capture page adopts the row grammar",
+"test(settings): pin the row grammar's widgets and its reference page").
 
 **A marquee is the answer for an IDENTITY, and where it may run is as much of the design as how it
 moves.** `MarqueeText` exists because every long label in this shell elides, which is honest about

@@ -20,7 +20,12 @@ Item {
         id: listView
         anchors.fill: parent
         spacing: root.todoListItemSpacing
-        animateAppearance: false
+        // animateAppearance stays at the view's default (on): a task marked done
+        // slides out and the rows below close the gap, instead of the list
+        // hard-cutting to its new shape. That only works because taskList holds
+        // the same objects Todo.list does - ScriptModel diffs by identity, so a
+        // per-update wrapper would read as remove-all + add-all and fly the
+        // whole list in on every change.
         model: ScriptModel {
             values: root.taskList
         }
@@ -30,6 +35,26 @@ Item {
             property bool pendingDoneToggle: false
             property bool pendingDelete: false
             property bool enableHeightAnimation: false
+
+            // Resolved at click time - a stored index goes stale across
+            // deletes. Identity first: on current quickshell, ScriptModel
+            // hands the delegate the very object Todo.list holds. But that
+            // is a property of the PIN, not of QML - before quickshell
+            // a611932 ("core/scriptmodel: represent members as a
+            // QJSValueList") the model stored QVariants and every delegate
+            // saw a fresh copy, so indexOf answered -1 and each done/delete
+            // click was a silent no-op (the Gentoo ebuild pins exactly such
+            // a commit). The content fallback covers those installs; equal
+            // payloads are interchangeable, so a duplicate task resolving to
+            // its twin commits the same edit.
+            function resolveIndex(): int {
+                const md = todoItem.modelData;
+                const idx = Todo.list.indexOf(md);
+                if (idx !== -1)
+                    return idx;
+                return Todo.list.findIndex(task =>
+                    task.content === md.content && task.done === md.done);
+            }
 
             implicitHeight: todoItemRectangle.implicitHeight
             width: ListView.view.width
@@ -77,12 +102,16 @@ Item {
                         TodoItemActionButton {
                             Layout.fillWidth: false
                             onClicked: {
+                                const index = todoItem.resolveIndex();
+                                if (index === -1)
+                                    return;
                                 if (!todoItem.modelData.done)
-                                    Todo.markDone(todoItem.modelData.originalIndex);
+                                    Todo.markDone(index);
                                 else
-                                    Todo.markUnfinished(todoItem.modelData.originalIndex);
+                                    Todo.markUnfinished(index);
                             }
                             contentItem: MaterialSymbol {
+                                verticalAlignment: Text.AlignVCenter
                                 anchors.centerIn: parent
                                 horizontalAlignment: Text.AlignHCenter
                                 text: todoItem.modelData.done ? "remove_done" : "check"
@@ -93,9 +122,12 @@ Item {
                         TodoItemActionButton {
                             Layout.fillWidth: false
                             onClicked: {
-                                Todo.deleteItem(todoItem.modelData.originalIndex);
+                                const index = todoItem.resolveIndex();
+                                if (index !== -1)
+                                    Todo.deleteItem(index);
                             }
                             contentItem: MaterialSymbol {
+                                verticalAlignment: Text.AlignVCenter
                                 anchors.centerIn: parent
                                 horizontalAlignment: Text.AlignHCenter
                                 text: "delete_forever"

@@ -8,6 +8,23 @@ import QtQuick.Layouts
 Item {
     id: root
     property int monthShift: 0
+    // The sidebar's open counter; the ripple also re-runs on month
+    // navigation, which is the fork's own behavior.
+    property int entranceTrigger: -1
+    property int _entranceKey: 0
+    // The counter arrives as a late Qt.binding from the tab Loader's
+    // onLoaded, so a widget created mid-open sees one jump from -1 to the
+    // current count in its creation turn - that is the binding catching up,
+    // not the sidebar opening, and it replayed the ripple over every
+    // Todo-to-Calendar switch. The handler arms one turn after creation:
+    // a real open is always a later turn.
+    property bool _entranceArmed: false
+    Component.onCompleted: Qt.callLater(() => root._entranceArmed = true)
+    onEntranceTriggerChanged: {
+        if (root._entranceArmed)
+            root._entranceKey++;
+    }
+    onMonthShiftChanged: _entranceKey++
     // One grid column, on the 4dp grid. Seven rows of this plus the 32px header,
     // the gaps and the padding have to fit BottomWidgetGroup's fixed height, or
     // the group grows and takes it straight out of the notification list below.
@@ -86,6 +103,7 @@ Item {
                     monthShift--;
                 }
                 contentItem: MaterialSymbol {
+                    verticalAlignment: Text.AlignVCenter
                     text: "chevron_left"
                     iconSize: Appearance.font.pixelSize.larger
                     horizontalAlignment: Text.AlignHCenter
@@ -98,6 +116,7 @@ Item {
                     monthShift++;
                 }
                 contentItem: MaterialSymbol {
+                    verticalAlignment: Text.AlignVCenter
                     text: "chevron_right"
                     iconSize: Appearance.font.pixelSize.larger
                     horizontalAlignment: Text.AlignHCenter
@@ -139,6 +158,9 @@ Item {
                     delegate: CalendarDayButton {
                         implicitWidth: root.dayCellSize
                         implicitHeight: root.dayCellSize
+                        gridRow: modelData
+                        gridCol: index
+                        entranceKey: root._entranceKey
                         day: calendarLayout[modelData][index].day
                         isToday: calendarLayout[modelData][index].today
                         // Only in-viewing-month cells (today !== -1) map cleanly

@@ -21,7 +21,6 @@ import qs.modules.imi.sidebarRight.nightLight
 import qs.modules.imi.sidebarRight.volumeMixer
 import qs.modules.imi.sidebarRight.wifiNetworks
 import qs.modules.imi.sidebarRight.tailscale
-import qs.modules.imi.sidebarRight.phoneConnect
 import qs.modules.imi.sidebarRight.iconPicker
 
 Item {
@@ -35,7 +34,6 @@ Item {
     property bool showNightLightDialog: false
     property bool showWifiDialog: false
     property bool showTailscaleDialog: false
-    property bool showPhoneConnectDialog: false
     property bool editMode: false
     property bool showIconPickerDialog: false
 
@@ -45,16 +43,61 @@ Item {
     // compositor blur region to it (see WindowBlurRegion in SidebarRight.qml).
     readonly property Item backgroundItem: sidebarRightBackground
 
+    // One counter drives every bespoke widget entrance, the fork's own
+    // architecture: sliders sweep their fill, the calendar ripples
+    // diagonally, the notification bar's halves converge - each widget owns
+    // its choreography and this only says "an open happened". The generic
+    // wave stays for the sections with no character of their own.
+    property int entranceTrigger: -1
+
     readonly property MprisPlayer activePlayer: MprisController.activePlayer
     readonly property var meaningfulPlayers: MprisController.meaningfulPlayers
+
+    // The entrance runs UNDER the slide, not after it. This surface's wave
+    // shipped twice wrong before landing here, and both wrong versions are
+    // worth naming. The original (00efe588's revert) guessed a leadIn and
+    // landed content ~200ms after the slide. The second gated on the slide's
+    // progress like the popup card - correct-sounding, and measured as
+    // ruined: the panel arrived EMPTY and then visibly built itself, because
+    // parked-at-zero content plus a 60% gate puts the whole construction ON
+    // STAGE. The fork's sidebars, re-recorded and read object by object, do
+    // the opposite: the surface's own fade carries the panel already
+    // composed - the per-element entrances run underneath it, and only the
+    // last-ranked one or two elements visibly pop after the panel lands.
+    // So: park and enter on the open's rising edge, with no gate - the slide
+    // masks the wave's early frames, and the tail is the grammar.
+    // With keepRightSidebarLoaded off, this whole tree is created INSIDE the
+    // sidebarRightOpenChanged emission (the loader's `active` follows
+    // `slide.shown` synchronously) - and a connection made during an
+    // emission does not receive that emission. The Connections below then
+    // misses every open, because the tree is torn down on close: no wave, no
+    // trigger, ever. So a tree born with the panel already open runs the
+    // entrance itself, one turn later - after the children (and the
+    // calendar's own creation-edge arming) have finished coming up.
+    Component.onCompleted: {
+        if (GlobalStates.sidebarRightOpen)
+            Qt.callLater(() => {
+                if (GlobalStates.sidebarRightOpen)
+                    root.runEntrance();
+            });
+    }
+
+    function runEntrance() {
+        sectionEntrance.park();
+        sectionEntrance.enter();
+        root.entranceTrigger++;
+    }
 
     Connections {
         target: GlobalStates
         function onSidebarRightOpenChanged() {
+            if (GlobalStates.sidebarRightOpen) {
+                root.runEntrance();
+                return;
+            }
             if (!GlobalStates.sidebarRightOpen) {
                 root.showWifiDialog = false;
                 root.showTailscaleDialog = false;
-                root.showPhoneConnectDialog = false;
                 root.showBluetoothDialog = false;
                 root.showAudioOutputDialog = false;
                 root.showAudioInputDialog = false;
@@ -98,12 +141,37 @@ Item {
         radius: Appearance.rounding.screenRounding - Appearance.sizes.hyprlandGapsOut + 5
 
         ColumnLayout {
+            id: sidebarColumn
             anchors.fill: parent
             anchors.margins: sidebarPadding
             spacing: sidebarPadding
 
+            // The sections arrive in sequence once the slide has essentially
+            // landed. Ranking by VISIBLE position earns its place here: only
+            // one quick-panel style is ever active and the media player is
+            // absent with nothing playing, so unranked slots would leave
+            // holes mid-wave. No exit wave - the sections ride the slide out
+            // rigid, the same asymmetry the popup card keeps.
+            StaggerWave {
+                id: sectionEntrance
+                target: sidebarColumn
+            }
+            StaggerEntrance {
+                target: sidebarColumn
+                reference: root.sidebarWidth
+                // Deliberately UNIFORM at the section level. The convergent
+                // mode was tried here and read as ruined on screen: a section
+                // translating in from above or below WHILE its own interior
+                // converges (the toggle grid's tiles) is two directional
+                // motions stacked, and the fork this grammar was measured off
+                // never does that - its sections hold still and their PIECES
+                // converge. Sections keep the calm fade-scale-rise; the
+                // directional language lives one level down.
+            }
+
             // Banner
             Loader {
+                property real appear: 1
                 Layout.fillWidth: true
                 Layout.fillHeight: false
                 sourceComponent: Config.options.sidebar.banner ? bannerComponent : normalComponent
@@ -303,6 +371,11 @@ Item {
 
             Loader {
                 id: slidersLoader
+                // Not a wave member: the sliders own their entrance - the
+                // fill sweep, and a card wave of their own inside
+                // (QuickSliders.qml), the toggle grid's shape. A fading
+                // section over fading cards is the compound that grid
+                // already paid for.
                 Layout.fillWidth: true
                 visible: active
                 active: {
@@ -311,11 +384,12 @@ Item {
                     if (!configQuickSliders.showMic && !configQuickSliders.showVolume && !configQuickSliders.showBrightness) return false;
                     return true;
                 }
-                sourceComponent: QuickSliders {}
+                sourceComponent: QuickSliders { entranceTrigger: root.entranceTrigger }
             }
 
             Loader {
                 id: mediaPlayerLoader
+                property real appear: 1
                 active: root.activePlayer !== null && GlobalStates.sidebarRightOpen && Config.options.sidebar.mediaPlayer
                 visible: active
                 Layout.fillWidth: true
@@ -341,6 +415,7 @@ Item {
             }
 
             CenterWidgetGroup {
+                entranceTrigger: root.entranceTrigger
                 Layout.alignment: Qt.AlignHCenter
                 Layout.fillHeight: true
                 Layout.fillWidth: true
@@ -348,6 +423,7 @@ Item {
 
             BottomWidgetGroup {
                 id: bottomWidgetGroup
+                entranceTrigger: root.entranceTrigger
                 Layout.alignment: Qt.AlignHCenter
                 Layout.fillHeight: false
                 Layout.fillWidth: true
@@ -406,14 +482,6 @@ Item {
     }
 
     ToggleDialog {
-        shownPropertyString: "showPhoneConnectDialog"
-        dialog: PhoneConnectDialog {}
-        onShownChanged: {
-            if (shown) PhoneConnect.refresh();
-        }
-    }
-
-    ToggleDialog {
         shownPropertyString: "showIconPickerDialog"
         dialog: IconPickerDialog {}
     }
@@ -448,6 +516,12 @@ Item {
 
     component LoaderedQuickPanelImplementation: Loader {
         id: quickPanelImplLoader
+        // Deliberately NOT a wave member (no `appear`): the android panel's
+        // tiles run their own entrance, and a fading section times a fading
+        // tile is two opacities MULTIPLIED - measured at full resolution as
+        // a ~250ms mushy tail of half-visible tiles, which is what read as
+        // broken. One fade per pixel: the section stands still, the pieces
+        // move - the fork's own rule, finally applied where it bites.
         required property string styleName
         Layout.alignment: item?.Layout.alignment ?? Qt.AlignHCenter
         Layout.fillWidth: item?.Layout.fillWidth ?? false
@@ -461,7 +535,17 @@ Item {
             function onOpenNightLightDialog() { root.showNightLightDialog = true; }
             function onOpenWifiDialog() { root.showWifiDialog = true; }
             function onOpenTailscaleDialog() { root.showTailscaleDialog = true; }
-            function onOpenPhoneConnectDialog() { root.showPhoneConnectDialog = true; }
+            // The phone lives in the LEFT sidebar now: this toggle names
+            // the tab and opens that panel, where it used to raise a dialog
+            // of its own. The refresh goes with the open, as the dialog's
+            // did - a tile the user just pressed should not show the sweep
+            // before last.
+            function onOpenPhoneTab() {
+                PhoneConnect.refresh();
+                GlobalStates.sidebarLeftTab = "phone";
+                GlobalStates.sidebarLeftOpen = true;
+                GlobalStates.sidebarRightOpen = false;
+            }
         }
     }
 

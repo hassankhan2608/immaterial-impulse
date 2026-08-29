@@ -32,7 +32,7 @@ ContentPage {
         let target = findTarget(mainLayout)
         if (target) {
             let pos = target.mapToItem(mainLayout, 0, 0)
-            page.contentY = Math.max(0, pos.y - 0)
+            page.scrollToY(pos.y)
         }
     }
 
@@ -485,6 +485,7 @@ ContentPage {
                                     HyprlandKeybinds.findBinding(overrideRow.modelData.identity);
                             }
                             contentItem: MaterialSymbol {
+                                verticalAlignment: Text.AlignVCenter
                                 anchors.centerIn: parent
                                 horizontalAlignment: Text.AlignHCenter
                                 iconSize: Appearance.font.pixelSize.larger
@@ -501,6 +502,7 @@ ContentPage {
                             buttonRadius: Appearance.rounding.full
                             onClicked: HyprlandKeybindOverrides.reset(overrideRow.modelData.identity)
                             contentItem: MaterialSymbol {
+                                verticalAlignment: Text.AlignVCenter
                                 anchors.centerIn: parent
                                 horizontalAlignment: Text.AlignHCenter
                                 iconSize: Appearance.font.pixelSize.larger

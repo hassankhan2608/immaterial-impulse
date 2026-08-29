@@ -162,6 +162,10 @@ Item {
     }
 
     onCurrentPageChanged: {
+        // The warm-up below is idle work, so navigating stands it down: a page
+        // built for nobody must never be the thing that stutters the page the
+        // user asked for.
+        warmHold.restart()
         // About is the last page; a hardcoded index here went stale once
         // before when a page was inserted (About 7 -> 8, specs never loaded).
         if (currentPage === pages.length - 1) {
@@ -182,6 +186,7 @@ Item {
             { name: Translation.tr("Lock & Idle"), id: "lock-idle", icon: "lock", component: Qt.resolvedUrl("pages/LockIdleConfig.qml"), sections: [Translation.tr("Lock screen"), Translation.tr("Keep awake"), Translation.tr("Screensaver"), Translation.tr("Work safety")], searchTerms: [Translation.tr("Security"), Translation.tr("Style: General"), Translation.tr("Style: Blurred")] },
             { name: Translation.tr("Capture"), id: "capture", icon: "screen_record", component: Qt.resolvedUrl("pages/CaptureConfig.qml"), sections: [Translation.tr("Screen recorder"), Translation.tr("Screenshot popup"), Translation.tr("Region selector (screen snipping/Google Lens)"), Translation.tr("Save paths")], searchTerms: [Translation.tr("Instant replay"), Translation.tr("Hint target regions"), Translation.tr("Google Lens"), Translation.tr("Rectangular selection"), Translation.tr("Circle selection")] },
             { name: Translation.tr("General"), id: "general", icon: "browse", component: Qt.resolvedUrl("pages/GeneralConfig.qml"), sections: [Translation.tr("Time"), Translation.tr("Battery"), Translation.tr("Audio"), Translation.tr("Sounds"), Translation.tr("Language")] },
+            { name: Translation.tr("Devices & Phone"), id: "devices-phone", icon: "smartphone", component: Qt.resolvedUrl("pages/PhoneConfig.qml"), sections: [Translation.tr("Phone panel"), Translation.tr("Contacts"), Translation.tr("Screen mirroring")], searchTerms: [Translation.tr("Connection"), Translation.tr("Mirror options"), Translation.tr("App Mode")] },
             { name: Translation.tr("Services"), id: "services", icon: "cloud", component: Qt.resolvedUrl("pages/ServicesConfig.qml"), sections: [Translation.tr("AI"), Translation.tr("Networking"), Translation.tr("Music Recognition"), Translation.tr("Search"), Translation.tr("System updates (Arch only)"), Translation.tr("Clight"), Translation.tr("Weather")], searchTerms: [Translation.tr("Custom OpenAI-compatible Providers"), Translation.tr("Phone Connect"), Translation.tr("Prefixes"), Translation.tr("File search"), Translation.tr("Web search")] },
             { name: Translation.tr("Widgets"), id: "widgets", icon: "widgets", component: Qt.resolvedUrl("pages/PluginsPage.qml"), sections: [Translation.tr("Placement & canvas"), Translation.tr("Widget settings"), Translation.tr("Available Widgets")], searchTerms: [Translation.tr("Show widgets on"), Translation.tr("Canvas")] },
             { name: Translation.tr("Hyprland"), id: "hyprland", icon: "select_window_2", component: Qt.resolvedUrl("pages/HyprlandConfig.qml"), sections: [Translation.tr("Displays"), Translation.tr("Layout"), Translation.tr("Input"), Translation.tr("Keybinds"), Translation.tr("Visual & Aesthetics"), Translation.tr("Blur"), Translation.tr("Autostart Apps"), Translation.tr("Animations")], searchTerms: [Translation.tr("Keyboard"), Translation.tr("Touchpad"), Translation.tr("Add a shortcut")] },
@@ -190,15 +195,55 @@ Item {
         return list
     }
 
-    Component.onCompleted: {
-        Config.readWriteDelay = 0
-        Qt.callLater(() => {
+    // The undebounced write this host used to ask for from here belongs to the
+    // WINDOW, not to the host: `Settings.qml` holds the claim for as long as
+    // its window is on screen. This object is built at `Config.ready` and
+    // lives for the session (see the warm-up's gate below), so a claim made
+    // here is a claim nobody ever releases.
+
+    // Every page up to here has been asked for, so it is built and kept. This
+    // only grows: a page built once stays built (`built` below).
+    property int warmedThrough: -1
+
+    // Restarted by every navigation, and never bound: `Timer.restart()` writes
+    // `running`, which would destroy a binding on it.
+    Timer {
+        id: warmHold
+        interval: Appearance.animation.elementMoveFast.duration
+    }
+
+    // A page that has never been visited costs a measured 10-510ms to
+    // incubate, which is not a stall - the loaders are asynchronous - but it is
+    // a wait, and the placeholder is what the user sees during it. So the pages
+    // are built ahead of the user, ONE AT A TIME: the engine incubates in the
+    // order it was asked, so a warm-up that queued all fifteen would put the
+    // page the user just clicked behind fourteen they did not.
+    //
+    // Deliberately not what it replaced, which was fifteen SYNCHRONOUS builds
+    // inside one turn of the event loop - 618ms of frozen GUI thread paid by
+    // the whole shell at startup.
+    //
+    // The gate is `Config.ready` and NOT `GlobalStates.settingsOpen`, which
+    // reads like the better answer and is not: `pages/HyprlandConfig.qml` and
+    // `pages/CursorConfig.qml` push their whole `Config.options.hyprland` block
+    // into `~/.config/hypr/hyprland/shellOverrides/main.lua` from their own
+    // `Component.onCompleted`, so WHEN a settings page is built is load-bearing
+    // outside this window. Warming only for an open window would stop those
+    // overrides being regenerated at all for anyone who never opens Settings -
+    // silently, and on the file that is the one the compositor reads.
+    Timer {
+        id: pageWarmer
+        interval: Appearance.animation.elementMoveFast.duration
+        repeat: true
+        running: Config.ready && !warmHold.running
+            && root.warmedThrough < root.pages.length - 1
+        onTriggered: {
             for (let i = 0; i < root.pages.length; i++) {
-                let loader = pagesRepeater.itemAt(i)
-                if (loader) loader.active = true
+                if (pagesRepeater.itemAt(i)?.status === Loader.Loading)
+                    return
             }
-            if (profileLoader) profileLoader.active = true
-        })
+            root.warmedThrough++
+        }
     }
 
     // Three ways to the search field, because three different habits reach for
@@ -321,6 +366,8 @@ Item {
                     colBackground: "transparent"
                     onClicked: settingsSearchField.text = ""
                     contentItem: MaterialSymbol {
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                         anchors.centerIn: parent
                         text: "close"
                         iconSize: Appearance.font.pixelSize.large
@@ -700,7 +747,28 @@ Item {
                             required property var index
                             source: modelData.component
 
-                            active: Config.ready && (root.currentPage === index || item !== null)
+                            // Incubated ACROSS frames, never inside one. These
+                            // pages are large - fifteen of them come to ~24500
+                            // items - and building one is the only expensive
+                            // thing a page switch does. Synchronously that is a
+                            // block; asynchronously the engine spends whatever
+                            // is left of each frame on it and the window keeps
+                            // drawing. `item` is null for the frames that takes,
+                            // which every reader below has to tolerate.
+                            asynchronous: true
+                            // `built`, never `item !== null`: `item` is what
+                            // `active` PRODUCES, so a keep-alive term reading it
+                            // closes a circle through this very binding. It
+                            // never fired while the eager loop was assigning
+                            // `active` and destroying the binding; with the
+                            // binding live it logs `Binding loop detected for
+                            // property "active"` and Qt drops the
+                            // re-evaluation, so a page that should have been
+                            // kept silently is not. `built` is written from
+                            // `onLoaded` and read by nothing that makes it.
+                            property bool built: false
+                            active: Config.ready
+                                && (root.currentPage === index || built || index <= root.warmedThrough)
 
                             anchors.fill: parent
 
@@ -711,8 +779,10 @@ Item {
                             anchors.topMargin: isActive ? 0 : Appearance.spacing.space150
 
                             onLoaded: {
-                                if (root.currentPage === index) {
+                                pageLoader.built = true;
+                                if (pageLoader.isActive) {
                                     GlobalStates.currentPageInstance = item;
+                                    root.selectedSection = item.currentSection || "";
                                 }
                             }
 
@@ -720,7 +790,14 @@ Item {
                                 if (isActive && item) {
                                     GlobalStates.currentPageInstance = item;
                                     root.selectedSection = item.currentSection || "";
-                                } else if (!isActive && GlobalStates.currentPageInstance === item) {
+                                } else if (isActive) {
+                                    // Still incubating. Leaving this naming the
+                                    // page we just left points every reader at a
+                                    // page nobody can see, and `onLoaded` names
+                                    // this one the moment it exists.
+                                    GlobalStates.currentPageInstance = null;
+                                    root.selectedSection = "";
+                                } else if (GlobalStates.currentPageInstance === item) {
                                     GlobalStates.currentPageInstance = null;
                                 }
                             }
@@ -755,9 +832,45 @@ Item {
                         descriptionHorizontalAlignment: Text.AlignHCenter
                     }
 
+                    // ...and the same pane is empty for the frames a page takes
+                    // to incubate. It is gated on a settle rather than on the
+                    // status directly: a page that arrives inside one motion
+                    // tier needs no announcement, and a placeholder that fades
+                    // in and straight back out is a flash the switch does not
+                    // otherwise have.
+                    PagePlaceholder {
+                        id: buildingPlaceholder
+                        readonly property var currentLoader: pagesRepeater.itemAt(root.currentPage) ?? null
+                        readonly property bool building: !root.showingProfile
+                            && currentLoader?.status === Loader.Loading
+                        onBuildingChanged: {
+                            if (building)
+                                buildingSettle.restart();
+                            else
+                                buildingSettle.stop();
+                        }
+                        shown: building && buildingSettle.elapsed
+                        icon: "hourglass"
+                        title: Translation.tr("Building this page…")
+                        descriptionHorizontalAlignment: Text.AlignHCenter
+
+                        Timer {
+                            id: buildingSettle
+                            property bool elapsed: false
+                            interval: Appearance.animation.elementMoveFast.duration
+                            onTriggered: buildingSettle.elapsed = true
+                            onRunningChanged: if (running) buildingSettle.elapsed = false
+                        }
+                    }
+
                     Loader {
                         id: profileLoader
-                        active: false
+                        asynchronous: true
+                        // The loop above assigned this too, so it also had no
+                        // binding to be built by. See the page loader's `built`
+                        // above for why this is not `item !== null`.
+                        property bool built: false
+                        active: root.showingProfile || built
                         anchors.fill: parent
                         source: Qt.resolvedUrl("pages/Profile.qml")
 
@@ -767,10 +880,18 @@ Item {
                         visible: isActive
                         anchors.topMargin: isActive ? 0 : Appearance.spacing.space150
 
+                        onLoaded: {
+                            profileLoader.built = true;
+                            if (profileLoader.isActive)
+                                GlobalStates.currentPageInstance = item;
+                        }
+
                         onIsActiveChanged: {
                             if (isActive && item) {
                                 GlobalStates.currentPageInstance = item;
-                            } else if (!isActive && GlobalStates.currentPageInstance === item) {
+                            } else if (isActive) {
+                                GlobalStates.currentPageInstance = null;
+                            } else if (GlobalStates.currentPageInstance === item) {
                                 GlobalStates.currentPageInstance = null;
                             }
                         }

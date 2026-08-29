@@ -241,6 +241,25 @@ MouseArea {
                 fillMode: Image.PreserveAspectCrop
                 source: Config.options.background.wallpaperPath
                 cache: false
+                // Bound the decode to what is drawn: without a sourceSize this
+                // decoded the wallpaper at file resolution on every selector
+                // open, only to be blurred at radius 48. `cache: false` above
+                // means no other Image shares this request, so bounding it
+                // cannot un-share a decode (the trap 33139b688 records for the
+                // desktop frost, which is why Background's own request is not
+                // touched from here).
+                //
+                // The bound is the selector's size CONSTANTS, never the item's
+                // own live width/height: anchors resolve after the load starts,
+                // so a bound-to-geometry sourceSize begins at 0 (= unbounded,
+                // the decode this exists to remove) and then reloads once per
+                // axis as the geometry lands - measured as three decodes of the
+                // same file per open. The constants are known at creation and
+                // stable for the window's life; they run slightly larger than
+                // the item (which sits inside the card's margins), which
+                // PreserveAspectCrop absorbs.
+                sourceSize.width: Appearance.sizes.wallpaperSelectorWidth
+                sourceSize.height: Appearance.sizes.wallpaperSelectorHeight
                 layer.enabled: true
                 layer.effect: OpacityMask {
                     maskSource: Rectangle {
@@ -428,6 +447,8 @@ MouseArea {
                                     onClicked: Config.options.wallpaperSelector.wallpaperEngine.silent = !Config.options.wallpaperSelector.wallpaperEngine.silent
                                     contentItem: MaterialSymbol {
                                         anchors.centerIn: parent
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
                                         text: Config.options.wallpaperSelector.wallpaperEngine.silent ? "volume_off" : "volume_up"
                                         color: parent.toggled ? Appearance.colors.colOnPrimary : Appearance.colors.colOnLayer2
                                     }
@@ -483,6 +504,8 @@ MouseArea {
                             }
                             contentItem: MaterialSymbol {
                                 anchors.centerIn: parent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
                                 text: "search"
                                 iconSize: Appearance.font.pixelSize.larger
                                 color: root.toolbarVisible

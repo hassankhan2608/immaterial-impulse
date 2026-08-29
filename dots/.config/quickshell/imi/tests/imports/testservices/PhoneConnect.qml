@@ -14,12 +14,16 @@ Singleton {
     property bool installed: false // busctl found on PATH
     property string backend: "none" // "kdeconnect" | "valent" | "none"
     readonly property bool available: root.backend !== "none"
-    // [{ id, name, type, reachable, paired, batteryAvailable, batteryCharge, batteryCharging }]
+    // [{ id, name, type, reachable, paired, hasPairingRequest, reachableAddresses,
+    //    cellularNetworkType, cellularNetworkStrength,
+    //    batteryAvailable, batteryCharge, batteryCharging }]
     property var devices: []
+    // The devices whose peer has asked to pair - what the dialog's pairing
+    // cards are drawn from.
+    readonly property var pairingRequests: root.devices.filter(d => d.hasPairingRequest === true)
 
-    readonly property var activeDevice: root.devices.find(d => d.paired && d.reachable && d.type === "phone")
-        ?? root.devices.find(d => d.paired && d.reachable)
-        ?? null
+    property string persistedActiveDeviceId: ""
+    readonly property var activeDevice: root.preferredActiveDevice(root.devices, root.persistedActiveDeviceId)
     readonly property string materialSymbol: (root.available && root.activeDevice) ? "mobile" : "mobile_off"
 
     // BEGIN phone-connect parser logic (synced with services/PhoneConnect.qml)
@@ -61,18 +65,31 @@ Singleton {
     }
 
     // Normalizes one org.kde.kdeconnect.device GetAll reply (plus its
-    // battery GetAll, or null when the battery object does not exist - it is
-    // absent for unpaired devices) onto the shared device model.
-    function normalizeKdeconnectDevice(id: string, rawProps: var, rawBatteryProps: var): var {
+    // battery GetAll and its connectivity_report GetAll, either null when
+    // that leaf object does not exist - both are absent for unpaired
+    // devices) onto the shared device model.
+    //
+    // A pairing request is Device::PairState 2 (RequestedByPeer; 1 is a
+    // request WE made, 3 is Paired) or the older isPairRequestedByPeer bool
+    // - both were read off the live daemon, and either spelling counts.
+    function normalizeKdeconnectDevice(id: string, rawProps: var, rawBatteryProps: var, rawConnectivityProps: var): var {
         const props = root.unwrapVariants(rawProps);
         const battery = rawBatteryProps === null || rawBatteryProps === undefined
             ? null : root.unwrapVariants(rawBatteryProps);
+        const report = rawConnectivityProps === null || rawConnectivityProps === undefined
+            ? null : root.unwrapVariants(rawConnectivityProps);
+        const addresses = Array.isArray(props.reachableAddresses)
+            ? props.reachableAddresses.filter(address => typeof address === "string") : [];
         return {
             id: id,
             name: props.name ?? "",
             type: props.type ?? "",
             reachable: props.isReachable === true,
             paired: props.isPaired === true,
+            hasPairingRequest: props.isPairRequestedByPeer === true || props.pairState === 2,
+            reachableAddresses: addresses,
+            cellularNetworkType: typeof report?.cellularNetworkType === "string" ? report.cellularNetworkType : "",
+            cellularNetworkStrength: typeof report?.cellularNetworkStrength === "number" ? report.cellularNetworkStrength : -1,
             batteryAvailable: battery !== null && typeof battery.charge === "number",
             batteryCharge: (battery !== null && typeof battery.charge === "number") ? battery.charge : -1,
             batteryCharging: battery !== null && battery.isCharging === true
@@ -95,6 +112,10 @@ Singleton {
                 type: props.Type ?? "",
                 reachable: (state & 1) !== 0,
                 paired: (state & 2) !== 0,
+                hasPairingRequest: false,
+                reachableAddresses: [],
+                cellularNetworkType: "",
+                cellularNetworkStrength: -1,
                 objectPath: path,
                 batteryAvailable: false,
                 batteryCharge: -1,
@@ -184,7 +205,12 @@ Singleton {
                 "deviceVisibilityChanged", "pairingRequestsChanged"],
             "org.kde.kdeconnect.device": ["reachableChanged", "pairStateChanged", "nameChanged",
                 "typeChanged", "pluginsChanged"],
-            "org.kde.kdeconnect.device.battery": ["refreshed"]
+            "org.kde.kdeconnect.device.battery": ["refreshed"],
+            "org.kde.kdeconnect.device.connectivity_report": ["refreshed"],
+            // The notification set is PhoneNotifications' to read; it fetches
+            // on deviceChangeSettled rather than running a monitor of its own.
+            "org.kde.kdeconnect.device.notifications": ["notificationPosted", "notificationUpdated",
+                "notificationRemoved", "allNotificationsRemoved"]
         }[signal.iface];
         return Array.isArray(members) && members.includes(signal.member);
     }
@@ -206,6 +232,95 @@ Singleton {
         if (!wanted || settled >= ceiling)
             return { attempts: settled, retry: false, delay: 0 };
         return { attempts: settled + 1, retry: true, delay: root.monitorBackoffDelay(settled + 1) };
+    }
+
+    // What the share plugin may be handed as a URL: a file:// or http(s)://
+    // string, trimmed. Everything else - a bare path, an empty picker line,
+    // a non-string - is dropped rather than sent as a URL the daemon
+    // cannot open.
+    function shareableUrls(entries: var): var {
+        if (!Array.isArray(entries)) return [];
+        return entries
+            .map(entry => typeof entry === "string" ? entry.trim() : "")
+            .filter(entry => /^(file|https?):\/\//i.test(entry));
+    }
+
+    // What to do with the desktop clipboard: a link goes as a URL, prose as
+    // text, nothing is refused. The URL heuristic is the fork's - a scheme,
+    // or a host-shaped token that is the whole string or the start of a
+    // path. A bare host leaves with https:// on it: the daemon hands the
+    // string to a QUrl, and a schemeless one is relative to nothing.
+    function clipboardShareTarget(text: var): var {
+        const value = (typeof text === "string" ? text : "").trim();
+        if (value.length === 0) return { kind: "empty", value: "" };
+        if (/^https?:\/\//i.test(value)) return { kind: "url", value: value };
+        if (/^[\w.-]+\.\w{2,}(\/|$)/.test(value)) return { kind: "url", value: `https://${value}` };
+        return { kind: "text", value: value };
+    }
+
+    // A file picker's stdout - one absolute path per line - as the file://
+    // URLs the share plugin takes. Percent-encoded per segment, since the
+    // daemon hands each to a QUrl and a raw "#" or "?" in a name would be
+    // read as a fragment or a query. A cancelled picker prints nothing.
+    function pickedFileUrls(text: var): var {
+        return (typeof text === "string" ? text : "")
+            .split("\n")
+            .map(line => line.trim())
+            .filter(line => line.startsWith("/"))
+            .map(path => "file://" + path.split("/").map(encodeURIComponent).join("/"));
+    }
+
+    // Where the phone's user storage sits under an SFTP mount. The mount
+    // root is not the user's storage (the fork's 3a7f653b4 records it):
+    // storage/emulated/0 is, when the phone exposes it.
+    function sftpStoragePath(mount: var): string {
+        const root_ = (typeof mount === "string" ? mount : "").replace(/\/+$/, "");
+        return root_.length === 0 ? "" : `${root_}/storage/emulated/0`;
+    }
+
+    // The directory to open for a browse: the storage when it exists, the
+    // mount root otherwise.
+    function sftpBrowseTarget(mount: var, hasStorage: bool): string {
+        const root_ = (typeof mount === "string" ? mount : "").replace(/\/+$/, "");
+        if (root_.length === 0) return "";
+        return hasStorage ? root.sftpStoragePath(root_) : root_;
+    }
+
+    // Which device the surface is about: the persisted choice while that
+    // device is paired and reachable, else a reachable paired phone, else
+    // any reachable paired device.
+    function preferredActiveDevice(devices: var, persistedId: var): var {
+        const list = devices ?? [];
+        return list.find(d => d.id === persistedId && d.paired && d.reachable)
+            ?? list.find(d => d.paired && d.reachable && d.type === "phone")
+            ?? list.find(d => d.paired && d.reachable)
+            ?? null;
+    }
+
+    // The MRU list after a pick: the id first, once, at most `max` long.
+    // Walked by index rather than as an Array, because a list<string> read
+    // off a JsonAdapter is a QML sequence that fails Array.isArray.
+    function recentDeviceIdsAfterSelect(list: var, id: var, max: int): var {
+        const out = [];
+        if (root.validDeviceId(id)) out.push(id);
+        const src = list ?? [];
+        for (let i = 0; i < (src.length ?? 0); i++) {
+            const entry = src[i];
+            if (typeof entry === "string" && entry !== id && !out.includes(entry)) out.push(entry);
+        }
+        return out.slice(0, Math.max(0, max));
+    }
+
+    // The low-battery latch, as one decision. Thresholds are the
+    // proposal's, literally: "low" once when the charge is below 20 and
+    // the phone is not charging; "recovered" at 25 or above, or the moment
+    // it charges, while the latch is set. An unknown charge (-1) moves
+    // nothing.
+    function batteryNoticeTransition(notified: bool, charge: int, charging: bool): var {
+        if (charge < 0) return { notice: "", notified: notified };
+        if (!notified && charge < 20 && !charging) return { notice: "low", notified: true };
+        if (notified && (charge >= 25 || charging)) return { notice: "recovered", notified: false };
+        return { notice: "", notified: notified };
     }
     // END phone-connect parser logic
 

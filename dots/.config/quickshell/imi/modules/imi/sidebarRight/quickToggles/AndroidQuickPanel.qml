@@ -1,3 +1,4 @@
+import qs
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
@@ -46,7 +47,21 @@ AbstractQuickPanel {
     readonly property string unusedSignature: QuickToggleLayout.signatureOf(root.unusedToggles, root.columns)
     onUsedSignatureChanged: root.requestSync()
     onUnusedSignatureChanged: root.requestSync()
-    Component.onCompleted: root.requestSync()
+    // The second arm mirrors SidebarRightContent's: with the keep-loaded
+    // toggle off this panel is created inside the open's own emission, and a
+    // connection made mid-emission never hears it - so a panel born open
+    // runs its wave itself, one turn later, after the sync scheduled above
+    // has built the tiles the wave walks.
+    Component.onCompleted: {
+        root.requestSync();
+        if (GlobalStates.sidebarRightOpen)
+            Qt.callLater(() => {
+                if (GlobalStates.sidebarRightOpen) {
+                    tileWave.park();
+                    tileWave.enter();
+                }
+            });
+    }
 
     // ...and the sync itself waits for the turn to finish, because a live
     // `list<var>` notifies per ELEMENT written. Measured: one
@@ -67,6 +82,21 @@ AbstractQuickPanel {
             usedModel.sync(root.toggles, root.columns);
             unusedModel.sync(root.unusedToggles, root.columns);
         });
+    }
+
+    // The tiles' wave starts WITH the open, ungated: it runs under the
+    // panel's slide, so the grid is composed as the edge reveals it and only
+    // the last-ranked tiles visibly land after - the fork's grammar, read
+    // off its re-recorded sidebars (the gated version put the whole build on
+    // stage and was judged ruined twice).
+    Connections {
+        target: GlobalStates
+        function onSidebarRightOpenChanged() {
+            if (GlobalStates.sidebarRightOpen) {
+                tileWave.park();
+                tileWave.enter();
+            }
+        }
     }
 
     StableQuickToggleModel { id: usedModel }
@@ -93,6 +123,36 @@ AbstractQuickPanel {
             id: usedGrid
             width: contentItem.width
             implicitHeight: root.gridHeight(usedModel)
+            // Read by a tile deciding whether its arrival is its own to
+            // animate: while this wave is running (or armed), the wave owns
+            // every arrival, and a tile fading itself under it would be a
+            // second writer on `appear`.
+            property StaggerWave entranceWave: tileWave
+
+            // The tiles' own wave: convergent, so each tile arrives from its
+            // side of the grid - the leftmost third from the left, the
+            // rightmost from the right, alternating from above and below -
+            // with the overshoot settle. Delegates rooted on
+            // AndroidQuickToggleButton declare `appear`; the few widget-type
+            // toggles that do not are simply not members and arrive drawn.
+            StaggerWave {
+                id: tileWave
+                target: usedGrid
+                // The fork's tile cadence: an 80ms head start before ANY
+                // tile, then 25ms per tile. The head start is load-bearing:
+                // without it ranks 0-2 begin fading the instant the panel
+                // edge appears and are well-lit before anything else has
+                // started - three tiles reading as "always there, then the
+                // animation begins", which is exactly the pause the
+                // maintainer kept seeing. With it the whole grid rises as
+                // one shimmering field behind the slide's curtain.
+                leadIn: 80
+                step: 25
+            }
+            StaggerEntrance {
+                target: usedGrid
+                convergent: true
+            }
 
             Repeater {
                 model: usedModel
@@ -110,7 +170,7 @@ AbstractQuickPanel {
                     onOpenNightLightDialog: root.openNightLightDialog()
                     onOpenWifiDialog: root.openWifiDialog()
                     onOpenTailscaleDialog: root.openTailscaleDialog()
-                    onOpenPhoneConnectDialog: root.openPhoneConnectDialog()
+                    onOpenPhoneTab: root.openPhoneTab()
                 }
             }
 

@@ -45,6 +45,61 @@ STAGGER_ADOPTERS = {
     "modules/common/widgets/ContentPage.qml",
     "modules/imi/sessionScreen/SessionScreen.qml",
     "modules/imi/editMode/EditModeDrawer.qml",
+    # The bar popups' shared card: the second adopter whose container has a
+    # real progress to gate on (card.openProgress through
+    # Appearance.animation.contentsArrived), so like the drawer it carries no
+    # leadIn. One wave on the overlay, never one per popup - the per-popup
+    # content files only opt their below-the-fold sections in with `appear`;
+    # the hero section deliberately declares none, because the card opens at
+    # the hero's own height precisely so it is legible on frame one.
+    # tests/lint_bar_popup_overlay_static.py holds the gate's shape.
+    "modules/imi/bar/BarPopupOverlay.qml",
+    # The desktop menu's rows. Adopted on the drawer's argument, not the
+    # sidebar's counter-argument: the card's own entrance is a QML-readable
+    # scalar (its opacity Behavior), so the wave gates on the real container
+    # progress with no guessed leadIn - the exact property whose absence
+    # refused the right sidebar. Its rows are RippleButtons, so they ride the
+    # wave through the `appear` the control already folds; the card enters via
+    # scale/opacity itself, so only the rows cascade. Enter-only by
+    # construction: the window is destroyed with the close, so there is no
+    # exit for a wave to waste frames on (the sidebar's measured 13-frames-
+    # per-close cost cannot arise), and the per-open surface build is a cost
+    # the menu already paid before the wave.
+    "modules/imi/desktopMenu/DesktopMenu.qml",
+    # The right sidebar, re-adopted - the register's one round trip so far;
+    # the STAGGER_DECLINED preamble below carries the full history and the
+    # two repairs that made re-adoption arguable. UNGATED: park-and-enter on
+    # the open's rising edge, running under the slide, whose `reveal` curtain
+    # masks the early frames (the gated version put the whole construction on
+    # stage and was measured as ruined - d59440244 ("fix(motion): the entrance runs under the slide - the panel materializes composed")). Its sections are
+    # deliberately UNIFORM while the toggle grid's tiles converge: section
+    # translate stacked on tile convergence was tried and judged ruined on
+    # screen - the fork's sections hold still and their PIECES move.
+    "modules/imi/sidebarRight/SidebarRightContent.qml",
+    # The android toggle grid's nested tile wave (convergent - tiles from
+    # their own third of the grid), gated on the section's own appear.
+    "modules/imi/sidebarRight/quickToggles/AndroidQuickPanel.qml",
+    # The quick sliders' nested card wave (uniform - fade, scale and rise on
+    # the three cards, bottom-up, members handed in as a list because the
+    # bottom row packs two of them), park-and-enter on the sidebar's
+    # trigger beside the fill sweep each slider already runs on it.
+    # tests/test_quick_sliders_entrance_contract.py holds the shape.
+    "modules/imi/sidebarRight/QuickSliders.qml",
+    # The left sidebar, adopted after its refusal's hazard was answered
+    # rather than waved off: the gate keys on the OPEN flag, which a detach
+    # does not flip, so undocking the chat to keep reading cannot re-run the
+    # entrance. The slide progress reaches the reparented tree by assignment
+    # (SidebarLeft.qml), and the AI pane's members cascade through the
+    # dynamic-scope gate documented in AiChat.qml.
+    "modules/imi/sidebarLeft/SidebarLeftContent.qml",
+    "modules/imi/sidebarLeft/AiChat.qml",
+    # The Phone tab's own column, nested inside the left sidebar's wave the
+    # way AiChat's is. It carries NO leadIn and needs none: the tab is a
+    # SwipeView page, so its members answer `visible` false until it is the
+    # current one, and StaggerWave's own pendingEnter holds the entrance
+    # until then - the container question a lead-in is a guess at, answered
+    # for free by the thing that already had to be answered.
+    "modules/imi/sidebarLeft/phone/Phone.qml",
 }
 
 # The other half of that ratchet: a surface that adopted a wave, was judged on
@@ -54,25 +109,64 @@ STAGGER_ADOPTERS = {
 # tried and refused. A refusal is invisible in the source, exactly like the
 # adoption it mirrors.
 #
-# The right sidebar is the entry. 9e10b8a9c ("feat(sidebar): the right
-# sidebar's sections arrive in sequence") gave it one and the user rejected it:
-# "I don't like the cascading animation effect in the sidebar... This one feels
-# slow. There's a frame drop the moment it opens and the moment it closes."
-# Two properties of THIS surface are why, and neither is a tuning. Its
-# container is a layer surface the compositor slides, so there is no progress
-# to gate on and the head start can only be a guessed `leadIn` - which put the
-# last member's landing 180ms past the end of `sidebarSlideEnter`. And the
-# surface is DESTROYED by the gesture the wave rides: `PanelWindow.visible`
-# follows the open state, layer-shell forbids window reuse, so the wave's
-# frames land on a surface the compositor is still bringing up and its exit
-# animates a window that has already been asked to leave - measured at a median
-# of 30 rendered frames per open against 5 without it, and 13 per close against
-# zero. The frame drop the report names is that teardown-and-rebuild and NOT
-# the wave; see AGENT.md's design-language section, which carries the numbers
-# and the two suspects they eliminate. Re-adopting is a decision to be argued,
-# not a line to be copied.
+# The right sidebar is the worked example of the register running in BOTH
+# directions, and its history is the argument for keeping refusals written
+# down. 9e10b8a9c ("feat(sidebar): the right sidebar's sections arrive in
+# sequence") gave it a wave; the maintainer rejected it on screen ("feels
+# slow", a frame drop at both ends) and 00efe588 took it off, with two
+# measured facts recorded here: the container was a compositor-slid surface
+# with no progress to gate on (so the head start was a guessed leadIn landing
+# the last member ~200ms after the slide), and the surface was destroyed per
+# gesture, which was the frame drop. BOTH facts were later repaired for
+# unrelated reasons - the sidebar became a persistent surface whose EdgeSlide
+# owns the slide in-client - so when the maintainer asked for the cascade
+# again (2026-08-24), re-adoption was argued on the repairs, not copied:
+# the wave first gated on the EdgeSlide's scalar - and that version was
+# measured as ruined (the panel arrived empty and built itself on stage).
+# The design that stuck runs UNGATED under the slide, park-and-enter on the
+# open's rising edge, behind EdgeSlide's `reveal` curtain (d59440244, "fix(motion): the entrance runs under the slide - the panel materializes composed").
+# It is in STAGGER_ADOPTERS above; this note stays because the register's
+# job is exactly this round trip.
 STAGGER_DECLINED = {
-    "modules/imi/sidebarRight/SidebarRightContent.qml",
+    # (The LEFT sidebar sat here briefly for its detach-reparenting hazard;
+    # it moved to STAGGER_ADOPTERS once the gate was keyed to the open flag,
+    # which a detach does not flip - the hazard answered, not waved off.)
+    # Dialog content. Assessed for the group entrance when the desktop menu
+    # adopted it and refused on the surface's own facts, all of them readable
+    # in the tree rather than guessed:
+    #
+    #  - A dialog's content is the question being asked. Every WindowDialog
+    #    here is an interruption offering a decision (the polkit auth prompt,
+    #    the uninstall confirm, the Wi-Fi/Bluetooth/Tailscale/volume/phone
+    #    dialogs), and a clamped five-rank wave puts the last member's landing
+    #    ~400ms after the gate - latency on exactly the thing the user was
+    #    interrupted to read. This is the launcher refusal's argument on a
+    #    modal surface: a wave is wrong where the content IS what is being
+    #    waited for.
+    #  - The polkit prompt `forceActiveFocus()`es its field the moment it
+    #    opens (PolkitContent.qml) and users answer immediately; a cascade
+    #    puts keystrokes into a password field still parked at `appear: 0`,
+    #    invisible, on an authentication surface.
+    #  - The card already has an entrance of its own that members would fight:
+    #    `onShowChanged` freezes the card's height at the show flip (the
+    #    binding-destroying assignment AGENT.md documents as load-bearing) and
+    #    the card unfolds 0 -> that height while the content column fades AS
+    #    ONE - a per-member cascade inside an unfolding card is two entrances
+    #    stacked on one surface.
+    #  - Six of the dialog content files bleed children to the card's edge
+    #    with negative `contentPadding` margins (separators, lists); a
+    #    scale-and-rise dressing on those members swings edge-to-edge chrome
+    #    onto the scrim mid-entrance, and separators would spend wave slots.
+    #  - The dialog surfaces are created by the gesture that opens them (the
+    #    sidebar's `toggleDialogLoader.active` flips on `shown`;
+    #    FullscreenPolkitWindow is gated on `PolkitService.active`), which is
+    #    the measured half of the sidebar refusal above: wave frames landing
+    #    on a surface the compositor is still bringing up.
+    #
+    # A dialog that someday earns a group entrance argues these down first -
+    # in particular the first two, which are properties of what a dialog IS
+    # rather than of how this one is built.
+    "modules/common/widgets/WindowDialog.qml",
 }
 
 # A cascade whose rank is bounded by the shape of its own model rather than by

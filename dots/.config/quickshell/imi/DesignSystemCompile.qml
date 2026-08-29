@@ -69,6 +69,23 @@ ShellRoot {
                 // wallpaper selector, so it compiles for the first time when
                 // someone clicks its toolbar button - which on a shell where
                 // nobody has is never.
+                // The Phone tab's own pieces. Nothing else in this sweep
+                // reaches them: the tab is one of four in a SwipeView, its
+                // sub-pages and its card stack are resolved BY URL through
+                // Loaders (deliberately, so a missing file degrades instead of
+                // taking the tab down), and a Loader that never activates
+                // never compiles what it points at. That is exactly how
+                // PhoneFeatureCards.qml shipped naming PhoneConnectPairingCard
+                // - a type renamed when the shared pieces moved to
+                // qs.modules.imi.phone - through a green suite, and said so
+                // only on a live shell.
+                Quickshell.shellPath("modules/imi/sidebarLeft/phone/Phone.qml"),
+                Quickshell.shellPath("modules/imi/sidebarLeft/phone/PhoneFeatureCards.qml"),
+                Quickshell.shellPath("modules/imi/sidebarLeft/phone/PhoneContactsPage.qml"),
+                Quickshell.shellPath("modules/imi/sidebarLeft/phone/PhoneAppsPage.qml"),
+                Quickshell.shellPath("modules/imi/sidebarLeft/phone/PhoneWebcamPage.qml"),
+                Quickshell.shellPath("modules/imi/sidebarLeft/phone/PhoneMicPage.qml"),
+                Quickshell.shellPath("modules/imi/sidebarLeft/phone/InstallGuidePopup.qml"),
                 Quickshell.shellPath("modules/imi/wallpaperSelector/ClockDepthPicker.qml"),
                 // Same shape one step on: the desktop subject selector's
                 // surface is behind a Loader that stays inactive until somebody
@@ -83,6 +100,11 @@ ShellRoot {
                 Quickshell.shellPath("modules/imi/editMode/EditModeChromeContent.qml"),
                 Quickshell.shellPath("modules/imi/editMode/EditWidgetMenu.qml"),
                 Quickshell.shellPath("modules/imi/editMode/EditWidgetMenuContent.qml"),
+                // The desktop menu builds its window behind a Loader gated on
+                // the right-click, so a shell that is merely running has never
+                // compiled it - and it now carries the rows' group entrance,
+                // which nothing else in the suite reaches.
+                Quickshell.shellPath("modules/imi/desktopMenu/DesktopMenu.qml"),
                 // Stage 9's Lockscreen tab: the preview context compiles for
                 // the first time when somebody opens that tab, and the lock
                 // surface itself only when the screen actually locks - so a
@@ -128,6 +150,20 @@ ShellRoot {
                 Quickshell.shellPath("modules/imi/bar/Bar.qml"),
                 Quickshell.shellPath("modules/imi/verticalBar/VerticalBar.qml"),
                 Quickshell.shellPath("modules/imi/verticalBar/VerticalBarContent.qml"),
+                // The overview's window and the left sidebar's tab bar.
+                // Bar.qml's argument one step further: these are built on every
+                // startup, so only a live load ever found anything wrong with
+                // them - and a live load is what an agent working in a worktree
+                // has not got. The two sidebars' own windows deliberately are
+                // NOT here: a by-URL compile resolves neither `SidebarLeftContent`
+                // nor `SidebarRightContent`, because the implicit module for the
+                // directory each of them sits in is not registered in a
+                // `qs -p` process, so adding them would report a failure that is
+                // the probe's rather than the file's. They are covered by
+                // tests/run_persistent_surface_focus_probe.sh, which loads the
+                // whole shell.
+                Quickshell.shellPath("modules/imi/overview/Overview.qml"),
+                Quickshell.shellPath("modules/common/widgets/VerticalTabBar.qml"),
                 Quickshell.shellPath("modules/common/plugins/bundled/docker/DockerPopup.qml"),
                 Quickshell.shellPath("modules/common/plugins/bundled/docker/DockerWidget.qml"),
                 Quickshell.shellPath("modules/common/plugins/bundled/discordVoice/DiscordVoicePopup.qml"),

@@ -1,3 +1,4 @@
+import qs
 import QtQuick
 import QtQuick.Layouts
 import qs.services
@@ -45,10 +46,52 @@ GroupButton {
     Behavior on baseHeight {
         animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
     }
-    opacity: 0
-    Component.onCompleted: { opacity = 1 }
-    Behavior on opacity {
-        animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+    // The tile's arrival is the panel's convergent wave now (the panel's
+    // StaggerEntrance owns opacity/scale/translate through this): a tile
+    // added mid-session simply appears in place, which is what the old
+    // opacity: 0 + onCompleted self-fade approximated one tile at a time.
+    // No Behavior on opacity: the wave animates `appear` and opacity is a
+    // binding on it, so a Behavior here is a second animation on the same
+    // channel. The one left behind by the self-fade's retirement turned
+    // park()'s snap-to-invisible into a 200ms on-stage fade-out (measured:
+    // appear=0 with drawn opacity still 1.000 at the open, dimmest at
+    // ~140ms, and pinned at 0.15 by per-frame retargets while `appear`
+    // animated - b710ef731's frozen-Behavior shape - so the tile landed
+    // ~200ms after its own wave slot). That was the "toggles visible, then
+    // the animation begins" pause.
+    property real appear: 1
+
+    // A tile born mid-session - edit mode adding it, a config change - used
+    // to pop in at full strength in one frame: the dresser dresses arrivals,
+    // but only an enter() animates them, and none is running. So a tile
+    // created while the panel is on screen parks itself and runs the one
+    // fade the retired self-fade used to be. The check is deferred a turn
+    // because of the one case where every tile is "late": a tree built with
+    // the panel already open (keepRightSidebarLoaded off). There the panel's
+    // wave enters right after the model sync, so by the time this looks, the
+    // wave is running (or armed) and the tile stands down - one writer on
+    // `appear`, always.
+    Component.onCompleted: {
+        root.appear = 0;
+        Qt.callLater(() => {
+            const wave = root.gridRef?.entranceWave ?? null;
+            if (wave && (wave.active.length > 0 || wave.pendingEnter))
+                return;
+            if (!GlobalStates.sidebarRightOpen) {
+                root.appear = 1;
+                return;
+            }
+            lateArrival.restart();
+        });
+    }
+    NumberAnimation {
+        id: lateArrival
+        target: root
+        property: "appear"
+        to: 1
+        duration: Appearance.animation.elementMoveFast.duration
+        easing.type: Appearance.animation.elementMoveFast.type
+        easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve
     }
 
     // The grid is one flat container and a tile places itself in it, so a

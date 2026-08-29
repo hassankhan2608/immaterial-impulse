@@ -19,6 +19,15 @@ The rest pins the busctl I/O the double deliberately omits:
   monitor Process must carry no `running` binding, every restart must go
   through the backoff plan, and the poll must stay on (gated on
   enableService && installed) as the reconcile behind it.
+
+The last section holds the SURFACE, which is the Phone tab in the left
+sidebar (docs/superpowers/specs/2026-08-27-phone-tab-design.md) plus the
+pieces it shares with anything else that draws a phone. It was the right
+sidebar's dialog until W5; the checks moved with it rather than being
+dropped, because what they pin is the shape rather than the panel - one
+action row, every button an action the service answers AND a backend gate
+that says it will, one fillHeight, and the pairing answers where they can
+be reached.
 """
 
 import re
@@ -27,6 +36,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "services" / "PhoneConnect.qml"
 DOUBLE = ROOT / "tests" / "imports" / "testservices" / "PhoneConnect.qml"
+# The surface is two directories: the pieces every phone panel shares
+# (modules/imi/phone) and the Phone tab drawing them.
+TAB_DIR = ROOT / "modules" / "imi" / "sidebarLeft" / "phone"
+SURFACE_DIRS = [ROOT / "modules" / "imi" / "phone", TAB_DIR]
+TAB = TAB_DIR / "Phone.qml"
+ACTIONS_ROW = TAB_DIR / "PhoneActionsRow.qml"
+PAIRING_CARD = ROOT / "modules" / "imi" / "phone" / "PhonePairingCard.qml"
+
+# Everything the phone surface may ask the service to DO. A seventh action
+# appears here or not at all - a button whose call the service does not
+# answer is a fake action.
+MODEL_ACTIONS = {"refresh", "ring", "ping", "sendClipboard", "acceptPairing", "cancelPairing",
+                 "shareUrls", "shareText", "shareClipboard", "pickAndSendFiles",
+                 "browseFiles", "selectDevice"}
 
 BEGIN = "// BEGIN phone-connect parser logic"
 END = "    // END phone-connect parser logic"
@@ -49,6 +72,94 @@ def test_parser_region_is_byte_identical_between_service_and_double():
         "have drifted between the phone-connect parser logic markers; edit both "
         "sides identically"
     )
+
+
+def test_the_derived_pairing_request_list_matches_the_double():
+    """`pairingRequests` sits outside the marked region like applyDevices does
+    (it is a binding on `devices`, not parser logic), and the QML suite drives
+    the double's copy - so the two spellings are held to each other."""
+    pattern = r"    readonly property var pairingRequests:.*\n"
+    service_line = re.search(pattern, SERVICE.read_text())
+    double_line = re.search(pattern, DOUBLE.read_text())
+    assert service_line and double_line, "pairingRequests missing on one side"
+    assert service_line.group(0) == double_line.group(0), "pairingRequests drifted"
+
+
+def test_the_kdeconnect_sweep_reads_the_connectivity_report_at_its_own_leaf():
+    """The report is a child object (`<device>/connectivity_report`), and the
+    path matters more than it reads: measured against the live daemon, a
+    GetAll that names the report's interface on the DEVICE path does not fail
+    - Qt's adaptor answers it with every property of the device - which
+    parses as a report carrying no cellular fields and reads as "unknown" for
+    ever, with nothing in any log."""
+    source = SERVICE.read_text()
+    calls = [line for line in source.splitlines()
+             if "org.kde.kdeconnect.device.connectivity_report" in line and "GetAll" in line]
+    assert len(calls) == 1, f"expected one connectivity_report GetAll, got {calls}"
+    assert 'devicePath + "/connectivity_report"' in calls[0], (
+        f"the report must be read at its own leaf path: {calls[0].strip()}"
+    )
+
+
+def test_pairing_is_answered_on_the_device_path_with_the_daemon_s_two_methods():
+    """Slice 3's whole transport: acceptPairing/cancelPairing are methods of
+    org.kde.kdeconnect.device on the device path itself (introspected live),
+    not of a plugin leaf, and the id reaches the path as an argument the
+    validator has already passed - never through a shell string."""
+    source = SERVICE.read_text()
+    for name in ("acceptPairing", "cancelPairing"):
+        body = re.search(rf"function {name}\(.*?\n    \}}\n", source, re.S)
+        assert body, f"{name}() missing"
+        text = body.group(0)
+        assert "root.runAction(root.busctlCall(" in text, f"{name}() does not go through runAction"
+        assert f'"org.kde.kdeconnect.device", "{name}", []' in text, (
+            f"{name}() does not call the device interface's {name} method"
+        )
+        assert "`/modules/kdeconnect/devices/${d.id}`" in text, (
+            f"{name}() is aimed at something other than the device path"
+        )
+        # An answer is to a request the peer made. Defaulting to the active
+        # device - the paired phone, which never asked - is the one shape a
+        # copy of ring() would carry here.
+        assert "!d.hasPairingRequest" in text, f"{name}() answers a device that never asked"
+        assert "root.activeDevice" not in text, f"{name}() falls back to the active device"
+
+
+def test_the_active_device_rule_matches_the_double_and_reads_the_persisted_choice():
+    """Slice 6: activeDevice prefers the persisted device while it is paired
+    and reachable, else the old rule. The rule is preferredActiveDevice in
+    the synced region; the binding that calls it is outside it and the QML
+    suite drives the double's, so both bindings are held to each other. The
+    service reads the persisted id off Persistent; the double carries it as
+    a plain property the suite can set."""
+    pattern = r"    readonly property var activeDevice:.*\n"
+    service_line = re.search(pattern, SERVICE.read_text())
+    double_line = re.search(pattern, DOUBLE.read_text())
+    assert service_line and double_line, "activeDevice missing on one side"
+    assert service_line.group(0) == double_line.group(0), "activeDevice drifted"
+    assert "root.preferredActiveDevice(root.devices, root.persistedActiveDeviceId)" in service_line.group(0)
+    assert re.search(r"readonly property string persistedActiveDeviceId: Persistent\.states\?\.phone\?\.activeDeviceId \?\? \"\"",
+                     SERVICE.read_text()), "the service does not read the persisted id off Persistent.states.phone"
+    assert re.search(r"^    property string persistedActiveDeviceId: \"\"$", DOUBLE.read_text(), re.M), (
+        "the double does not carry persistedActiveDeviceId as a settable property"
+    )
+
+
+def test_select_device_writes_the_persisted_id_and_the_recent_list():
+    source = SERVICE.read_text()
+    body = re.search(r"function selectDevice\(.*?\n    \}\n", source, re.S)
+    assert body, "selectDevice() missing"
+    text = body.group(0)
+    assert "root.validDeviceId(id)" in text, "selectDevice persists an unvalidated id"
+    assert "Persistent.states.phone.activeDeviceId = id" in text, "selectDevice does not persist the choice"
+    assert "Persistent.states.phone.recentDeviceIds = root.recentDeviceIdsAfterSelect(" in text, (
+        "selectDevice does not maintain the MRU list through the synced rule"
+    )
+    persistent = (ROOT / "modules" / "common" / "Persistent.qml").read_text()
+    block = re.search(r"property JsonObject phone: JsonObject \{(.*?)\n            \}", persistent, re.S)
+    assert block, "Persistent.states has no phone JsonObject"
+    assert re.search(r'property string activeDeviceId: ""', block.group(1)), "phone.activeDeviceId missing"
+    assert re.search(r"property list<string> recentDeviceIds: \[\]", block.group(1)), "phone.recentDeviceIds missing"
 
 
 def test_state_application_helpers_match_the_double():
@@ -121,7 +232,8 @@ def test_device_ids_are_validated_before_path_splicing():
         "valent object paths must be validated before DescribeAll is called on them"
     )
     # Actions build paths from ids/paths too - each must re-check.
-    for action in ("ring", "ping", "sendClipboard"):
+    for action in ("ring", "ping", "sendClipboard", "acceptPairing", "cancelPairing",
+                   "shareUrls", "shareText"):
         body = re.search(rf"function {action}\(.*?\n    \}}\n", source, re.S)
         assert body, f"{action}() missing"
         assert "validDeviceId" in body.group(0) or "validValentObjectPath" in body.group(0), (
@@ -277,6 +389,334 @@ def test_signal_bursts_are_coalesced_and_never_dropped():
         r"function handleMonitorLine\(.*?\n    \}", source, re.S).group(0), (
         "monitor lines do not go through the settle timer"
     )
+
+
+def test_actions_queue_behind_one_another_instead_of_killing_the_one_in_flight():
+    """`Process.exec` on a Process that is still running terminates it first
+    (measured under headless weston: a 2s command followed 500ms later by a
+    second exec exited with code 15, status 1, and no output). One
+    `actionProc` fed straight from runAction therefore drops every action but
+    the last of a burst - and a multi-file share IS a burst. runAction pushes
+    onto a queue that the process's own exit pumps."""
+    source = SERVICE.read_text()
+    body = re.search(r"function runAction\(.*?\n    \}\n", source, re.S)
+    assert body, "runAction() missing"
+    assert "actionProc.exec(" not in body.group(0), "runAction execs straight onto a Process that may be busy"
+    assert "root.actionQueue.push(" in body.group(0), "runAction does not queue"
+    pump = re.search(r"function pumpActions\(.*?\n    \}\n", source, re.S)
+    assert pump, "pumpActions() missing"
+    assert "actionProc.running" in pump.group(0), "the pump does not check whether the process is busy"
+    assert "actionProc.exec(" in pump.group(0), "the pump is not what starts the process"
+    block = _process_block(source, "actionProc")
+    assert "root.pumpActions()" in block, "the action process's exit does not pump the queue"
+    # ...and the pump is the ONLY exec on that Process, anywhere in the file:
+    # a second one written beside a new action is the kill coming back.
+    execs = [line.strip() for line in source.splitlines() if "actionProc.exec(" in line]
+    assert execs == ["actionProc.exec(root.actionQueue.shift());"], (
+        f"actionProc is exec'd outside the pump: {execs}"
+    )
+
+
+def test_feedback_is_one_signal_and_one_error_string_and_a_failed_action_reaches_both():
+    """The tab's toast is fed by `actionFeedback(message, ok)` and its inline
+    error by `lastActionError`; every failure the service can see reports
+    through both, and a busctl action exiting non-zero is the one every
+    action shares."""
+    source = SERVICE.read_text()
+    assert re.search(r"^    signal actionFeedback\(string message, bool ok\)$", source, re.M), (
+        "actionFeedback(message, ok) is not declared with that exact signature"
+    )
+    assert re.search(r"^    property string lastActionError: \"\"$", source, re.M), (
+        "lastActionError is not a string property defaulting to empty"
+    )
+    helper = re.search(r"function reportFailure\(message: string\): void \{\n(.*?)\n    \}", source, re.S)
+    assert helper, "reportFailure(message) missing - the one spelling of a failure"
+    assert "root.lastActionError = message" in helper.group(1), "reportFailure does not set lastActionError"
+    assert "root.actionFeedback(message, false)" in helper.group(1), (
+        "reportFailure does not raise actionFeedback(message, false)"
+    )
+    block = _process_block(source, "actionProc")
+    assert "root.reportFailure(" in block, "a failed busctl action does not report through reportFailure"
+    # ...and every fire-and-forget action acknowledges the click, so the
+    # toast is one channel rather than one per action.
+    for name in ("ring", "ping", "sendClipboard"):
+        body = re.search(rf"function {name}\(.*?\n    \}}\n", source, re.S)
+        assert body and re.search(r"root\.actionFeedback\(Translation\.tr\(.*\), true\)", body.group(0)), (
+            f"{name}() raises no actionFeedback on success"
+        )
+
+
+def test_share_goes_through_the_share_plugin_one_url_per_call():
+    """Slice 4's transport: `org.kde.kdeconnect.device.share.shareUrl` /
+    `shareText` on the device's /share leaf, one string argument each
+    (busctl signature "s"), serialized through runAction. shareUrls takes
+    whatever list it is handed and keeps only file:// and http(s):// entries
+    through the synced shareableUrls filter, so a stray path or an empty
+    line never reaches the daemon as a URL."""
+    source = SERVICE.read_text()
+    for gate in ("canShare", "canBrowseFiles"):
+        assert re.search(rf'readonly property bool {gate}: root\.backend === "kdeconnect"', source), (
+            f"{gate} is not declared as kdeconnect-only"
+        )
+    urls = re.search(r"function shareUrls\(.*?\n    \}\n", source, re.S)
+    assert urls, "shareUrls() missing"
+    assert "root.shareableUrls(" in urls.group(0), "shareUrls does not filter through shareableUrls"
+    assert 'root.runAction(root.busctlCall("org.kde.kdeconnect.daemon", `/modules/kdeconnect/devices/${d.id}/share`, "org.kde.kdeconnect.device.share", "shareUrl", ["s", url]))' in urls.group(0), (
+        "shareUrls does not call share.shareUrl on the share leaf with one string argument"
+    )
+    text = re.search(r"function shareText\(.*?\n    \}\n", source, re.S)
+    assert text, "shareText() missing"
+    assert '"org.kde.kdeconnect.device.share", "shareText", ["s", text]' in text.group(0), (
+        "shareText does not call share.shareText with one string argument"
+    )
+    assert "root.runAction(" in text.group(0)
+    for body in (urls, text):
+        assert 'root.backend !== "kdeconnect"' in body.group(0), "a share action runs on a backend that has no share plugin"
+
+
+def test_share_clipboard_reads_wl_paste_as_a_constant_argv_and_decides_through_the_synced_rule():
+    """The clipboard is read with `wl-paste --no-newline` - a constant argv,
+    never a shell string with anything interpolated - and what to do with
+    the text is the synced clipboardShareTarget decision, so the QML suite
+    pins the URL heuristic. An empty clipboard is a reported failure
+    ("Clipboard is empty"), not a share of nothing."""
+    source = SERVICE.read_text()
+    block = _process_block(source, "clipboardProc")
+    assert re.search(r'command:\s*\["wl-paste", "--no-newline"\]', block), (
+        "the clipboard read is not the constant argv [wl-paste, --no-newline]"
+    )
+    assert "${" not in block and '"sh"' not in block and '"bash"' not in block
+    assert "root.clipboardShareTarget(" in block, "the clipboard text is not classified through clipboardShareTarget"
+    assert 'root.reportFailure(Translation.tr("Clipboard is empty"))' in block, (
+        "an empty clipboard is not reported as one"
+    )
+    assert "root.shareUrls(" in block and "root.shareText(" in block, (
+        "the clipboard does not reach both share actions"
+    )
+    body = re.search(r"function shareClipboard\(.*?\n    \}\n", source, re.S)
+    assert body, "shareClipboard() missing"
+    assert "clipboardProc.running" in body.group(0), "shareClipboard does not start the read (or guard a read in flight)"
+    assert "root.validDeviceId(d.id)" in body.group(0), "shareClipboard aims at an unvalidated device"
+
+
+def test_the_file_picker_is_kdialog_as_a_constant_argv_and_its_lines_become_file_urls():
+    """The house picker (`kdialog --getopenfilename $HOME --multiple`, the
+    pattern at SidebarRightContent.qml:113) as a constant argv: the only
+    non-literal element is the start directory, read from the environment
+    and never interpolated into a shell string. Its stdout is one path per
+    line, turned into file:// URLs by the synced pickedFileUrls and handed
+    to shareUrls - so the picker never talks to the daemon itself."""
+    source = SERVICE.read_text()
+    block = _process_block(source, "filePickerProc")
+    command = re.search(r'command:\s*\["kdialog", "--getopenfilename", ([^\]]*)\]', block)
+    assert command, "the picker is not the constant argv [kdialog, --getopenfilename, <home>, --multiple]"
+    assert command.group(1).endswith('"--multiple"'), f"the picker does not ask for several files: {command.group(0)}"
+    assert "${" not in block and '"sh"' not in block and '"bash"' not in block
+    assert "root.pickedFileUrls(" in block, "the picker's lines are not turned into URLs by pickedFileUrls"
+    assert "root.shareUrls(" in block, "the picker does not hand its files to shareUrls"
+    body = re.search(r"function pickAndSendFiles\(.*?\n    \}\n", source, re.S)
+    assert body, "pickAndSendFiles() missing"
+    assert "filePickerProc.running" in body.group(0), "pickAndSendFiles does not start the picker (or guard one already open)"
+    assert "root.validDeviceId(d.id)" in body.group(0), "pickAndSendFiles aims at an unvalidated device"
+
+
+def test_browse_files_mounts_then_reads_the_mount_point_and_opens_it_as_argv():
+    """Slice 5's transport: sftp.mount on the device's /sftp leaf through
+    runAction; then, on the read queue, sftp.isMounted until it answers
+    true (bounded - a mount that never comes up is a reported failure, not
+    a timer that polls for ever) and sftp.mountPoint, the daemon's own
+    answer for where it put the phone. `<mount>/storage/emulated/0` is
+    preferred when that directory exists (the fork's 3a7f653b4: the mount
+    root is not the user's storage), decided by the synced sftpBrowseTarget
+    from a `test -d` argv, and opened with an xdg-open argv. sftpMounted
+    tracks the isMounted answer."""
+    source = SERVICE.read_text()
+    assert re.search(r"^    property bool sftpMounted: false$", source, re.M), "sftpMounted missing"
+    assert re.search(r"readonly property int sftpMountAttemptCeiling:\s*\d+", source), (
+        "the wait for the mount has no declared ceiling"
+    )
+    body = re.search(r"function browseFiles\(.*?\n    \}\n", source, re.S)
+    assert body, "browseFiles() missing"
+    assert "root.validDeviceId(d.id)" in body.group(0)
+    assert 'root.runAction(root.busctlCall("org.kde.kdeconnect.daemon", `/modules/kdeconnect/devices/${d.id}/sftp`, "org.kde.kdeconnect.device.sftp", "mount", []))' in body.group(0), (
+        "browseFiles does not call sftp.mount on the sftp leaf"
+    )
+    poll = re.search(r"function pollSftpMount\(.*?\n    \}\n", source, re.S)
+    assert poll, "pollSftpMount() missing"
+    for member in ("isMounted", "mountPoint"):
+        assert f'"org.kde.kdeconnect.device.sftp", "{member}", []' in poll.group(0), (
+            f"the mount wait does not read sftp.{member}"
+        )
+    assert "root.sftpMounted = " in poll.group(0), "the isMounted answer does not land on sftpMounted"
+    assert "root.enqueue(" in poll.group(0) and "root.runAction(" not in poll.group(0), (
+        "reads belong on the serialized read queue, not the action process"
+    )
+    assert "root.reportFailure(" in poll.group(0), "a mount that never comes up is not reported"
+    probe = _process_block(source, "storageProbe")
+    assert 'storageProbe.exec(["test", "-d"' in source, "the storage directory is not probed with a test -d argv"
+    assert "root.sftpBrowseTarget(" in probe, "the directory to open is not decided by sftpBrowseTarget"
+    assert 'Quickshell.execDetached(["xdg-open", ' in probe, "the mount is not opened with an xdg-open argv"
+
+
+def test_low_battery_is_observed_on_the_active_device_and_reported_with_notify_send_argv():
+    """Slice 6's battery half: the model is observed (onActiveDeviceChanged
+    fires on every sweep, since the model is rebuilt), the crossing is
+    decided by the synced batteryNoticeTransition the QML suite pins the
+    thresholds of, and each notice is one notify-send argv - the fork's
+    exact lines: `-i phone -u normal "Low battery: <name>" "Charge is at
+    <n>%."` and `-i phone -u low "Battery recovered: <name>" "Charge is
+    back to <n>%."` - never a shell string."""
+    source = SERVICE.read_text()
+    assert re.search(r"^    onActiveDeviceChanged: root\.observeBattery\(\)$", source, re.M), (
+        "the battery is not observed from onActiveDeviceChanged"
+    )
+    body = re.search(r"function observeBattery\(.*?\n    \}\n", source, re.S)
+    assert body, "observeBattery() missing"
+    text = body.group(0)
+    assert "root.batteryNoticeTransition(" in text, "the crossing is not decided by batteryNoticeTransition"
+    assert '"notify-send", "-i", "phone", "-u", "normal"' in text, "the low notice is not the fork's notify-send argv"
+    assert '"notify-send", "-i", "phone", "-u", "low"' in text, "the recovery notice is not the fork's notify-send argv"
+    assert 'Translation.tr("Low battery: %1")' in text and 'Translation.tr("Charge is at %1%.")' in text
+    assert 'Translation.tr("Battery recovered: %1")' in text and 'Translation.tr("Charge is back to %1%.")' in text
+    assert '"sh"' not in text and '"bash"' not in text and "${" not in text
+    # A different active device starts from a clean latch.
+    assert "root.batteryNoticeDeviceId" in text, "the latch is not per device"
+
+
+# ---- the phone surface ----------------------------------------------------
+
+
+def test_the_surface_calls_only_actions_the_model_exposes():
+    called = set()
+    for directory in SURFACE_DIRS:
+        for path in sorted(directory.glob("*.qml")):
+            called |= set(re.findall(r"\bPhoneConnect\.(\w+)\(", path.read_text()))
+    assert called, "the surface calls nothing on the service"
+    assert called <= MODEL_ACTIONS, f"the surface invents actions: {sorted(called - MODEL_ACTIONS)}"
+    declared = set(re.findall(r"^    function (\w+)\(", SERVICE.read_text(), re.M))
+    assert called <= declared, f"the surface calls what the service does not declare: {sorted(called - declared)}"
+
+
+def test_the_tab_has_one_action_row_of_the_six_model_actions():
+    """ONE row of round action buttons, each a model action, in the fork's
+    order: ring, ping, send the clipboard, send a file, share the clipboard
+    as a link or text, browse the phone's storage."""
+    row = ACTIONS_ROW.read_text()
+    assert row.count("id: actionRow") == 1, "the tab must carry exactly one action row"
+    buttons = re.findall(r"PhoneActionButton \{(.*?)\n(?:\s{12}|\s{8})\}", row, re.S)
+    assert len(buttons) == 6, f"expected six action buttons, found {len(buttons)}"
+    called = [re.search(r"PhoneConnect\.(\w+)\(", body).group(1) for body in buttons]
+    assert called == ["ring", "ping", "sendClipboard", "pickAndSendFiles",
+                      "shareClipboard", "browseFiles"], called
+
+
+def test_every_action_is_gated_on_what_the_backend_answers_not_only_on_reachability():
+    """Two terms, not one. Valent's action names beyond findmyphone.ring
+    were never verifiable against a live daemon, so everything past Ring is
+    kdeconnect-only - a row of six live buttons on Valent would be five
+    that silently do nothing. Ring is the exception BOTH backends answer,
+    so it is gated on reachability alone."""
+    row = ACTIONS_ROW.read_text()
+    buttons = re.findall(r"PhoneActionButton \{(.*?)\n(?:\s{12}|\s{8})\}", row, re.S)
+    gates = {}
+    for body in buttons:
+        action = re.search(r"PhoneConnect\.(\w+)\(", body).group(1)
+        enabled = re.search(r"enabled: (.+)", body)
+        assert enabled, f"{action} declares no enabled expression"
+        gates[action] = enabled.group(1).strip()
+    assert gates["ring"] == "root.online", gates["ring"]
+    expected = {"ping": "canPing", "sendClipboard": "canSendClipboard",
+                "pickAndSendFiles": "canShare", "shareClipboard": "canShare",
+                "browseFiles": "canBrowseFiles"}
+    for action, gate in expected.items():
+        assert gates[action] == f"root.online && PhoneConnect.{gate}", (
+            f"{action} is gated on {gates[action]!r}, not on reachability and PhoneConnect.{gate}"
+        )
+        assert re.search(rf'readonly property bool {gate}: root\.backend === "kdeconnect"',
+                         SERVICE.read_text()), f"{gate} is not a kdeconnect-only gate on the service"
+
+
+def test_the_pairing_card_answers_through_the_two_device_methods_in_a_button_row():
+    """Accept and Decline are the model's two pairing calls, and they sit in a
+    WindowDialogButtonRow so the filled-confirm / outlined-dismiss rule is
+    derived by the row rather than spelled at the card (the polkit contract
+    refuses an `outlined:` outside the widgets directory for that reason)."""
+    card = PAIRING_CARD.read_text()
+    assert "PhoneConnect.acceptPairing(" in card and "PhoneConnect.cancelPairing(" in card
+    assert "WindowDialogButtonRow {" in card, "the two answers must sit in a WindowDialogButtonRow"
+    assert "outlined:" not in card, "the card spells the outline rule for itself"
+
+
+def test_the_notification_list_owns_the_remaining_height():
+    """The list is the one child of the tab's column that fills, so every
+    other row keeps its own height and the empty state takes what is left -
+    nothing floats in empty space, and nothing else competes for it."""
+    tab = TAB.read_text()
+    fills = [line.strip() for line in tab.splitlines() if "Layout.fillHeight: true" in line]
+    assert len(fills) == 1, f"expected exactly one fillHeight in the tab, found {fills}"
+    listing = re.search(r"PhoneNotificationList \{(.*?)\n        \}", tab, re.S)
+    assert listing, "the tab does not declare a PhoneNotificationList"
+    assert "Layout.fillHeight: true" in listing.group(1), "the notification list does not fill"
+
+
+def test_the_tab_resolves_its_sub_pages_and_its_card_stack_by_url_not_by_type():
+    """The other half of the tab (the four sub-pages, the feature-card
+    stack) is a separate workstream, so this file may not NAME those types:
+    a bare `PhoneContactsPage {}` would take the whole tab down with
+    `Type ... unavailable` until every one of them exists, which is the
+    cascade AGENT.md's "Where to look when something goes wrong" describes.
+    Resolved by file name through a Loader, a page that has not landed is a
+    Loader error with a null item and the tab still draws."""
+    tab = TAB.read_text()
+    resolver = re.search(r"function subPageSource\(.*?\n    \}", tab, re.S)
+    assert resolver, "subPageSource() missing - the tab names its pages as types"
+    body = resolver.group(0)
+    for page_id, file_name in (("contacts", "PhoneContactsPage.qml"), ("apps", "PhoneAppsPage.qml"),
+                               ("webcam", "PhoneWebcamPage.qml"), ("mic", "PhoneMicPage.qml")):
+        assert f'case "{page_id}": return "{file_name}";' in body, (
+            f"the {page_id} page is not resolved to {file_name}"
+        )
+    assert 'Qt.resolvedUrl(root.subPageSource(' in tab, "the sub-page loader does not resolve by URL"
+    assert 'source: Qt.resolvedUrl("PhoneFeatureCards.qml")' in tab, (
+        "the bottom card stack is not loaded by URL"
+    )
+    for absent in ("PhoneContactsPage {", "PhoneAppsPage {", "PhoneWebcamPage {",
+                   "PhoneMicPage {", "PhoneFeatureCards {"):
+        assert absent not in tab, f"the tab names {absent.strip(' {')} as a type"
+
+
+def test_the_pairing_cards_are_drawn_by_the_tab_itself():
+    """Answering a pairing request is the only way into the shell for a
+    phone that is not paired yet, and the dialog that used to carry it is
+    gone - so the cards are the tab's own, never the feature stack's, which
+    is a file that may not be there."""
+    tab = TAB.read_text()
+    assert "PhonePairingCard {" in tab, "the tab draws no pairing cards"
+    assert "values: PhoneConnect.pairingRequests" in tab, (
+        "the pairing cards are not drawn from PhoneConnect.pairingRequests"
+    )
+
+
+def test_the_quick_toggle_opens_the_tab_instead_of_a_dialog():
+    """The right sidebar's phone toggle names the tab and opens the left
+    panel. The dialog and its ToggleDialog wiring are gone, and the deep
+    link is the untranslated id - resolving one against a tab's LABEL
+    breaks on a language change (1c674c8f5)."""
+    content = (ROOT / "modules" / "imi" / "sidebarRight" / "SidebarRightContent.qml").read_text()
+    assert "PhoneConnectDialog" not in content, "the right sidebar still builds the phone dialog"
+    assert not (ROOT / "modules" / "imi" / "sidebarRight" / "phoneConnect").exists(), (
+        "the right sidebar's phoneConnect directory is still there"
+    )
+    handler = re.search(r"function onOpenPhoneTab\(\) \{(.*?)\n            \}", content, re.S)
+    assert handler, "onOpenPhoneTab() missing - the toggle reaches nothing"
+    assert 'GlobalStates.sidebarLeftTab = "phone"' in handler.group(1), (
+        "the toggle does not name the Phone tab"
+    )
+    assert "GlobalStates.sidebarLeftOpen = true" in handler.group(1), (
+        "the toggle does not open the left sidebar"
+    )
+    tab_ids = (ROOT / "modules" / "imi" / "sidebarLeft" / "SidebarLeftContent.qml").read_text()
+    assert '["phone"]' in tab_ids, "SidebarLeftContent declares no `phone` tab id to resolve against"
 
 
 if __name__ == "__main__":

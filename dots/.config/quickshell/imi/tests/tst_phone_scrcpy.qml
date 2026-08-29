@@ -1,0 +1,1263 @@
+import QtQuick
+import QtTest
+import testservices
+import qs.modules.common
+
+// The Phone tab's four session services - PhoneDeps, PhoneScrcpy,
+// PhoneCamera, PhoneMic - driven through their logic-only doubles in
+// tests/imports/testservices. Every argv, flag table and state ladder is
+// exercised here; the process I/O the doubles omit is pinned by
+// tests/test_phone_sessions_contract.py, and the supervisor itself by
+// tests/test_phone_scrcpy_manager.py.
+TestCase {
+    name: "PhoneSessionsTest"
+
+    readonly property string sessionScript: "/mock/phone/droidcam_session.sh"
+    readonly property string statusScript: "/mock/phone/droidcam_status.sh"
+    readonly property string setupScript: "/mock/phone/setup_droidcam_input.sh"
+    readonly property string teardownScript: "/mock/phone/teardown_droidcam_input.sh"
+
+    function phone(extra) {
+        return Object.assign({
+            id: "dev_1", name: "Phone", type: "phone", reachable: true, paired: true,
+            hasPairingRequest: false, reachableAddresses: ["192.168.1.50"],
+            cellularNetworkType: "LTE", cellularNetworkStrength: 3,
+            batteryAvailable: true, batteryCharge: 80, batteryCharging: false
+        }, extra || {})
+    }
+
+    function argvJoined(list) {
+        return list.map(a => a.join(" "))
+    }
+
+    function init() {
+        PhoneConnect.installed = true
+        PhoneConnect.backend = "kdeconnect"
+        PhoneConnect.devices = [phone()]
+        PhoneDeps.scrcpy = false
+        PhoneDeps.adb = false
+        PhoneDeps.droidcamCli = false
+        PhoneDeps.v4l2Ctl = false
+        PhoneDeps.pactl = false
+        PhoneDeps.mpv = false
+        PhoneDeps.ffplay = false
+        PhoneDeps.vlc = false
+        PhoneDeps.v4l2loopbackLoaded = false
+        PhoneDeps.v4l2loopbackInstalled = false
+        PhoneDeps.scrcpyMajor = 0
+        PhoneDeps.adbDevice = false
+        PhoneDeps.adbDeviceRefreshes = 0
+        PhoneDeps.avahiBrowse = false
+        PhoneDeps.scrcpyRunError = ""
+        PhoneDeps.adbRunError = ""
+        PhoneDeps.droidcamCliRunError = ""
+        PhoneScrcpy.reset()
+        PhoneScrcpy.available = true
+        PhoneScrcpy.appModeSupported = true
+        PhoneCamera.reset()
+        PhoneCamera.available = true
+        PhoneMic.reset()
+        PhoneMic.available = true
+        PhoneMic.preferredBackend = "scrcpy"
+        Config.options.phone.scrcpy.appMode.favoritePackages = []
+        Config.options.phone.scrcpy.useWireless = false
+        Config.options.phone.scrcpy.autoWirelessIp = true
+        Config.options.phone.scrcpy.wirelessIp = ""
+        Config.options.phone.webcam.connection = "wifi"
+        Config.options.phone.webcam.wifiIp = ""
+        Config.options.phone.webcam.mirrorHorizontally = false
+        Config.options.phone.webcam.rotateDegrees = 0
+        Config.options.phone.microphone.connection = "wifi"
+        Config.options.phone.microphone.wifiIp = ""
+        Config.options.phone.microphone.micGain = 100
+        Config.options.phone.microphone.setAsDefault = false
+        Persistent.states.phone.scrcpy.recentPackages = []
+        Persistent.states.phone.mic.originalDefaultSink = ""
+    }
+
+    // ================================================================
+    // PhoneDeps
+    // ================================================================
+
+    function test_deps_parses_the_scrcpy_version_line() {
+        const v = PhoneDeps.parseScrcpyVersion("scrcpy 4.1 <https://github.com/Genymobile/scrcpy>")
+        compare(v.major, 4)
+        compare(v.minor, 1)
+        compare(v.version, "4.1")
+        compare(PhoneDeps.parseScrcpyVersion("scrcpy v2.7.1").version, "2.7.1")
+        compare(PhoneDeps.parseScrcpyVersion("Dependencies (compiled / linked):"), null)
+        compare(PhoneDeps.parseScrcpyVersion(""), null)
+    }
+
+    function test_deps_app_mode_needs_scrcpy_four() {
+        PhoneDeps.scrcpy = true
+        PhoneDeps.scrcpyMajor = 3
+        verify(!PhoneDeps.appModeSupported)
+        PhoneDeps.scrcpyMajor = 4
+        verify(PhoneDeps.appModeSupported)
+        PhoneDeps.scrcpy = false
+        verify(!PhoneDeps.appModeSupported)
+    }
+
+    function test_deps_reads_the_distro_off_the_marker_files() {
+        compare(PhoneDeps.parseDistro("/etc/arch-release\n"), "arch")
+        compare(PhoneDeps.parseDistro("/etc/fedora-release\n"), "fedora")
+        compare(PhoneDeps.parseDistro("/etc/debian_version\n"), "debian")
+        compare(PhoneDeps.parseDistro(""), "unknown")
+        compare(PhoneDeps.parseDistro("/etc/os-release\n"), "unknown")
+    }
+
+    function test_deps_counts_droidcams_own_loopback_module_as_loaded() {
+        compare(PhoneDeps.parseLsmod("Module                  Size  Used by\nsnd_aloop              45056  1\nv4l2loopback_dc        45056  0\n"), true)
+        compare(PhoneDeps.parseLsmod("v4l2loopback           53248  0\n"), true)
+        compare(PhoneDeps.parseLsmod("snd_aloop              45056  1\nvideodev              421888  1\n"), false)
+        compare(PhoneDeps.parseLsmod(""), false)
+    }
+
+    function test_deps_reads_adb_devices_and_counts_only_a_device_in_the_device_state() {
+        compare(PhoneDeps.parseAdbDevices("List of devices attached\nR5CT30ABCDE\tdevice\n\n"), true)
+        compare(PhoneDeps.parseAdbDevices("List of devices attached\n192.168.1.50:5555\tdevice\n"), true)
+        // An empty list is the machine this was found on: the phone is paired
+        // over KDE Connect and adb has never seen it.
+        compare(PhoneDeps.parseAdbDevices("List of devices attached\n\n"), false)
+        compare(PhoneDeps.parseAdbDevices(""), false)
+        compare(PhoneDeps.parseAdbDevices(undefined), false)
+        // A phone that has not answered the RSA prompt, and a transport that
+        // has dropped, are both listed - and both are a launch that fails a
+        // second later, so neither counts.
+        compare(PhoneDeps.parseAdbDevices("List of devices attached\nR5CT30ABCDE\tunauthorized\n"), false)
+        compare(PhoneDeps.parseAdbDevices("List of devices attached\n192.168.1.50:5555\toffline\n"), false)
+        // One usable transport among several unusable ones still counts.
+        compare(PhoneDeps.parseAdbDevices(
+            "List of devices attached\n192.168.1.50:5555\toffline\nR5CT30ABCDE\tdevice\n"), true)
+    }
+
+    function test_deps_refuses_to_re_ask_adb_while_adb_is_not_installed() {
+        // A Process whose binary is not on PATH never emits `exited`, so a
+        // refresh there would move the pending count and leave the flag alone.
+        PhoneDeps.adb = false
+        PhoneDeps.refreshAdbDevices()
+        compare(PhoneDeps.adbDeviceRefreshes, 0)
+        PhoneDeps.adb = true
+        PhoneDeps.refreshAdbDevices()
+        compare(PhoneDeps.adbDeviceRefreshes, 1)
+    }
+
+    function test_deps_dependency_table_carries_the_forks_commands() {
+        const scrcpy = PhoneDeps.dependency("scrcpy")
+        compare(scrcpy.key, "scrcpy")
+        compare(scrcpy.commands.arch, "sudo pacman -S scrcpy")
+        compare(scrcpy.commands.fedora, "sudo dnf install scrcpy")
+        compare(scrcpy.commands.debian, "sudo apt install scrcpy")
+        compare(PhoneDeps.dependency("android-tools").commands.debian, "sudo apt install android-tools-adb")
+        compare(PhoneDeps.dependency("droidcam-cli").commands.arch, "yay -S droidcam")
+        verify(PhoneDeps.dependency("v4l2loopback").commands.fedora.startsWith("sudo dnf install akmod-v4l2loopback"))
+        compare(PhoneDeps.dependency("pactl").commands.arch, "sudo pacman -S pulseaudio-utils")
+        verify(PhoneDeps.dependency("audio-backend").commands.arch.indexOf("yay -S droidcam") > 0)
+        verify(PhoneDeps.dependency("scrcpy").description.length > 0)
+        compare(PhoneDeps.dependency("python-dbus"), null)
+    }
+
+    function test_deps_missing_for_mirror_is_scrcpy_and_adb() {
+        compare(PhoneDeps.missingDeps("mirror", {}).map(d => d.key), ["scrcpy", "android-tools"])
+        compare(PhoneDeps.missingDeps("mirror", { scrcpy: true }).map(d => d.key), ["android-tools"])
+        compare(PhoneDeps.missingDeps("mirror", { scrcpy: true, adb: true }), [])
+    }
+
+    function test_deps_missing_for_webcam_accepts_an_installed_but_unloaded_module() {
+        compare(PhoneDeps.missingDeps("webcam", {}).map(d => d.key),
+                ["droidcam-cli", "v4l2loopback", "v4l-utils", "mpv"])
+        compare(PhoneDeps.missingDeps("webcam", { droidcamCli: true, v4l2loopbackInstalled: true, v4l2Ctl: true, mpv: true }), [])
+        compare(PhoneDeps.missingDeps("webcam", { droidcamCli: true, v4l2loopbackLoaded: true, v4l2Ctl: true }).map(d => d.key), ["mpv"])
+    }
+
+    function test_deps_missing_for_microphone_needs_pactl_and_one_backend() {
+        compare(PhoneDeps.missingDeps("microphone", {}).map(d => d.key), ["pactl", "audio-backend"])
+        compare(PhoneDeps.missingDeps("microphone", { pactl: true, droidcamCli: true }), [])
+        compare(PhoneDeps.missingDeps("microphone", { scrcpy: true }).map(d => d.key), ["pactl"])
+        compare(PhoneDeps.missingDeps("nonsense", {}), [])
+    }
+
+    function test_deps_missing_for_reads_the_live_flags() {
+        PhoneDeps.scrcpy = true
+        compare(PhoneDeps.missingFor("mirror").map(d => d.key), ["android-tools"])
+        PhoneDeps.adb = true
+        compare(PhoneDeps.missingFor("mirror"), [])
+    }
+
+    // ================================================================
+    // PhoneDeps - a tool that is there and cannot run
+    // ================================================================
+
+    // The loader writes its sentence to stderr and the process comes back
+    // 127. Both halves are required: `droidcam-cli` with no arguments prints
+    // a page of usage and exits 1, which is a tool that RAN.
+    function test_deps_a_loader_failure_is_exit_127_and_the_loaders_own_sentence() {
+        compare(PhoneDeps.parseLoaderFailure(127,
+            "droidcam-cli: error while loading shared libraries: libswscale.so.9: "
+            + "cannot open shared object file: No such file or directory\n"),
+            "libswscale.so.9")
+        // A tool that ran and failed is not a tool that cannot start.
+        compare(PhoneDeps.parseLoaderFailure(1,
+            "droidcam-cli: error while loading shared libraries: libswscale.so.9: x"), "")
+        compare(PhoneDeps.parseLoaderFailure(1, "Usage:\n droidcam-cli [options] -l <port>\n"), "")
+        // 127 alone is not it either - the phrase is what names the library,
+        // and without one there is nothing to tell the user.
+        compare(PhoneDeps.parseLoaderFailure(127, "something else entirely"), "")
+        compare(PhoneDeps.parseLoaderFailure(0, ""), "")
+        compare(PhoneDeps.parseLoaderFailure(127, undefined), "")
+    }
+
+    // The three states, at the level the cards read: absent, present and
+    // working, present and unable to run. The middle one is the only one that
+    // used to exist.
+    function test_deps_a_broken_tool_is_missing_and_says_what_it_actually_is() {
+        const absent = PhoneDeps.missingDeps("webcam",
+            { v4l2loopbackLoaded: true, v4l2Ctl: true, mpv: true })
+        compare(absent.map(d => d.key), ["droidcam-cli"])
+        compare(absent[0].broken, undefined)
+        verify(absent[0].description.indexOf("Connects to the DroidCam app") === 0)
+
+        const working = PhoneDeps.missingDeps("webcam",
+            { droidcamCli: true, v4l2loopbackLoaded: true, v4l2Ctl: true, mpv: true })
+        compare(working, [])
+
+        // The reported case: on PATH, linked against ffmpeg 8, on a system
+        // that ships libswscale.so.10.
+        const broken = PhoneDeps.missingDeps("webcam",
+            { droidcamCli: false, droidcamCliRunError: "libswscale.so.9",
+              v4l2loopbackLoaded: true, v4l2Ctl: true, mpv: true })
+        compare(broken.map(d => d.key), ["droidcam-cli"])
+        compare(broken[0].broken, true)
+        compare(broken[0].missingLibrary, "libswscale.so.9")
+        verify(broken[0].description.indexOf("libswscale.so.9") > 0)
+        // ...and it must not be the "is the DroidCam app open on your phone"
+        // family of message, nor an instruction to install what is installed.
+        verify(broken[0].description.indexOf("phone") < 0)
+        verify(broken[0].description.indexOf("rebuilding") > 0)
+        // The commands stay, because reinstalling IS the repair.
+        compare(broken[0].commands.arch, "yay -S droidcam")
+    }
+
+    function test_deps_a_broken_adb_reaches_the_mirrors_rows_too() {
+        const rows = PhoneDeps.missingDeps("mirror",
+            { scrcpy: true, adb: false, adbRunError: "libc++.so.1" })
+        compare(rows.map(d => d.key), ["android-tools"])
+        compare(rows[0].broken, true)
+        compare(rows[0].missingLibrary, "libc++.so.1")
+        // And the audio backend row names whichever of the two is broken.
+        const audio = PhoneDeps.missingDeps("microphone",
+            { pactl: true, scrcpyRunError: "libavutil.so.58" })
+        compare(audio.map(d => d.key), ["audio-backend"])
+        compare(audio[0].missingLibrary, "libavutil.so.58")
+    }
+
+    // ================================================================
+    // PhoneDeps - wireless debugging
+    // ================================================================
+
+    // Constant argv, always: the address and the code are the user's own
+    // typing and never reach a shell. `adb pair HOST:PORT CODE` takes the
+    // code as an argument - measured against platform-tools 37.0.1, where
+    // omitting it makes adb prompt on stdin instead.
+    function test_deps_the_pair_and_connect_argv_are_constant() {
+        compare(PhoneDeps.adbPairArgv("192.168.1.42:37129", "123456"),
+                ["adb", "pair", "192.168.1.42:37129", "123456"])
+        compare(PhoneDeps.adbPairArgv("  192.168.1.42:37129  ", " 123456 "),
+                ["adb", "pair", "192.168.1.42:37129", "123456"])
+        // Whatever the user types stays ONE element - there is nothing here
+        // for a shell metacharacter to mean.
+        compare(PhoneDeps.adbPairArgv("1.2.3.4:1; rm -rf ~", "1 2"),
+                ["adb", "pair", "1.2.3.4:1; rm -rf ~", "1 2"])
+        compare(PhoneDeps.adbConnectArgv("192.168.1.42:41235"),
+                ["adb", "connect", "192.168.1.42:41235"])
+        compare(PhoneDeps.avahiBrowseArgv("_adb-tls-pairing._tcp"),
+                ["avahi-browse", "-rpt", "_adb-tls-pairing._tcp"])
+    }
+
+    function test_deps_a_pairing_code_is_six_digits_and_an_address_carries_a_port() {
+        compare(PhoneDeps.normalizePairingCode("123 456"), "123456")
+        compare(PhoneDeps.normalizePairingCode("12-34-56"), "123456")
+        compare(PhoneDeps.normalizePairingCode("1234567"), "123456")
+        compare(PhoneDeps.normalizePairingCode(""), "")
+        compare(PhoneDeps.normalizePairingCode(undefined), "")
+
+        compare(PhoneDeps.splitAddress("192.168.1.42:37129"),
+                { host: "192.168.1.42", port: "37129" })
+        compare(PhoneDeps.splitAddress("phone.local"), { host: "phone.local", port: "" })
+        // A bracketed IPv6 literal keeps its own colons.
+        compare(PhoneDeps.splitAddress("[fe80::1]:5555"), { host: "[fe80::1]", port: "5555" })
+        compare(PhoneDeps.splitAddress("192.168.1.42:nope"), null)
+        compare(PhoneDeps.splitAddress("192.168.1.42:70000"), null)
+        compare(PhoneDeps.splitAddress(":5555"), null)
+        compare(PhoneDeps.splitAddress("   "), null)
+
+        // The pairing port is never guessable, so it is required; the connect
+        // one has a default adb supplies.
+        verify(PhoneDeps.pairInputsReady("192.168.1.42:37129", "123456"))
+        verify(!PhoneDeps.pairInputsReady("192.168.1.42", "123456"))
+        verify(!PhoneDeps.pairInputsReady("192.168.1.42:37129", "12345"))
+        verify(PhoneDeps.connectInputReady("192.168.1.42"))
+        verify(!PhoneDeps.connectInputReady(""))
+    }
+
+    // avahi-browse -p prints one semicolon-separated field list per record;
+    // a resolved one starts with `=` and carries the address in field 8 and
+    // the port in field 9.
+    function test_deps_the_mdns_records_are_validated_rather_than_trusted() {
+        const text =
+            "+;wlan0;IPv4;adb-R5CT30ABCDE-abcdef;_adb-tls-pairing._tcp;local\n"
+            + "=;wlan0;IPv4;adb-R5CT30ABCDE-abcdef;_adb-tls-pairing._tcp;local;"
+            + "phone.local;192.168.100.179;37129;\n"
+        const records = PhoneDeps.parseAvahiRecords(text)
+        compare(records.length, 1)
+        compare(records[0].host, "192.168.100.179")
+        compare(records[0].port, "37129")
+        compare(records[0].address, "192.168.100.179:37129")
+
+        // An unresolved record, a truncated one and one whose ninth field is
+        // not a port are all skipped rather than offered as an address.
+        compare(PhoneDeps.parseAvahiRecords("=;wlan0;IPv4;name;_x._tcp;local\n").length, 0)
+        compare(PhoneDeps.parseAvahiRecords(
+            "=;wlan0;IPv4;n;_x._tcp;local;h;192.168.1.5;txt-not-a-port;\n").length, 0)
+        compare(PhoneDeps.parseAvahiRecords(
+            "=;wlan0;IPv4;n;_x._tcp;local;h;;37129;\n").length, 0)
+        compare(PhoneDeps.parseAvahiRecords(""), [])
+        compare(PhoneDeps.parseAvahiRecords(undefined), [])
+    }
+
+    function test_deps_the_phone_kde_connect_reaches_wins_when_several_advertise() {
+        const records = [
+            { host: "192.168.100.5", port: "1", address: "192.168.100.5:1" },
+            { host: "192.168.100.179", port: "2", address: "192.168.100.179:2" }
+        ]
+        compare(PhoneDeps.pickAvahiRecord(records, "192.168.100.179").address, "192.168.100.179:2")
+        // No preference, or a preference nothing advertises: the first record
+        // is offered and the user can correct it, which is why the address is
+        // a field rather than a fact.
+        compare(PhoneDeps.pickAvahiRecord(records, "").address, "192.168.100.5:1")
+        compare(PhoneDeps.pickAvahiRecord(records, "10.0.0.1").address, "192.168.100.5:1")
+        compare(PhoneDeps.pickAvahiRecord([], "192.168.100.179"), null)
+        compare(PhoneDeps.pickAvahiRecord(null, ""), null)
+    }
+
+    // The two commands report differently and neither is read the other way.
+    function test_deps_a_pair_is_believed_only_on_adbs_own_success_sentence() {
+        const ok = PhoneDeps.parsePairResult(0,
+            "Successfully paired to 192.168.100.179:37129 [guid=adb-R5CT30ABCDE-abcdef]\n", "")
+        compare(ok.ok, true)
+        verify(ok.message.indexOf("Successfully paired") === 0)
+
+        // The measured failure: an address nothing answers on.
+        const refused = PhoneDeps.parsePairResult(1, "",
+            "error: protocol fault (couldn't read status message): Success\n")
+        compare(refused.ok, false)
+        verify(refused.message.indexOf("error: protocol fault") === 0)
+
+        // Exit 0 with no success sentence is not a pairing, and a success
+        // sentence with a non-zero exit is not one either.
+        compare(PhoneDeps.parsePairResult(0, "Failed to pair to 192.168.1.42:37129\n", "").ok, false)
+        compare(PhoneDeps.parsePairResult(1, "Successfully paired to x\n", "").ok, false)
+    }
+
+    // `adb connect` exits 0 whatever happens - measured, a refused connection
+    // and a host that does not resolve both come back 0 - so the exit code
+    // alone would report every failure as a success.
+    function test_deps_a_connect_is_read_off_what_adb_printed_not_off_its_exit_code() {
+        compare(PhoneDeps.parseConnectResult(0, "connected to 192.168.100.179:41235\n", "").ok, true)
+        compare(PhoneDeps.parseConnectResult(0, "already connected to 192.168.100.179:41235\n", "").ok, true)
+
+        const refused = PhoneDeps.parseConnectResult(0,
+            "failed to connect to '127.0.0.1:1': Connection refused\n", "")
+        compare(refused.ok, false)
+        verify(refused.message.indexOf("failed to connect") === 0)
+
+        const unresolved = PhoneDeps.parseConnectResult(0,
+            "failed to resolve host: 'no-such-host.invalid': Name or service not known\n", "")
+        compare(unresolved.ok, false)
+        verify(unresolved.message.indexOf("failed to resolve host") === 0)
+
+        // An exit that printed nothing at all still has to say something.
+        compare(PhoneDeps.parseConnectResult(0, "", "").ok, false)
+        compare(PhoneDeps.parseConnectResult(0, "", "").message, "")
+    }
+
+    // ================================================================
+    // PhoneScrcpy - the flag tables
+    // ================================================================
+
+    function test_scrcpy_mirror_args_from_the_defaults_is_the_bit_rate_alone() {
+        compare(PhoneScrcpy.mirrorArgs(Config.options.phone.scrcpy), ["--video-bit-rate=8M"])
+        compare(PhoneScrcpy.mirrorArgs({}), [])
+        compare(PhoneScrcpy.mirrorArgs(null), [])
+    }
+
+    function test_scrcpy_mirror_args_carries_every_flag_in_the_forks_order() {
+        const args = PhoneScrcpy.mirrorArgs({
+            stayAwake: true, turnScreenOff: true, noPowerOn: true, noAudio: true, showTouches: true,
+            fullscreen: true, alwaysOnTop: true, maxFps: 60, bitRate: "4M", maxSize: 1080, videoBuffer: 50
+        })
+        compare(args, ["--stay-awake", "--turn-screen-off", "--no-power-on", "--no-audio", "--show-touches",
+                       "--fullscreen", "--always-on-top", "--max-fps=60", "--video-bit-rate=4M",
+                       "--max-size=1080", "--video-buffer=50"])
+        compare(PhoneScrcpy.mirrorArgs({ maxFps: 0, bitRate: "  ", maxSize: -1, videoBuffer: 0 }), [])
+    }
+
+    function test_scrcpy_app_mode_args_opens_a_virtual_display_when_flex_is_on() {
+        compare(PhoneScrcpy.appModeArgs("org.mozilla.firefox", Config.options.phone.scrcpy.appMode),
+                ["--start-app=org.mozilla.firefox", "--new-display=1280x960/160", "--flex-display", "--keep-active"])
+        compare(PhoneScrcpy.appModeArgs("com.a", { flexDisplay: false }), ["--start-app=com.a"])
+        compare(PhoneScrcpy.appModeArgs("com.a", { flexDisplay: true, displayWidth: 1920, displayHeight: 1080, density: 240, keepActive: false, systemDecorations: false }),
+                ["--start-app=com.a", "--new-display=1920x1080/240", "--flex-display", "--no-vd-system-decorations"])
+        compare(PhoneScrcpy.appModeArgs("com.a", { flexDisplay: true, displayWidth: 0 }),
+                ["--start-app=com.a", "--new-display=1280x960/160", "--flex-display"])
+    }
+
+    function test_scrcpy_target_args_names_a_wireless_phone_only_when_asked() {
+        compare(PhoneScrcpy.targetArgs({ useWireless: false }, phone()), [])
+        compare(PhoneScrcpy.targetArgs({ useWireless: true, autoWirelessIp: true, wirelessPort: "5555" }, phone()),
+                ["-s", "192.168.1.50:5555"])
+        compare(PhoneScrcpy.targetArgs({ useWireless: true, autoWirelessIp: true, wirelessPort: "" }, phone({ reachableAddresses: ["", " 10.0.0.9 "] })),
+                ["-s", "10.0.0.9:5555"])
+        compare(PhoneScrcpy.targetArgs({ useWireless: true, autoWirelessIp: false, wirelessIp: "10.0.0.3", wirelessPort: "40001" }, phone()),
+                ["-s", "10.0.0.3:40001"])
+        compare(PhoneScrcpy.targetArgs({ useWireless: true, autoWirelessIp: false, wirelessIp: "10.0.0.3:41234" }, phone()),
+                ["-s", "10.0.0.3:41234"])
+        compare(PhoneScrcpy.targetArgs({ useWireless: true, autoWirelessIp: true }, phone({ reachableAddresses: [] })), [])
+        compare(PhoneScrcpy.targetArgs({ useWireless: true, autoWirelessIp: true }, null), [])
+    }
+
+    function test_scrcpy_recents_are_mru_and_capped() {
+        compare(PhoneScrcpy.pushRecent([], "a", 3), ["a"])
+        compare(PhoneScrcpy.pushRecent(["a", "b"], "b", 3), ["b", "a"])
+        compare(PhoneScrcpy.pushRecent(["a", "b", "c"], "d", 3), ["d", "a", "b"])
+        compare(PhoneScrcpy.toggleInList(["a"], "b"), ["a", "b"])
+        compare(PhoneScrcpy.toggleInList(["a", "b"], "a"), ["b"])
+    }
+
+    function test_scrcpy_backoff_doubles_from_one_second_to_a_thirty_second_cap() {
+        compare(PhoneScrcpy.backoffDelay(1), 1000)
+        compare(PhoneScrcpy.backoffDelay(2), 2000)
+        compare(PhoneScrcpy.backoffDelay(5), 16000)
+        compare(PhoneScrcpy.backoffDelay(6), 30000)
+        compare(PhoneScrcpy.backoffDelay(40), 30000)
+    }
+
+    // ================================================================
+    // PhoneScrcpy - the event ladder
+    // ================================================================
+
+    function test_scrcpy_a_spawned_mirror_is_still_launching_until_it_settles() {
+        // `started` is the supervisor answering that it SPAWNED scrcpy. It
+        // emits that the instant Popen returns and cannot know whether a
+        // window appeared, so the spawn alone must never read as a running
+        // mirror - that is what put "Mirror is running" and a filled check on
+        // a card whose phone adb has never seen.
+        PhoneScrcpy.mirrorLaunching = true
+        PhoneScrcpy.handleLine('{"event":"started","id":"mirror","pid":4242,"title":"imi-phone-mirror-mirror"}')
+        verify(!PhoneScrcpy.mirrorRunning)
+        verify(PhoneScrcpy.mirrorLaunching)
+        compare(PhoneScrcpy.mirrorSettleArmed, 1)
+        compare(PhoneScrcpy.sessionCount, 1)
+        compare(PhoneScrcpy.sessions.get(0).title, "imi-phone-mirror-mirror")
+        compare(PhoneScrcpy.sessions.get(0).pid, 4242)
+        compare(PhoneScrcpy.sessions.get(0).package, "")
+        PhoneScrcpy.handleLine('{"event":"started","id":"app:org.mozilla.firefox","pid":4300,"title":"imi-phone-app-app_org.mozilla.firefox"}')
+        compare(PhoneScrcpy.sessionCount, 2)
+        compare(PhoneScrcpy.sessions.get(1).package, "org.mozilla.firefox")
+        verify(PhoneScrcpy.isAppRunning("org.mozilla.firefox"))
+        // An app session's spawn is not the mirror's and arms nothing.
+        compare(PhoneScrcpy.mirrorSettleArmed, 1)
+        // Surviving the settle is the evidence there is that it opened.
+        PhoneScrcpy.fireMirrorSettle()
+        verify(PhoneScrcpy.mirrorRunning)
+        verify(!PhoneScrcpy.mirrorLaunching)
+        // A repeat `started` (alreadyRunning) updates the row in place and
+        // needs no settle: the supervisor is answering about a child it has
+        // been watching.
+        PhoneScrcpy.handleLine('{"event":"started","id":"mirror","pid":4242,"title":"imi-phone-mirror-mirror","alreadyRunning":true}')
+        compare(PhoneScrcpy.sessionCount, 2)
+        verify(PhoneScrcpy.mirrorRunning)
+        compare(PhoneScrcpy.mirrorSettleArmed, 1)
+        PhoneScrcpy.handleLine('{"event":"exited","id":"mirror","code":0,"error":""}')
+        verify(!PhoneScrcpy.mirrorRunning)
+        compare(PhoneScrcpy.sessionCount, 1)
+        compare(PhoneScrcpy.lastError, "")
+        // A mirror that was RUNNING and closed cleanly is not a failure.
+        compare(PhoneScrcpy.mirrorError, "")
+        PhoneScrcpy.handleLine('{"event":"exited","id":"app:org.mozilla.firefox","code":1,"error":"ERROR: Could not find ADB device"}')
+        compare(PhoneScrcpy.sessionCount, 0)
+        compare(PhoneScrcpy.lastError, "ERROR: Could not find ADB device")
+        // ...and an APP's failure is not the mirror's, which is the whole
+        // reason mirrorError is a second string.
+        compare(PhoneScrcpy.mirrorError, "")
+        compare(PhoneScrcpy.feedbackLog.length, 1)
+        compare(PhoneScrcpy.feedbackLog[0].ok, false)
+    }
+
+    function test_scrcpy_a_launch_that_exits_before_it_settles_is_a_failure() {
+        // The recorded defect end to end: the supervisor spawns scrcpy, adb
+        // has no device, scrcpy exits about a second later. The card must
+        // never have read `running`, and what it says afterwards is the
+        // error rather than the line it had before the click.
+        PhoneScrcpy.available = true
+        PhoneScrcpy.launchMirror()
+        verify(PhoneScrcpy.mirrorLaunching)
+        compare(PhoneScrcpy.mirrorError, "")
+        PhoneScrcpy.handleLine('{"event":"started","id":"mirror","pid":4242,"title":"imi-phone-mirror-mirror"}')
+        verify(!PhoneScrcpy.mirrorRunning)
+        verify(PhoneScrcpy.mirrorSettlePending)
+        PhoneScrcpy.handleLine('{"event":"exited","id":"mirror","code":1,"error":"ERROR: Could not find any ADB device"}')
+        verify(!PhoneScrcpy.mirrorRunning)
+        verify(!PhoneScrcpy.mirrorLaunching)
+        verify(!PhoneScrcpy.mirrorSettlePending)
+        compare(PhoneScrcpy.mirrorError, "ERROR: Could not find any ADB device")
+        compare(PhoneScrcpy.sessionCount, 0)
+        // And the settle firing late must not resurrect it: the row is gone,
+        // which is the one thing mirrorSettled() asks about.
+        PhoneScrcpy.mirrorSettled()
+        verify(!PhoneScrcpy.mirrorRunning)
+    }
+
+    function test_scrcpy_an_exit_with_no_stderr_line_still_reports_the_failure() {
+        // scrcpy can die without printing anything the supervisor kept. A
+        // launch that never settled still produced nothing, so the card gets
+        // a sentence rather than an empty string it would draw as silence.
+        PhoneScrcpy.available = true
+        PhoneScrcpy.launchMirror()
+        PhoneScrcpy.handleLine('{"event":"started","id":"mirror","pid":4242,"title":"imi-phone-mirror-mirror"}')
+        PhoneScrcpy.handleLine('{"event":"exited","id":"mirror","code":1,"error":""}')
+        compare(PhoneScrcpy.mirrorError, "scrcpy exited before the mirror window opened")
+        compare(PhoneScrcpy.lastError, "")
+    }
+
+    function test_scrcpy_an_error_event_ends_the_launch_and_names_the_cause() {
+        PhoneScrcpy.mirrorLaunching = true
+        PhoneScrcpy.handleLine('{"event":"error","id":"mirror","message":"Failed to launch scrcpy: [Errno 2]"}')
+        verify(!PhoneScrcpy.mirrorLaunching)
+        verify(!PhoneScrcpy.mirrorRunning)
+        compare(PhoneScrcpy.lastError, "Failed to launch scrcpy: [Errno 2]")
+        compare(PhoneScrcpy.mirrorError, "Failed to launch scrcpy: [Errno 2]")
+    }
+
+    function test_scrcpy_a_new_launch_clears_the_mirrors_own_error() {
+        PhoneScrcpy.available = true
+        PhoneScrcpy.mirrorError = "ERROR: Could not find any ADB device"
+        PhoneScrcpy.launchMirror()
+        compare(PhoneScrcpy.mirrorError, "")
+        verify(PhoneScrcpy.mirrorLaunching)
+    }
+
+    function test_scrcpy_a_cached_app_list_shows_but_keeps_loading_until_the_live_one() {
+        PhoneScrcpy.appsLoading = true
+        PhoneScrcpy.handleLine('{"event":"apps_list","deviceId":"dev_1","apps":[{"package":"com.a","name":"A","system":false}],"cached":true}')
+        compare(PhoneScrcpy.apps.length, 1)
+        verify(PhoneScrcpy.appsLoading)
+        PhoneScrcpy.handleLine('{"event":"apps_list","deviceId":"dev_1","apps":[{"package":"com.a","name":"A","system":false},{"package":"com.b","name":"B","system":true}]}')
+        compare(PhoneScrcpy.apps.length, 2)
+        verify(!PhoneScrcpy.appsLoading)
+        compare(PhoneScrcpy.appsError, "")
+    }
+
+    function test_scrcpy_an_apps_error_keeps_the_list_on_screen() {
+        PhoneScrcpy.apps = [{ package: "com.a", name: "A", system: false }]
+        PhoneScrcpy.appsLoading = true
+        PhoneScrcpy.handleLine('{"event":"apps_error","message":"Phone not reachable over ADB"}')
+        verify(!PhoneScrcpy.appsLoading)
+        compare(PhoneScrcpy.appsError, "Phone not reachable over ADB")
+        compare(PhoneScrcpy.apps.length, 1)
+    }
+
+    function test_scrcpy_ignores_lines_that_are_not_events() {
+        PhoneScrcpy.handleLine("")
+        PhoneScrcpy.handleLine("not json")
+        PhoneScrcpy.handleLine('{"cmd":"launch"}')
+        PhoneScrcpy.handleLine('[1,2]')
+        compare(PhoneScrcpy.sessionCount, 0)
+        compare(PhoneScrcpy.lastError, "")
+    }
+
+    // ================================================================
+    // PhoneScrcpy - the commands
+    // ================================================================
+
+    function test_scrcpy_launch_mirror_sends_the_flags_and_the_target() {
+        Config.options.phone.scrcpy.useWireless = true
+        PhoneScrcpy.launchMirror()
+        verify(PhoneScrcpy.mirrorLaunching)
+        compare(PhoneScrcpy.sentMessages.length, 1)
+        const msg = PhoneScrcpy.sentMessages[0]
+        compare(msg.cmd, "launch")
+        compare(msg.id, "mirror")
+        compare(msg.type, "mirror")
+        compare(msg.target_args, ["-s", "192.168.1.50:5555"])
+        compare(msg.extra_args, ["--video-bit-rate=8M"])
+    }
+
+    function test_scrcpy_launch_mirror_while_running_focuses_instead() {
+        // Running, not merely spawned: the settle is what turns the one into
+        // the other, and a click before it lands is answered by the launch
+        // that is already in flight rather than by a second one.
+        PhoneScrcpy.handleLine('{"event":"started","id":"mirror","pid":1,"title":"t"}')
+        PhoneScrcpy.launchMirror()
+        compare(PhoneScrcpy.sentMessages, [])
+        PhoneScrcpy.fireMirrorSettle()
+        verify(PhoneScrcpy.mirrorRunning)
+        PhoneScrcpy.launchMirror()
+        compare(PhoneScrcpy.sentMessages, [{ cmd: "focus", id: "mirror" }])
+        PhoneScrcpy.stopMirror()
+        compare(PhoneScrcpy.sentMessages[1], { cmd: "stop", id: "mirror" })
+    }
+
+    function test_scrcpy_launch_mirror_without_scrcpy_is_refused() {
+        PhoneScrcpy.available = false
+        PhoneScrcpy.launchMirror()
+        verify(!PhoneScrcpy.mirrorLaunching)
+        compare(PhoneScrcpy.sentMessages, [])
+        compare(PhoneScrcpy.lastError, "scrcpy is not installed")
+    }
+
+    function test_scrcpy_refresh_apps_is_gated_on_app_mode_and_keyed_on_the_device() {
+        PhoneScrcpy.appModeSupported = false
+        PhoneScrcpy.refreshApps()
+        compare(PhoneScrcpy.sentMessages, [])
+        PhoneScrcpy.appModeSupported = true
+        PhoneScrcpy.refreshApps()
+        verify(PhoneScrcpy.appsLoading)
+        compare(PhoneScrcpy.sentMessages, [{ cmd: "list_apps", target_args: [], deviceId: "dev_1" }])
+        PhoneConnect.devices = []
+        compare(PhoneScrcpy.deviceId(), "default")
+    }
+
+    function test_scrcpy_launch_app_sends_app_mode_and_records_the_recent() {
+        PhoneScrcpy.launchApp("org.mozilla.firefox")
+        compare(PhoneScrcpy.sentMessages.length, 1)
+        const msg = PhoneScrcpy.sentMessages[0]
+        compare(msg.cmd, "launch")
+        compare(msg.id, "app:org.mozilla.firefox")
+        compare(msg.type, "app")
+        compare(msg.extra_args[0], "--start-app=org.mozilla.firefox")
+        compare(msg.extra_args[1], "--new-display=1280x960/160")
+        compare(Persistent.states.phone.scrcpy.recentPackages.length, 1)
+        compare(String(Persistent.states.phone.scrcpy.recentPackages[0]), "org.mozilla.firefox")
+        compare(String(PhoneScrcpy.recents[0]), "org.mozilla.firefox")
+        // Launching a running app focuses it.
+        PhoneScrcpy.handleLine('{"event":"started","id":"app:org.mozilla.firefox","pid":9,"title":"t"}')
+        PhoneScrcpy.launchApp("org.mozilla.firefox")
+        compare(PhoneScrcpy.sentMessages[1], { cmd: "focus", id: "app:org.mozilla.firefox" })
+        PhoneScrcpy.stopApp("org.mozilla.firefox")
+        compare(PhoneScrcpy.sentMessages[2], { cmd: "stop", id: "app:org.mozilla.firefox" })
+        PhoneScrcpy.stopAllApps()
+        compare(PhoneScrcpy.sentMessages[3], { cmd: "stop_all" })
+        PhoneScrcpy.launchApp("")
+        compare(PhoneScrcpy.sentMessages.length, 4)
+    }
+
+    function test_scrcpy_launch_app_needs_scrcpy_four() {
+        PhoneScrcpy.appModeSupported = false
+        PhoneScrcpy.launchApp("com.a")
+        compare(PhoneScrcpy.sentMessages, [])
+        compare(PhoneScrcpy.lastError, "scrcpy 4.0+ is required for App Mode")
+        compare(PhoneScrcpy.feedbackLog.length, 1)
+    }
+
+    function test_scrcpy_favorites_live_in_config() {
+        verify(!PhoneScrcpy.isFavorite("com.a"))
+        PhoneScrcpy.toggleFavorite("com.a")
+        verify(PhoneScrcpy.isFavorite("com.a"))
+        compare(Config.options.phone.scrcpy.appMode.favoritePackages.length, 1)
+        PhoneScrcpy.toggleFavorite("com.a")
+        verify(!PhoneScrcpy.isFavorite("com.a"))
+        compare(Config.options.phone.scrcpy.appMode.favoritePackages.length, 0)
+    }
+
+    function test_scrcpy_the_supervisor_is_wanted_while_anything_is_live_or_pending() {
+        verify(!PhoneScrcpy.managerWanted())
+        PhoneScrcpy.mirrorLaunching = true
+        verify(PhoneScrcpy.managerWanted())
+        PhoneScrcpy.mirrorLaunching = false
+        PhoneScrcpy.appsLoading = true
+        verify(PhoneScrcpy.managerWanted())
+        PhoneScrcpy.appsLoading = false
+        PhoneScrcpy.pendingMessages = [{ cmd: "focus", id: "mirror" }]
+        verify(PhoneScrcpy.managerWanted())
+        PhoneScrcpy.pendingMessages = []
+        PhoneScrcpy.handleLine('{"event":"started","id":"mirror","pid":1,"title":"t"}')
+        verify(PhoneScrcpy.managerWanted())
+        PhoneScrcpy.handleLine('{"event":"exited","id":"mirror","code":0,"error":""}')
+        verify(!PhoneScrcpy.managerWanted())
+    }
+
+    // ================================================================
+    // PhoneCamera
+    // ================================================================
+
+    function test_camera_state_ladder() {
+        compare(PhoneCamera.stateFor(false, true, true, true), "unavailable")
+        compare(PhoneCamera.stateFor(true, false, false, false), "offline")
+        compare(PhoneCamera.stateFor(true, true, false, false), "ready")
+        compare(PhoneCamera.stateFor(true, true, true, false), "connecting")
+        compare(PhoneCamera.stateFor(true, true, false, true), "active")
+        compare(PhoneCamera.stateFor(true, false, false, true), "active")
+        compare(PhoneCamera.state, "ready")
+        PhoneCamera.available = false
+        compare(PhoneCamera.state, "unavailable")
+        PhoneCamera.available = true
+        PhoneConnect.devices = [phone({ reachable: false })]
+        compare(PhoneCamera.state, "offline")
+    }
+
+    function test_camera_finds_the_droidcam_node_in_v4l2_ctl_output() {
+        // Captured on the development machine, DroidCam's own module.
+        compare(PhoneCamera.parseV4l2Devices("Droidcam (platform:v4l2loopback_dc-000):\n\t/dev/video0\n"), "/dev/video0")
+        const mixed = "Integrated Camera (usb-0000:00:14.0-8):\n\t/dev/video1\n\t/dev/video2\n\nDroidCam (platform:v4l2loopback-000):\n\t/dev/video10\n\t/dev/video11\n"
+        compare(PhoneCamera.parseV4l2Devices(mixed), "/dev/video10")
+        const loopbackOnly = "Integrated Camera (usb-0000:00:14.0-8):\n\t/dev/video1\n\nDummy video device (0x0000) (platform:v4l2loopback-000):\n\t/dev/video10\n"
+        compare(PhoneCamera.parseV4l2Devices(loopbackOnly), "/dev/video10")
+        compare(PhoneCamera.parseV4l2Devices("Integrated Camera (usb-0000:00:14.0-8):\n\t/dev/video1\n"), "")
+        compare(PhoneCamera.parseV4l2Devices(""), "")
+    }
+
+    function test_camera_droidcam_args_single_dash_size_and_flips() {
+        compare(PhoneCamera.droidcamArgs({ resolution: "1280x720" }, "usb", "", 4747),
+                ["droidcam-cli", "-nocontrols", "-size=1280x720", "adb", "4747"])
+        compare(PhoneCamera.droidcamArgs({ resolution: "640x480", mirrorHorizontally: true }, "wifi", "192.168.1.50", 4747),
+                ["droidcam-cli", "-nocontrols", "-size=640x480", "-hflip", "192.168.1.50", "4747"])
+        compare(PhoneCamera.droidcamArgs({ resolution: "", rotateDegrees: 180 }, "wifi", "10.0.0.2", 4748),
+                ["droidcam-cli", "-nocontrols", "-hflip", "-vflip", "10.0.0.2", "4748"])
+        compare(PhoneCamera.droidcamArgs({ mirrorHorizontally: true, rotateDegrees: 180 }, "usb", "", 4747),
+                ["droidcam-cli", "-nocontrols", "-hflip", "-vflip", "adb", "4747"])
+    }
+
+    function test_camera_connection_plan_is_usb_first() {
+        compare(PhoneCamera.connectionPlan({ connection: "usb" }, "", []), { mode: "usb", ip: "", port: 4747 })
+        compare(PhoneCamera.connectionPlan({ connection: "wifi", wifiIp: " 10.0.0.5 ", port: 4750 }, "device", ["1.2.3.4"]),
+                { mode: "wifi", ip: "10.0.0.5", port: 4750 })
+        compare(PhoneCamera.connectionPlan({ connection: "wifi" }, "device\n", ["1.2.3.4"]), { mode: "usb", ip: "", port: 4747 })
+        compare(PhoneCamera.connectionPlan({ connection: "wifi" }, "offline", ["", "1.2.3.4"]), { mode: "wifi", ip: "1.2.3.4", port: 4747 })
+        verify(PhoneCamera.connectionPlan({ connection: "wifi" }, "", []).error.length > 0)
+    }
+
+    function test_camera_preview_falls_back_from_mpv_to_ffplay_to_vlc() {
+        compare(PhoneCamera.previewCommand("/dev/video0", { mpv: true, ffplay: true, vlc: true }),
+                ["mpv", "--profile=low-latency", "--no-fullscreen", "--no-osc", "--title=imi webcam preview", "av://v4l2:/dev/video0"])
+        compare(PhoneCamera.previewCommand("/dev/video0", { ffplay: true, vlc: true })[0], "ffplay")
+        compare(PhoneCamera.previewCommand("/dev/video0", { vlc: true }), ["vlc", "--no-video-title-show", "--no-fullscreen", "v4l2:///dev/video0"])
+        compare(PhoneCamera.previewCommand("/dev/video0", {}), [])
+        compare(PhoneCamera.previewCommand("", { mpv: true }), [])
+    }
+
+    function test_camera_open_preview_starts_one_player_and_a_click_on_top_of_it_starts_none() {
+        PhoneDeps.mpv = true
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.openPreview()
+        compare(argvJoined(PhoneCamera.previewCommands),
+                ["mpv --profile=low-latency --no-fullscreen --no-osc --title=imi webcam preview av://v4l2:/dev/video0"])
+        verify(PhoneCamera.previewRunning)
+        // The page's button and the feature card's inline action both call
+        // this; a second window on the same node is two players fighting over
+        // one stream rather than a second preview.
+        PhoneCamera.openPreview()
+        compare(PhoneCamera.previewCommands.length, 1)
+    }
+
+    function test_camera_open_preview_without_a_player_reports_instead_of_starting_one() {
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.openPreview()
+        compare(PhoneCamera.previewCommands, [])
+        verify(!PhoneCamera.previewRunning)
+        verify(PhoneCamera.lastError.indexOf("mpv") >= 0)
+    }
+
+    function test_camera_the_stop_button_takes_the_preview_with_it() {
+        PhoneDeps.mpv = true
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.openPreview()
+        PhoneCamera.stop()
+        verify(!PhoneCamera.previewRunning)
+        compare(PhoneCamera.previewStops, 1)
+    }
+
+    function test_camera_a_session_that_dies_on_its_own_takes_the_preview_with_it() {
+        PhoneDeps.mpv = true
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.openPreview()
+        // The watchdog's own reply: the pidfile names a process that is gone.
+        PhoneCamera.responder = argv => ({ text: '{"session":"video","pid":"","alive":false}', code: 0 })
+        PhoneCamera.checkSession()
+        verify(!PhoneCamera.active)
+        verify(!PhoneCamera.previewRunning)
+        compare(PhoneCamera.previewStops, 1)
+    }
+
+    function test_camera_a_connect_that_never_arrives_leaves_no_player_behind() {
+        PhoneDeps.mpv = true
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.openPreview()
+        // fail() drops `active`, which is the only thing the preview watches,
+        // so the timeout path needs no closePreview() of its own.
+        PhoneCamera.fail("Could not connect")
+        verify(!PhoneCamera.previewRunning)
+        compare(PhoneCamera.previewStops, 1)
+    }
+
+    function test_camera_a_player_closed_by_hand_leaves_nothing_for_a_later_stop_to_kill() {
+        PhoneDeps.mpv = true
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.openPreview()
+        // What the service sees when the user closes the window: the handle
+        // reports the player gone. A pid recorded at launch would still be a
+        // number here, and the stop below would spend it on a stranger.
+        PhoneCamera.previewRunning = false
+        PhoneCamera.stop()
+        compare(PhoneCamera.previewStops, 0)
+        PhoneCamera.closePreview()
+        compare(PhoneCamera.previewStops, 0)
+    }
+
+    function test_camera_start_probes_usb_then_launches_detached() {
+        PhoneCamera.responder = argv => {
+            if (argv[0] === "adb") return { text: "device\n", code: 0 }
+            if (argv[2] === "launch") return { text: "31337\n", code: 0 }
+            return null
+        }
+        PhoneCamera.start()
+        verify(PhoneCamera.connecting)
+        compare(PhoneCamera.state, "connecting")
+        compare(argvJoined(PhoneCamera.ranCommands), [
+            "adb get-state",
+            "bash " + sessionScript + " launch video droidcam-cli -nocontrols -size=1280x720 adb 4747"
+        ])
+        compare(PhoneCamera.activeMode, "usb")
+        compare(PhoneCamera.sessionPid, 31337)
+        compare(PhoneCamera.connectTimersArmed, 1)
+        compare(Persistent.states.phone.camera.lastMode, "usb")
+        compare(Persistent.states.phone.camera.lastPort, 4747)
+    }
+
+    function test_camera_start_takes_a_configured_address_without_probing() {
+        Config.options.phone.webcam.wifiIp = "10.0.0.7"
+        Config.options.phone.webcam.mirrorHorizontally = true
+        PhoneCamera.responder = argv => ({ text: "1\n", code: 0 })
+        PhoneCamera.start()
+        compare(argvJoined(PhoneCamera.ranCommands), [
+            "bash " + sessionScript + " launch video droidcam-cli -nocontrols -size=1280x720 -hflip 10.0.0.7 4747"
+        ])
+        compare(PhoneCamera.activeIp, "10.0.0.7")
+        compare(Persistent.states.phone.camera.lastIp, "10.0.0.7")
+    }
+
+    function test_camera_start_falls_back_to_kde_connects_address() {
+        PhoneCamera.responder = argv => argv[0] === "adb" ? { text: "", code: 1 } : { text: "5\n", code: 0 }
+        PhoneCamera.start()
+        compare(PhoneCamera.activeMode, "wifi")
+        compare(PhoneCamera.activeIp, "192.168.1.50")
+    }
+
+    function test_camera_start_with_nothing_to_connect_to_fails_with_a_reason() {
+        PhoneConnect.devices = [phone({ reachableAddresses: [] })]
+        PhoneCamera.responder = argv => ({ text: "", code: 1 })
+        PhoneCamera.start()
+        verify(!PhoneCamera.connecting)
+        verify(PhoneCamera.lastError.indexOf("USB or Wi-Fi IP") >= 0)
+        compare(PhoneCamera.ranCommands.length, 1)
+    }
+
+    function test_camera_start_is_refused_without_a_reachable_phone() {
+        PhoneConnect.devices = [phone({ reachable: false })]
+        PhoneCamera.start()
+        verify(!PhoneCamera.connecting)
+        compare(PhoneCamera.ranCommands, [])
+        verify(PhoneCamera.lastError.length > 0)
+        PhoneCamera.available = false
+        PhoneConnect.devices = [phone()]
+        PhoneCamera.start()
+        compare(PhoneCamera.ranCommands, [])
+    }
+
+    function test_camera_a_live_status_makes_it_active_and_arms_the_watchdog() {
+        PhoneCamera.connecting = true
+        PhoneCamera.responder = argv => argv[2] === "status"
+            ? { text: '{"session":"video","pid":"31337","alive":true,"started":"1787811446","port":"4747","mode":"usb","ip":"adb","device":"/dev/video0","video_running":true,"audio_running":false}\n', code: 0 }
+            : null
+        PhoneCamera.checkSession()
+        verify(PhoneCamera.active)
+        verify(!PhoneCamera.connecting)
+        compare(PhoneCamera.state, "active")
+        compare(PhoneCamera.device, "/dev/video0")
+        compare(PhoneCamera.sessionPid, 31337)
+        compare(PhoneCamera.startedAt, 1787811446)
+        compare(PhoneCamera.watchdogArmed, 1)
+        compare(argvJoined(PhoneCamera.ranCommands), ["bash " + sessionScript + " status video"])
+    }
+
+    function test_camera_a_dead_status_while_active_reports_the_loss() {
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.responder = argv => ({ text: '{"session":"video","pid":"","alive":false}', code: 0 })
+        PhoneCamera.checkSession()
+        verify(!PhoneCamera.active)
+        compare(PhoneCamera.device, "")
+        compare(PhoneCamera.lastError, "The webcam stream ended")
+    }
+
+    function test_camera_a_dead_status_past_the_deadline_fails_the_connect() {
+        PhoneCamera.connecting = true
+        PhoneCamera.responder = argv => ({ text: '{"alive":false}', code: 0 })
+        PhoneCamera.checkSession()
+        verify(PhoneCamera.connecting)
+        PhoneCamera.deadlinePassed = true
+        PhoneCamera.checkSession()
+        verify(!PhoneCamera.connecting)
+        verify(PhoneCamera.lastError.indexOf("9s") >= 0)
+    }
+
+    function test_camera_stop_goes_through_the_session_script() {
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.stop()
+        verify(!PhoneCamera.active)
+        verify(PhoneCamera.userStopped)
+        compare(PhoneCamera.device, "")
+        compare(argvJoined(PhoneCamera.ranCommands), ["bash " + sessionScript + " stop video"])
+        PhoneCamera.stop()
+        compare(PhoneCamera.ranCommands.length, 1)
+    }
+
+    function test_camera_mirror_writes_the_config_and_flips_the_live_device() {
+        PhoneDeps.v4l2Ctl = true
+        PhoneCamera.mirror(true)
+        compare(Config.options.phone.webcam.mirrorHorizontally, true)
+        compare(PhoneCamera.ranCommands, [])
+        PhoneCamera.active = true
+        PhoneCamera.device = "/dev/video0"
+        PhoneCamera.mirror(false)
+        compare(argvJoined(PhoneCamera.ranCommands), ["v4l2-ctl -d /dev/video0 --set-ctrl=horizontal_flip=0"])
+        PhoneCamera.flip()
+        compare(Config.options.phone.webcam.cameraFacing, "back")
+        PhoneCamera.flip()
+        compare(Config.options.phone.webcam.cameraFacing, "front")
+    }
+
+    function test_camera_parse_session_status_tolerates_the_scripts_strings() {
+        const s = PhoneCamera.parseSessionStatus('{"session":"video","pid":"12","alive":"true","started":"7","port":"4747","mode":"wifi","ip":"1.2.3.4","device":""}')
+        compare(s.alive, true)
+        compare(s.pid, 12)
+        compare(s.port, 4747)
+        compare(s.ip, "1.2.3.4")
+        compare(PhoneCamera.parseSessionStatus("not json"), null)
+        compare(PhoneCamera.parseSessionStatus(""), null)
+    }
+
+    // ================================================================
+    // PhoneMic
+    // ================================================================
+
+    function test_mic_argv_builders() {
+        compare(PhoneMic.scrcpyMicArgs(["-s", "ABC"]),
+                ["scrcpy", "--no-video", "--no-window", "--audio-source=mic", "--audio-buffer=50", "-s", "ABC"])
+        compare(PhoneMic.scrcpyMicArgs([]).length, 5)
+        compare(PhoneMic.droidcamAudioArgs("usb", "", 4748),
+                ["env", "PULSE_SINK=DroidCam-Mic", "droidcam-cli", "-a", "-nocontrols", "adb", "4748"])
+        compare(PhoneMic.droidcamAudioArgs("wifi", "10.0.0.2", 4748),
+                ["env", "PULSE_SINK=DroidCam-Mic", "droidcam-cli", "-a", "-nocontrols", "10.0.0.2", "4748"])
+        compare(PhoneMic.muteArgs("DroidCam-Mic.monitor", true), ["pactl", "set-source-mute", "DroidCam-Mic.monitor", "1"])
+        compare(PhoneMic.gainArgs("DroidCam-Mic.monitor", 250), ["pactl", "set-source-volume", "DroidCam-Mic.monitor", "200%"])
+        compare(PhoneMic.sessionFor("scrcpy"), "scrcpy-mic")
+        compare(PhoneMic.sessionFor("droidcam"), "audio")
+        compare(PhoneMic.connectionPlan({ connection: "wifi" }, "device", []), { mode: "usb", ip: "", port: 4748 })
+    }
+
+    function test_mic_stream_evidence_and_the_restore_plan() {
+        verify(PhoneMic.streamPresent("Sink Input #57\n\tapplication.name = \"scrcpy\"\n"))
+        verify(!PhoneMic.streamPresent("Sink Input #57\n\tapplication.name = \"Firefox\"\n"))
+        compare(PhoneMic.restorePlan("Arctis_Media", "alsa_output.x", false), "")
+        compare(PhoneMic.restorePlan("DroidCam-Mic", "alsa_output.x", true), "")
+        compare(PhoneMic.restorePlan("DroidCam-Mic\n", "alsa_output.x", false), "alsa_output.x")
+        compare(PhoneMic.restorePlan("DroidCam-Mic", "", false), "@DEFAULT_SINK@")
+        compare(PhoneMic.restorePlan("DroidCam-Mic", "DroidCam-Mic", false), "@DEFAULT_SINK@")
+        const status = PhoneMic.parseStatus('{"installed":true,"audio_source":"DroidCam-Mic.monitor","audio_has_sink_input":true,"audio_running":true}')
+        compare(status.audioRunning, true)
+        compare(status.audioHasSinkInput, true)
+        compare(PhoneMic.parseStatus("nope"), null)
+    }
+
+    function scrcpyMicResponder(sinkInputs) {
+        return argv => {
+            const line = argv.join(" ")
+            if (line === "bash " + setupScript) return { text: "DroidCam-Mic.monitor\n", code: 0 }
+            if (line === "pactl get-default-sink") return { text: "alsa_output.arctis\n", code: 0 }
+            if (argv[2] === "launch") return { text: "777\n", code: 0 }
+            if (line === "pactl list sink-inputs") return { text: sinkInputs || "", code: 0 }
+            if (line === "pactl get-default-source") return { text: "alsa_input.laptop\n", code: 0 }
+            return null
+        }
+    }
+
+    function test_mic_start_on_scrcpy_swaps_the_default_sink_and_launches_detached() {
+        PhoneMic.responder = scrcpyMicResponder("")
+        PhoneMic.start()
+        verify(PhoneMic.connecting)
+        compare(PhoneMic.state, "connecting")
+        compare(PhoneMic.backend, "scrcpy")
+        compare(PhoneMic.pulseSource, "DroidCam-Mic.monitor")
+        compare(argvJoined(PhoneMic.ranCommands), [
+            "pactl unload-module module-loopback",
+            "bash " + setupScript,
+            "pactl get-default-sink",
+            "pactl set-default-sink DroidCam-Mic",
+            "bash " + sessionScript + " launch scrcpy-mic scrcpy --no-video --no-window --audio-source=mic --audio-buffer=50"
+        ])
+        compare(PhoneMic.swappedSink, "alsa_output.arctis")
+        compare(Persistent.states.phone.mic.originalDefaultSink, "alsa_output.arctis")
+        compare(Persistent.states.phone.mic.lastBackend, "scrcpy")
+        compare(PhoneMic.sessionPid, 777)
+        compare(PhoneMic.swapRestoreArmed, 1)
+        compare(PhoneMic.verifyArmed, 1)
+    }
+
+    function test_mic_the_swap_is_undone_the_moment_the_stream_appears() {
+        PhoneMic.responder = scrcpyMicResponder("")
+        PhoneMic.start()
+        PhoneMic.ranCommands = []
+        PhoneMic.pollSwap()
+        compare(argvJoined(PhoneMic.ranCommands), ["pactl list sink-inputs"])
+        compare(PhoneMic.swappedSink, "alsa_output.arctis")
+        PhoneMic.responder = scrcpyMicResponder("Sink Input #57\n\tapplication.name = \"scrcpy\"\n")
+        PhoneMic.pollSwap()
+        compare(argvJoined(PhoneMic.ranCommands)[2], "pactl set-default-sink alsa_output.arctis")
+        compare(PhoneMic.swappedSink, "")
+        compare(Persistent.states.phone.mic.originalDefaultSink, "")
+        compare(PhoneMic.swapRestoreArmed, 0)
+        // Restoring twice is a no-op.
+        PhoneMic.restoreDefaultSink()
+        compare(PhoneMic.ranCommands.length, 3)
+    }
+
+    function test_mic_a_default_sink_that_is_already_the_null_sink_is_not_remembered() {
+        PhoneMic.responder = argv => {
+            const line = argv.join(" ")
+            if (line === "bash " + setupScript) return { text: "DroidCam-Mic.monitor\n", code: 0 }
+            if (line === "pactl get-default-sink") return { text: "DroidCam-Mic\n", code: 0 }
+            return { text: "1\n", code: 0 }
+        }
+        PhoneMic.start()
+        compare(PhoneMic.swappedSink, "")
+        compare(Persistent.states.phone.mic.originalDefaultSink, "")
+    }
+
+    function test_mic_verify_needs_the_process_and_the_stream() {
+        PhoneMic.responder = scrcpyMicResponder("")
+        PhoneMic.start()
+        PhoneMic.ranCommands = []
+        PhoneMic.responder = argv => ({ text: '{"audio_running":true,"audio_has_sink_input":false}', code: 0 })
+        PhoneMic.verify()
+        verify(PhoneMic.connecting)
+        compare(PhoneMic.verifyRetryArmed, 1)
+        compare(argvJoined(PhoneMic.ranCommands), ["bash " + statusScript])
+        PhoneMic.responder = argv => ({ text: '{"audio_running":true,"audio_has_sink_input":true}', code: 0 })
+        PhoneMic.verify()
+        verify(PhoneMic.active)
+        verify(!PhoneMic.connecting)
+        compare(PhoneMic.state, "active")
+        compare(PhoneMic.gain, 100)
+        verify(!PhoneMic.muted)
+        compare(PhoneMic.watchdogArmed, 1)
+        verify(PhoneMic.startedAt > 0)
+    }
+
+    function test_mic_verify_with_a_dead_process_fails_and_tears_down() {
+        PhoneMic.responder = scrcpyMicResponder("")
+        PhoneMic.start()
+        PhoneMic.ranCommands = []
+        PhoneMic.responder = argv => ({ text: '{"audio_running":false,"audio_has_sink_input":false}', code: 0 })
+        PhoneMic.verify()
+        verify(!PhoneMic.connecting)
+        verify(!PhoneMic.active)
+        verify(PhoneMic.lastError.indexOf("exited") >= 0)
+        const ran = argvJoined(PhoneMic.ranCommands)
+        compare(ran[0], "bash " + statusScript)
+        verify(ran.indexOf("pactl set-default-sink alsa_output.arctis") > 0)
+        verify(ran.indexOf("bash " + sessionScript + " stop audio") > 0)
+        verify(ran.indexOf("bash " + sessionScript + " stop scrcpy-mic") > 0)
+        verify(ran.indexOf("bash " + teardownScript) > 0)
+        compare(PhoneMic.swappedSink, "")
+    }
+
+    function test_mic_verify_past_the_deadline_with_no_stream_names_the_hijack() {
+        PhoneMic.responder = scrcpyMicResponder("")
+        PhoneMic.start()
+        PhoneMic.deadlinePassed = true
+        PhoneMic.responder = argv => ({ text: '{"audio_running":true,"audio_has_sink_input":false}', code: 0 })
+        PhoneMic.verify()
+        verify(!PhoneMic.connecting)
+        verify(PhoneMic.lastError.indexOf("another audio processor") >= 0)
+    }
+
+    function activeScrcpyMic() {
+        PhoneMic.responder = scrcpyMicResponder("")
+        PhoneMic.start()
+        PhoneMic.responder = argv => ({ text: '{"audio_running":true,"audio_has_sink_input":true}', code: 0 })
+        PhoneMic.verify()
+        PhoneMic.responder = scrcpyMicResponder("")
+        PhoneMic.ranCommands = []
+    }
+
+    function test_mic_mute_and_gain_reach_the_monitor_source() {
+        activeScrcpyMic()
+        PhoneMic.toggleMute()
+        verify(PhoneMic.muted)
+        PhoneMic.setGain(150)
+        compare(PhoneMic.gain, 150)
+        compare(Config.options.phone.microphone.micGain, 150)
+        compare(argvJoined(PhoneMic.ranCommands), [
+            "pactl set-source-mute DroidCam-Mic.monitor 1",
+            "pactl set-source-volume DroidCam-Mic.monitor 150%"
+        ])
+    }
+
+    function test_mic_default_input_is_taken_and_given_back() {
+        activeScrcpyMic()
+        PhoneMic.setAsDefaultInput()
+        verify(PhoneMic.isDefaultInput)
+        compare(PhoneMic.previousDefaultSource, "alsa_input.laptop")
+        compare(argvJoined(PhoneMic.ranCommands), [
+            "pactl get-default-source",
+            "pactl set-default-source DroidCam-Mic.monitor"
+        ])
+        PhoneMic.setAsDefaultInput()
+        compare(PhoneMic.ranCommands.length, 2)
+        PhoneMic.restoreDefaultInput()
+        verify(!PhoneMic.isDefaultInput)
+        compare(argvJoined(PhoneMic.ranCommands)[2], "pactl set-default-source alsa_input.laptop")
+        compare(PhoneMic.previousDefaultSource, "")
+    }
+
+    function test_mic_a_configured_gain_and_default_apply_when_the_stream_is_up() {
+        Config.options.phone.microphone.micGain = 80
+        Config.options.phone.microphone.setAsDefault = true
+        activeScrcpyMic()
+        compare(PhoneMic.gain, 80)
+        verify(PhoneMic.isDefaultInput)
+    }
+
+    function test_mic_stop_restores_everything_and_tears_the_sink_down() {
+        activeScrcpyMic()
+        PhoneMic.setAsDefaultInput()
+        PhoneMic.ranCommands = []
+        PhoneMic.stop()
+        verify(!PhoneMic.active)
+        verify(PhoneMic.userStopped)
+        verify(!PhoneMic.isDefaultInput)
+        compare(PhoneMic.pulseSource, "")
+        compare(argvJoined(PhoneMic.ranCommands), [
+            "pactl set-default-source alsa_input.laptop",
+            "bash " + sessionScript + " stop audio",
+            "bash " + sessionScript + " stop scrcpy-mic",
+            "pactl unload-module module-loopback",
+            "bash " + teardownScript
+        ])
+        PhoneMic.stop()
+        compare(PhoneMic.ranCommands.length, 5)
+    }
+
+    function test_mic_start_on_droidcam_routes_through_pulse_sink() {
+        PhoneMic.preferredBackend = "droidcam"
+        Config.options.phone.microphone.connection = "usb"
+        PhoneMic.responder = argv => {
+            const line = argv.join(" ")
+            if (line === "bash " + setupScript) return { text: "DroidCam-Mic.monitor\n", code: 0 }
+            if (argv[2] === "launch") return { text: "888\n", code: 0 }
+            return null
+        }
+        PhoneMic.start()
+        compare(PhoneMic.backend, "droidcam")
+        compare(argvJoined(PhoneMic.ranCommands), [
+            "pactl unload-module module-loopback",
+            "bash " + setupScript,
+            "bash " + sessionScript + " launch audio env PULSE_SINK=DroidCam-Mic droidcam-cli -a -nocontrols adb 4748"
+        ])
+        compare(PhoneMic.swappedSink, "")
+        compare(PhoneMic.sessionPid, 888)
+        compare(PhoneMic.verifyArmed, 1)
+        compare(Persistent.states.phone.mic.lastMode, "usb")
+        compare(Persistent.states.phone.mic.lastPort, 4748)
+    }
+
+    function test_mic_start_fails_when_the_null_sink_cannot_be_made() {
+        PhoneMic.responder = argv => argv[0] === "bash" ? { text: "", code: 1 } : null
+        PhoneMic.start()
+        verify(!PhoneMic.connecting)
+        verify(PhoneMic.lastError.indexOf("null sink") >= 0)
+    }
+
+    function test_mic_start_is_refused_without_a_reachable_phone() {
+        PhoneConnect.devices = [phone({ reachable: false })]
+        PhoneMic.start()
+        verify(!PhoneMic.connecting)
+        compare(PhoneMic.ranCommands, [])
+        compare(PhoneMic.state, "offline")
+    }
+
+    function test_mic_boot_reconciliation_restores_a_leftover_swap() {
+        Persistent.states.phone.mic.originalDefaultSink = "alsa_output.arctis"
+        PhoneMic.swappedSink = "alsa_output.arctis"
+        PhoneMic.responder = argv => {
+            const line = argv.join(" ")
+            if (argv[2] === "status") return { text: '{"session":"' + argv[3] + '","alive":false}', code: 0 }
+            if (line === "pactl get-default-sink") return { text: "DroidCam-Mic\n", code: 0 }
+            return null
+        }
+        PhoneMic.reconcile()
+        verify(!PhoneMic.active)
+        compare(argvJoined(PhoneMic.ranCommands), [
+            "bash " + sessionScript + " status scrcpy-mic",
+            "bash " + sessionScript + " status audio",
+            "pactl get-default-sink",
+            "pactl set-default-sink alsa_output.arctis"
+        ])
+        compare(Persistent.states.phone.mic.originalDefaultSink, "")
+        compare(PhoneMic.swappedSink, "")
+    }
+
+    function test_mic_boot_reconciliation_adopts_a_live_session_and_leaves_the_sink() {
+        PhoneMic.responder = argv => {
+            const line = argv.join(" ")
+            if (argv[2] === "status" && argv[3] === "scrcpy-mic")
+                return { text: '{"session":"scrcpy-mic","pid":"777","alive":true,"started":"1700000000","port":"","mode":"wifi","ip":""}', code: 0 }
+            if (argv[2] === "status") return { text: '{"session":"audio","alive":false}', code: 0 }
+            if (line === "bash " + setupScript) return { text: "DroidCam-Mic.monitor\n", code: 0 }
+            if (line === "pactl get-default-sink") return { text: "DroidCam-Mic\n", code: 0 }
+            return null
+        }
+        PhoneMic.reconcile()
+        verify(PhoneMic.active)
+        compare(PhoneMic.backend, "scrcpy")
+        compare(PhoneMic.sessionPid, 777)
+        compare(PhoneMic.startedAt, 1700000000)
+        compare(PhoneMic.pulseSource, "DroidCam-Mic.monitor")
+        compare(PhoneMic.watchdogArmed, 1)
+        verify(argvJoined(PhoneMic.ranCommands).indexOf("pactl set-default-sink @DEFAULT_SINK@") < 0)
+    }
+
+    function test_mic_boot_reconciliation_leaves_a_normal_default_alone() {
+        PhoneMic.responder = argv => argv[0] === "pactl" ? { text: "Arctis_Media\n", code: 0 } : { text: '{"alive":false}', code: 0 }
+        PhoneMic.reconcile()
+        compare(PhoneMic.ranCommands.length, 3)
+    }
+
+    function test_mic_watchdog_reports_a_lost_stream() {
+        activeScrcpyMic()
+        PhoneMic.responder = argv => ({ text: '{"session":"scrcpy-mic","alive":false}', code: 0 })
+        PhoneMic.checkSession()
+        verify(!PhoneMic.active)
+        verify(PhoneMic.lastError.indexOf("lost") >= 0)
+        compare(argvJoined(PhoneMic.ranCommands)[0], "bash " + sessionScript + " status scrcpy-mic")
+    }
+}

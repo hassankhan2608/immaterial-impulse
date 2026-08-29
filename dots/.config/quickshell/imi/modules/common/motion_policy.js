@@ -117,6 +117,86 @@ function staggerDelay(rank, step, leadIn) {
 }
 
 // ---------------------------------------------------------------------------
+// The three-channel member entrance
+// ---------------------------------------------------------------------------
+//
+// A wave member arrives on three properties moving together - opacity, a scale
+// and a small rise - driven by one `appear` scalar so they cannot land on
+// different schedules (docs/M3_GUIDELINES.md §2, "Component Entrance and
+// Exit"; measured off the sibling fork in
+// docs/p3drovfx-motion-measured-2026-08-22.md §3 as opacity 0->1, scale from
+// 0.85 and +25px->0). The rendering is `StaggerEntrance.qml`; the one decision
+// in it is here, because it is the one a test can hold still: where the scale
+// STARTS.
+//
+// The scale is derived from the rise and the width it plays on, never picked.
+// The survey's 0.85 is a popup's compact cards; on a full-width row the same
+// factor is a horizontal swing wider than the rise it accompanies - a zoom,
+// not a settle. Matching the scale's excursion to the rise keeps the two
+// terms one motion at any width, and the measured 0.85 stays as the floor so
+// a narrow member cannot invert the proportion. (Promoted verbatim from Edit
+// Mode's drawer, which derived exactly this locally; the derivation moving
+// here must not move a pixel of that panel.)
+var ENTRANCE_SCALE_FLOOR = 0.85;
+
+function entranceScaleFrom(rise, reference) {
+    var span = Math.max(1, Number(reference) || 0);
+    var derived = 1 - Number(rise) / span;
+    // Comparisons, not Math.max: `Math.max(floor, NaN)` is NaN, which is a
+    // legal double no render boundary rejects - the Appearance-token lesson.
+    if (!(derived > ENTRANCE_SCALE_FLOOR)) return ENTRANCE_SCALE_FLOOR;
+    // A rise of zero (or nonsense) is no scale excursion at all - a member
+    // must never arrive LARGER than it rests.
+    return Math.min(1, derived);
+}
+
+// ---------------------------------------------------------------------------
+// Convergent arrival
+// ---------------------------------------------------------------------------
+//
+// How an object COMES INTO PLACE, measured off the sibling fork's sidebars
+// (recorded at 60fps and read frame by frame, then matched to their source -
+// SidebarDashboardContent's header enters from x -30/+30 per side, each
+// quick-toggle tile from its own third of the grid at +-18/+-12, scale 0.92
+// with a slight overshoot). The grammar: an object starts a short reach AWAY
+// from its place, on its own side of the container - leftmost members from
+// further left, rightmost from further right, alternating rows from above and
+// below - and settles in with a small pop past 1. Uniform rise-and-fade reads
+// as one sheet of content; convergence reads as objects each finding their
+// own seat.
+//
+// `convergeFrom` answers with a UNIT direction pair the caller multiplies by
+// its reach tokens; the thirds rule is deliberate (their `index % 3` grid
+// rule, generalised to a normalized position so it serves a column of
+// full-width sections - all middle-third, so pure vertical alternation - as
+// well as a grid of tiles).
+function convergeFrom(normX, rankParity) {
+    var x = Number(normX);
+    var dx = 0;
+    if (x < -1 / 3) dx = -1;
+    else if (x > 1 / 3) dx = 1;
+    var dy = (Number(rankParity) % 2 === 0) ? -1 : 1;
+    return { dx: dx, dy: dy };
+}
+
+// The settle that makes an arrival a landing rather than a fade: an
+// OutBack-shaped remap of the wave's own `appear` scalar, so the spatial
+// channels overshoot their place by a hair and come back while the opacity
+// tracks `appear` directly. One scalar stays the only driver - the desync the
+// fork buys with four hand-timed NumberAnimations per section falls out of
+// shaping the channels differently on the way to the same 1.
+var CONVERGE_OVERSHOOT = 1.1;
+
+function convergeSettle(appear, overshoot) {
+    var a = Number(appear);
+    if (!(a > 0)) return 0;
+    if (a >= 1) return 1;
+    var s = (overshoot === undefined) ? CONVERGE_OVERSHOOT : Number(overshoot);
+    var t = a - 1;
+    return 1 + t * t * ((s + 1) * t + s);
+}
+
+// ---------------------------------------------------------------------------
 // The container-progress gate
 // ---------------------------------------------------------------------------
 //
