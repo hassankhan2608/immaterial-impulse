@@ -13,6 +13,7 @@ import qs.modules.imi.bar as Bar
 import Quickshell
 import Quickshell.Services.SystemTray
 import "../../common/functions/lock_islands.js" as LockIslands
+import "../../common/functions/media_art.js" as MediaArt
 
 MouseArea {
     id: root
@@ -36,7 +37,7 @@ MouseArea {
     readonly property bool requirePasswordToPower: Config.options.lock.security.requirePasswordToPower
     readonly property MprisPlayer activePlayer: MprisController.activePlayer
 
-    property var    artUrl:      activePlayer?.trackArtUrl ?? ""
+    property var    artUrl:      MediaArt.resolve(activePlayer?.trackArtUrl ?? "", activePlayer?.metadata)
 
     // ---- the islands' contents, as data --------------------------------
     //
@@ -347,6 +348,7 @@ MouseArea {
         id: passwordComponent
         PasswordField {
             id: passwordBox
+            materialShapeChars: passwordBox.masked && Config.options.lock.materialShapeChars
             placeholderText: GlobalStates.screenUnlockFailed ? Translation.tr("Incorrect password") : Translation.tr("Enter password")
 
             // The pull as well as the publication: a slot rebuild (a reorder

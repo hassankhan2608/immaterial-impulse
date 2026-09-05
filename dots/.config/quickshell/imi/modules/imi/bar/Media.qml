@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 import qs.modules.common
 import qs.modules.common.widgets
+import qs.modules.imi.mediaControls
 import qs.modules.common.functions
 import qs.services
 import qs.modules.common.models
@@ -12,58 +13,29 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Mpris
+import "../../common/functions/media_art.js" as MediaArt
 
 Item {
     id: root
     
     property bool vertical: false
-    property bool borderless: Config.options.bar.borderless
     property bool isMaterial: Config.options.bar.cornerStyle === 3
     readonly property MprisPlayer activePlayer: MprisController.activePlayer
 
     readonly property string cleanedTitle: StringUtils.cleanMusicTitle(activePlayer?.trackTitle) || Translation.tr("No media")
 
-    property var    artUrl:      activePlayer?.trackArtUrl ?? ""
+    property var    artUrl:      MediaArt.resolve(activePlayer?.trackArtUrl ?? "", activePlayer?.metadata)
     property string trackTitle:  activePlayer?.trackTitle  ?? ""
     property string trackArtist: activePlayer?.trackArtist ?? ""
     property bool   isPlaying:   activePlayer?.isPlaying   ?? false
     property bool   hasTrack:    trackTitle.length > 0
 
-    property string artDownloadLocation: Directories.coverArt
-    property string artFileName:         Qt.md5(artUrl)
-    property string artFilePath:         `${artDownloadLocation}/${artFileName}`
-    property bool   artDownloaded:       false
-
-    property string displayedArtFilePath: {
-        if (!root.artDownloaded) return ""
-        if (root.artUrl.startsWith("file://")) return root.artUrl
-        return Qt.resolvedUrl(artFilePath)
+    MediaArtSource {
+        id: artSource
+        artUrl: root.artUrl
     }
-
-    onArtFilePathChanged: {
-        if (!root.artUrl || root.artUrl.length === 0) {
-            root.artDownloaded = false
-            return
-        }
-        if (root.artUrl.startsWith("file://")) {
-            root.artDownloaded = true
-            return
-        }
-        artDownloader.targetFile  = root.artUrl
-        artDownloader.artFilePath = root.artFilePath
-        root.artDownloaded = false
-        artDownloader.running = true
-    }
-
-    Process {
-        id: artDownloader
-        property string targetFile:  root.artUrl
-        property string artFilePath: root.artFilePath
-        // Positional args ($1/$2), never spliced into the script body: targetFile
-        // is MPRIS artUrl (attacker-controllable), so interpolation was injectable.
-        command: ["bash", "-c", '[ -f "$1" ] || curl -sSL "$2" -o "$1"', "bash", artFilePath, targetFile]
-        onExited: { root.artDownloaded = true }
-    }
+    readonly property string displayedArtFilePath: artSource.displayedArtFilePath
+    readonly property bool artDownloaded: artSource.downloaded
 
     Layout.fillHeight: true
     implicitWidth: vertical 
@@ -96,16 +68,18 @@ Item {
         }
     }
 
-    // Vertical default
+    // Vertical default. The progress circle is the outline ring - an icon in
+    // a circle is outlined under every bar style but M3 (BarIconRing says
+    // why); the filled ring stays the resource monitor's own option.
     Loader {
         id: mediaCircProg
         active: root.vertical && !root.isMaterial
         visible: active
         anchors.centerIn: parent
-        sourceComponent: ClippedFilledCircularProgress {
+        sourceComponent: ClippedOutlineCircularProgress {
             implicitSize: 20
             lineWidth: Appearance.rounding.unsharpen
-            value: root.activePlayer?.position / root.activePlayer?.length
+            value: (root.activePlayer?.length ?? 0) > 0 ? root.activePlayer.position / root.activePlayer.length : 0
             colPrimary: Appearance.colors.colOnSecondaryContainer
             enableAnimation: false
             Item {
@@ -117,7 +91,7 @@ Item {
                     fill: 1
                     text: root.activePlayer?.isPlaying ? "pause" : "music_note"
                     iconSize: Appearance.font.pixelSize.normal
-                    color: Appearance.m3colors.m3onSecondaryContainer
+                    color: Appearance.colors.colOnSecondaryContainer
                 }
             }
         }
@@ -149,12 +123,12 @@ Item {
         anchors.fill: parent
         sourceComponent: RowLayout {
             spacing: Appearance.spacing.space50
-            ClippedFilledCircularProgress {
+            ClippedOutlineCircularProgress {
                 Layout.alignment: Qt.AlignVCenter
                 Layout.leftMargin: Appearance.spacing.space50
                 implicitSize: 20
                 lineWidth: Appearance.rounding.unsharpen
-                value: root.activePlayer?.position / root.activePlayer?.length
+                value: (root.activePlayer?.length ?? 0) > 0 ? root.activePlayer.position / root.activePlayer.length : 0
                 colPrimary: Appearance.colors.colOnSecondaryContainer
                 enableAnimation: false
                 Item {
@@ -166,7 +140,7 @@ Item {
                         fill: 1
                         text: root.activePlayer?.isPlaying ? "pause" : "music_note"
                         iconSize: Appearance.font.pixelSize.normal
-                        color: Appearance.m3colors.m3onSecondaryContainer
+                        color: Appearance.colors.colOnSecondaryContainer
                     }
                 }
             }
@@ -226,9 +200,7 @@ Item {
                         Image {
                             id: avatarImage
                             anchors.fill: parent
-                            source: Config.options.profile.avatarPath !== "" 
-                                ? "file://" + Config.options.profile.avatarPicture 
-                                : "file:///home/" + (Quickshell.env("USER") ?? "user") + "/.face"
+                            source: UserAvatar.url
                             sourceSize.width: avatarRect.width * 2
                             sourceSize.height: avatarRect.height * 2
                             fillMode: Image.PreserveAspectCrop
@@ -247,10 +219,11 @@ Item {
                         }
                     }
 
+                    // Centred in the pill with no top margin: the 2px it carried
+                    // sat the two lines low, more air above than below.
                     ColumnLayout {
                         spacing: -Appearance.spacing.space50
                         Layout.alignment: Qt.AlignVCenter
-                        Layout.topMargin: Appearance.spacing.space25
 
                         StyledText {
                             text: Config.options.profile.displayName === "" ? SystemInfo.username : Config.options.profile.displayName

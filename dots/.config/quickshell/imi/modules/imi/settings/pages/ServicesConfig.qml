@@ -3,9 +3,18 @@ import QtQuick.Layouts
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
+import qs.modules.common.functions
+import qs.modules.imi.aiProviders
 
 ContentPage {
     id: page
+    // The keyring loads on demand, and this page is a demand: its key fields
+    // read "" and silently drop what is typed into them until it has loaded,
+    // and nothing else loads it while a local model is selected.
+    Component.onCompleted: {
+        if (!KeyringStorage.loaded)
+            KeyringStorage.fetchKeyringData();
+    }
     forceWidth: true
     bottomContentPadding: 15
 
@@ -20,6 +29,18 @@ ContentPage {
         padding: Appearance.spacing.space200
         implicitWidth: layoutItem.implicitWidth + padding * 2
         buttonRadius: Appearance.rounding.full
+        // The press tones follow each state's own fill family: the filled
+        // pill ripples in its container's Active, and the flat variant -
+        // whose colLayer1 default reads as no background at all on this
+        // page - ripples in the Layer2 family it hovers in.
+        // A filled surface ripples in its ON-color, faint: this palette's
+        // PrimaryActive sits nearly on Primary itself, which was the
+        // weakness - and SecondaryContainerActive was the wrong family
+        // for a colPrimary fill entirely.
+        colRippleToggled: ColorUtils.transparentize(Appearance.colors.colOnPrimary, 0.75)
+        colBackground: "transparent"
+        colBackgroundHover: Appearance.colors.colLayer2Hover
+        colRipple: Appearance.colors.colLayer2Active
 
         contentItem: Item {
             implicitWidth: layoutItem.implicitWidth
@@ -96,146 +117,8 @@ ContentPage {
             ContentSubsection {
                 title: Translation.tr("Custom OpenAI-compatible Providers")
 
-                ColumnLayout {
+                AiProvidersEditor {
                     Layout.fillWidth: true
-                    spacing: Appearance.spacing.space200
-
-                    Repeater {
-                        model: Config.options.ai.customProviders ? Config.options.ai.customProviders.length : 0
-
-                        delegate: ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: Appearance.spacing.space150
-
-                            GroupedList {
-                                cohesive: true
-
-                                ConfigSwitch {
-                                    text: Config.options.ai.customProviders[index].name
-                                        ? Translation.tr("Enable %1").arg(Config.options.ai.customProviders[index].name)
-                                        : Translation.tr("Enable provider %1").arg(index + 1)
-                                    checked: Config.options.ai.customProviders[index].enabled
-                                    onToggleRequested: {
-                                        // Whole-list assignment: JsonAdapter
-                                        // lists only persist when replaced.
-                                        let providers = [...Config.options.ai.customProviders];
-                                        providers[index].enabled = !providers[index].enabled;
-                                        Config.options.ai.customProviders = providers;
-                                    }
-                                }
-
-                                ConfigTextArea {
-                                    buttonIcon: "badge"
-                                    text: Translation.tr("Name")
-                                    placeholderText: Translation.tr("Provider Name (e.g. OpenRouter)")
-                                    value: Config.options.ai.customProviders[index].name
-                                    onValueChanged: {
-                                        let providers = [...Config.options.ai.customProviders];
-                                        if (providers[index].name !== value) {
-                                            providers[index].name = value;
-                                            Config.options.ai.customProviders = providers;
-                                        }
-                                    }
-                                }
-
-                                ConfigTextArea {
-                                    buttonIcon: "link"
-                                    text: Translation.tr("Base URL")
-                                    placeholderText: Translation.tr("e.g. https://openrouter.ai/api/v1")
-                                    fieldWidth: 240
-                                    value: Config.options.ai.customProviders[index].baseUrl
-                                    onValueChanged: {
-                                        let providers = [...Config.options.ai.customProviders];
-                                        if (providers[index].baseUrl !== value) {
-                                            providers[index].baseUrl = value;
-                                            Config.options.ai.customProviders = providers;
-                                        }
-                                    }
-                                }
-
-                                ConfigTextArea {
-                                    buttonIcon: "key"
-                                    text: Translation.tr("API Key")
-                                    placeholderText: Translation.tr("Enter API key")
-                                    password: true
-                                    value: KeyringStorage.loaded ? (KeyringStorage.keyringData.apiKeys?.[`custom_provider_${index}`] || "") : ""
-                                    onValueChanged: {
-                                        let currentText = value;
-                                        Qt.callLater(() => {
-                                            if (KeyringStorage.loaded) {
-                                                KeyringStorage.setNestedField(["apiKeys", `custom_provider_${index}`], currentText);
-                                            }
-                                        });
-                                    }
-                                }
-
-                                RowLayout {
-                                    id: providerActionsRow
-                                    Layout.fillWidth: true
-
-                                    Item {
-                                        Layout.fillWidth: true
-                                    }
-
-                                    IconButton {
-                                        id: removeProviderButton
-                                        toggled: false
-                                        textString: Translation.tr("Remove Provider")
-                                        iconName: "delete"
-                                        textColor: Appearance.colors.colError
-                                        colRipple: Appearance.colors.colErrorActive
-                                        onClicked: {
-                                            const removedIndex = index;
-                                            let providers = [...Config.options.ai.customProviders];
-                                            providers.splice(removedIndex, 1);
-                                            Config.options.ai.customProviders = providers;
-
-                                            if (KeyringStorage.loaded) {
-                                                KeyringStorage.setNestedField(["apiKeys", `custom_provider_${removedIndex}`], "");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        id: sectionActionsRow
-                        Layout.alignment: Qt.AlignRight
-                        Layout.topMargin: Appearance.spacing.space150
-                        spacing: Appearance.spacing.space150
-
-                        IconButton {
-                            id: addProviderButton
-                            textString: Translation.tr("Add Provider")
-                            iconName: "add"
-                            onClicked: {
-                                let providers = [...(Config.options.ai.customProviders || [])];
-                                providers.push({ enabled: false, name: "New Provider", baseUrl: "" });
-                                Config.options.ai.customProviders = providers;
-                            }
-                        }
-
-                        IconButton {
-                            id: fetchModelsButton
-                            toggled: false
-                            textColor: Appearance.colors.colPrimary
-                            textString: Translation.tr("Fetch Models")
-                            iconName: "sync"
-                            onClicked: {
-                                Ai.fetchCustomModels();
-                            }
-                        }
-                    }
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: Ai.customProviderFeedbackText
-                    color: Appearance.colors.colSubtext
-                    visible: text.length > 0
                 }
             }
         }

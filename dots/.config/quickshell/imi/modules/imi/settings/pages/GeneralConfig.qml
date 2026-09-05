@@ -345,6 +345,41 @@ ContentPage {
         }
 
         ContentSection {
+            icon: "menu_book"
+            shape: MaterialShape.Shape.Gem
+            title: Translation.tr("Cheatsheet")
+
+            GroupedList {
+                ConfigSwitch {
+                    buttonIcon: "speed"
+                    text: Translation.tr("Typing test tab")
+                    description: Translation.tr("A Monkeytype-style typing test as a cheatsheet page; its own settings and score history live inside it")
+                    checked: Config.options.cheatsheet.enableTypingTest
+                    onToggleRequested: Config.options.cheatsheet.enableTypingTest = !Config.options.cheatsheet.enableTypingTest
+                }
+            }
+        }
+
+        ContentSection {
+            icon: "code"
+            shape: MaterialShape.Shape.Gem
+            title: Translation.tr("Developer")
+
+            GroupedList {
+                ConfigSwitch {
+                    buttonIcon: "handyman"
+                    text: Translation.tr("Developer mode")
+                    // The one thing it does today, said plainly: a toggle whose
+                    // subtitle is "advanced options" teaches nobody what it
+                    // turns on, and this one turns on exactly one surface.
+                    description: Translation.tr("Adds a Components tab to the cheatsheet, showing every shared widget live")
+                    checked: Config.options.developer.enable
+                    onToggleRequested: Config.options.developer.enable = !Config.options.developer.enable
+                }
+            }
+        }
+
+        ContentSection {
             icon: "language_japanese_kana"
             shape: MaterialShape.Shape.Gem
             title: Translation.tr("Language")

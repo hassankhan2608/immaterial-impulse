@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
+import "../../common/functions/barEdges.js" as BarEdges
 
 // Privacy indicator pill (macOS/Android style). Only visible while an app is
 // actively using the microphone, camera, and/or screencast; hidden when idle.
@@ -22,10 +23,13 @@ MouseArea {
     readonly property bool replayOn: ScreenRecord.replaying
     readonly property bool shown: micOn || cameraOn || screencastOn || recordingOn || replayOn
 
-    // Vivid error fill with its matching on-color. The BASE error pair is M3's
-    // high-contrast pairing; the *container* variants can be low-contrast.
-    readonly property color pillColor: Appearance.colors.colError
-    readonly property color onColor: Appearance.colors.colOnError
+    // An alarm, under every bar style and in both themes: the saturated
+    // member of the error pair (colAlarm - dark's errorContainer, light's
+    // error) with its on-colour. colError alone was a pastel pink pill with
+    // a dark glyph in the dark theme, which is the pair the other way round
+    // and read as decoration rather than danger. Hover is a colour, not a dim.
+    readonly property color pillColor: root.containsMouse ? Appearance.colors.colAlarmHover : Appearance.colors.colAlarm
+    readonly property color onColor: Appearance.colors.colOnAlarm
 
     // Stay visible while collapsing so the pill can fade/scale out instead of
     // vanishing; the width still animates for a smooth bar reflow.
@@ -80,8 +84,12 @@ MouseArea {
         anchors.horizontalCenterOffset: root.vertical ? Appearance.sizes.barStandalonePillOffset : 0
         radius: Appearance.rounding.full
         color: root.pillColor
-        // Fade + scale with the whole show/hide so it eases in and out.
-        opacity: root.shown ? (root.containsMouse ? 0.88 : 1) : 0
+        Behavior on color {
+            animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
+        }
+        // Fade + scale with the whole show/hide so it eases in and out; hover
+        // is the colour above, not a dim.
+        opacity: root.shown ? 1 : 0
         scale: root.shown ? 1 : 0.7
         transformOrigin: Item.Center
         Behavior on opacity {
@@ -126,6 +134,14 @@ MouseArea {
     // the overlay hosts it - so the widget that was clicked is what owns the
     // decision to keep it open.
     property bool controlsPinned: false
+    // The bar's one open state while the click-pinned controls are up: the
+    // anchor indicator on the popup-facing edge, as long as the pill.
+    PopupAnchorIndicator {
+        wraps: pill
+        edgeItem: root
+        edge: BarEdges.popupEdge(Config.options.bar.vertical, Config.options.bar.bottom)
+        shown: root.controlsPinned
+    }
     cursorShape: Qt.PointingHandCursor
     onClicked: root.controlsPinned = !root.controlsPinned
     // A click anywhere outside the card unpins, which is what the overlay's

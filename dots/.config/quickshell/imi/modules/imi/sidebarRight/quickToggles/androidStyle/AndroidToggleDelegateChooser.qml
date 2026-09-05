@@ -1,7 +1,9 @@
 pragma ComponentBehavior: Bound
+import qs
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
+import "../../../../common/functions/quick_toggle_pages.js" as QuickTogglePages
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -16,6 +18,10 @@ DelegateChooser {
     property var dropIndicatorRef: null 
     property bool isUnused: false
     property var gridRef: null 
+    // Which page this chooser's tiles live on, and the panel that owns the
+    // pager - handed down to every tile for the drag protocol.
+    property var pagerRef: null
+    property int pageIndex: 0
     signal openAudioOutputDialog()
     signal openAudioInputDialog()
     signal openBluetoothDialog()
@@ -23,6 +29,39 @@ DelegateChooser {
     signal openWifiDialog()
     signal openTailscaleDialog()
     signal openPhoneTab()
+
+    // The stored PAGES are written HERE, on a tile's request, not by the
+    // tile. Every edit REASSIGNS the pages key: the store is a nested
+    // list<var>, and an inner array mutated in place never notifies the
+    // outer property - the in-place spelling 26b625905 measured was a FLAT
+    // list and does not carry over. Delegates still survive: ids are stable
+    // and the keyed model diffs the reassigned value into moves.
+    function currentPages() {
+        return QuickTogglePages.normalise(
+            Config.options.sidebar.quickToggles.android.pages,
+            Config.options.sidebar.quickToggles.android.toggles);
+    }
+    function writePages(next) {
+        Config.options.sidebar.quickToggles.android.pages = next;
+    }
+    function moveToggle(fromIndex, toIndex) {
+        writePages(QuickTogglePages.withMove(currentPages(),
+            root.pageIndex, fromIndex, root.pageIndex, toIndex));
+    }
+    function moveToggleAcross(fromIndex, toPage, toIndex) {
+        writePages(QuickTogglePages.withMove(currentPages(),
+            root.pageIndex, fromIndex, toPage, toIndex));
+    }
+    function addToggle(type) {
+        writePages(QuickTogglePages.withInsert(currentPages(),
+            root.pageIndex, { type: type, size: 1 }));
+    }
+    function removeToggle(index) {
+        writePages(QuickTogglePages.withRemove(currentPages(), root.pageIndex, index));
+    }
+    function resizeToggle(index, size) {
+        writePages(QuickTogglePages.withResize(currentPages(), root.pageIndex, index, size));
+    }
 
     // The role a choice is picked by is the one `StableQuickToggleModel`
     // binds permanently to a row's id, and it is the whole reason a delegate
@@ -44,7 +83,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         onOpenMenu: root.openNightLightDialog()
     } }
 
@@ -61,7 +108,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "audio"; AndroidAudioToggle {
@@ -77,7 +132,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         onOpenMenu: root.openAudioOutputDialog()
     } }
 
@@ -94,7 +157,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         onOpenMenu: root.openBluetoothDialog()
     } }
 
@@ -111,7 +182,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         onOpenMenu: root.openTailscaleDialog()
     } }
 
@@ -128,7 +207,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         onOpenMenu: root.openPhoneTab()
     } }
 
@@ -145,7 +232,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "cloudflareWarp"; AndroidCloudflareWarpToggle {
@@ -161,7 +256,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "colorPicker"; AndroidColorPickerToggle {
@@ -177,7 +280,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "darkMode"; AndroidDarkModeToggle {
@@ -193,7 +304,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "easyEffects"; AndroidEasyEffectsToggle {
@@ -209,7 +328,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "gameMode"; AndroidGameModeToggle {
@@ -225,7 +352,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "idleInhibitor"; AndroidIdleInhibitorToggle {
@@ -241,7 +376,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "mic"; AndroidMicToggle {
@@ -257,7 +400,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         onOpenMenu: root.openAudioInputDialog()
     } }
 
@@ -274,7 +425,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "network"; AndroidNetworkToggle {
@@ -290,7 +449,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         onOpenMenu: root.openWifiDialog()
     } }
 
@@ -307,7 +474,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         onOpenMenu: root.openNightLightDialog()
     } }
 
@@ -324,7 +499,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "onScreenKeyboard"; AndroidOnScreenKeyboardToggle {
@@ -340,7 +523,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "powerProfile"; AndroidPowerProfileToggle {
@@ -356,7 +547,15 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 
     DelegateChoice { roleValue: "screenSnip"; AndroidScreenSnipToggle {
@@ -372,6 +571,14 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
         dropIndicatorRef: root.dropIndicatorRef
+        pagerRef: root.pagerRef
+        pageIndex: root.pageIndex
         isUnused: root.isUnused
+        panelOpen: GlobalStates.sidebarRightOpen
+        onMoveRequested: (fromIndex, toIndex) => root.moveToggle(fromIndex, toIndex)
+        onMoveAcrossRequested: (fromIndex, toPage, toIndex) => root.moveToggleAcross(fromIndex, toPage, toIndex)
+        onAddRequested: type => root.addToggle(type)
+        onRemoveRequested: index => root.removeToggle(index)
+        onResizeRequested: (index, size) => root.resizeToggle(index, size)
     } }
 }

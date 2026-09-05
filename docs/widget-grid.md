@@ -358,7 +358,7 @@ it also stays square, which no span can be (the cell is 132x108), and its manife
 fights the user's choice.
 
 **Omitting `grid` is not permission to hardcode pixels.** A widget that toggles or drags between
-a fixed set of sizes — the bundled `world-clock` (2x2 / 3x1) and `calendar` (1x1 / 2x1 / 2x2) —
+a fixed set of sizes —
 still has to name each of those sizes with `Appearance.sizes.widgetGridSpanX/Y`. Skipping the
 helpers costs twice: the size drifts off the lattice, and it stops following `effectiveScale`,
 so it is wrong on every scaled setup even if the unscaled number happens to be right. Only a
@@ -391,19 +391,24 @@ moves every frame and never converge
 (`test_geometry_rects_come_from_the_settled_span_not_the_animating_box`).
 
 **A widget-owned `sizeMode` is not the same thing as the retired manifest option, and a
-migration keyed on the name alone destroys it.** `world-clock` and `calendar` declare no
-`grid` and drive a `sizeMode` of their own from their own toggles, so for them the key is
+migration keyed on the name alone destroys it.** `world-clock` and `calendar` declared no
+`grid` and drove a `sizeMode` of their own from their own toggles, so for them the key was
 a live setting; weather and currency declared one as a manifest *option*, which is what
-`__gridSize` took over. The `sizeMode` → `__gridSize` migration therefore acts only where
+`__gridSize` took over. Both of the first camp have since crossed to the second — the manifest
+grew `grid.sizes`, and the same gate that once protected their options is what folds them in.
+The `sizeMode` → `__gridSize` migration therefore acts only where
 the manifest offers more than one span — measured against a real shell, a pass keyed on
 the key name emptied world-clock's and calendar's options and reset both widgets, which is
 the migration's own failure mode aimed at the wrong widgets. The migration maps the stored
 value onto `__gridSize` (dropping a mode the manifest does not offer, exactly as
 `resolveSize` refuses a stored span no longer on offer), deletes the old key so it is
-idempotent on its own, and is marked done under `migrations.migratedSizeMode` in
-`plugin-state.json`. It is driven by `PluginManager` on a settle timer rather than fired
-on the first non-empty manifest list, because a marker records that a pass *ran*, not
-that it saw anything, and manifests load one FileView at a time.
+idempotent on its own, and runs whenever any multi-span manifest still has a `sizeMode`
+stored — the data is the gate, not the `migrations.migratedSizeMode` marker (which is still
+written, as a record): the marker gated it once, and stranded calendar's and world-clock's
+options when they adopted `grid.sizes` after the first wave had burned it. It is driven by
+`PluginManager` on a settle timer rather than fired on the first non-empty manifest list,
+because a marker records that a pass *ran*, not that it saw anything, and manifests load
+one FileView at a time.
 db3a7d009 ("refactor(plugins): retire sizeMode in favour of the host's __gridSize").
 
 **Name a size mode after the shape it really is.** `world-clock`'s wide mode was called `"4x1"`

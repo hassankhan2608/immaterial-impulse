@@ -113,7 +113,10 @@ Item {
         const screen = root.screenName;
         const surface = PluginState.currentSurface;
         const before = PluginState.gridSize(id, screen, surface) ?? null;
-        GlobalStates.editUndoPush(() => PluginState.setGridSize(id, screen, before, surface));
+        GlobalStates.editUndoPush(EditMode.swap(
+            () => PluginState.gridSize(id, screen, surface) ?? null,
+            (value) => PluginState.setGridSize(id, screen, value, surface),
+            before));
         PluginState.setGridSize(id, screen, GridSizes.formatSize(next), surface);
     }
 
@@ -157,6 +160,7 @@ Item {
             objectName: "editMenuPin"
             implicitHeight: 40
             colBackground: "transparent"
+            colRipple: Appearance.colors.colLayer2Active
             colBackgroundHover: Appearance.colors.colLayer2
             // The intent shape: the click flips the value at its source (the
             // same read the `pinned` binding makes), and the check beside the
@@ -225,6 +229,7 @@ Item {
                     enabled: root.stepBack !== null
                     onClicked: root.stepSize(-1)
                     colBackground: "transparent"
+                    colRipple: Appearance.colors.colLayer2Active
                     colBackgroundHover: Appearance.colors.colLayer2
                     contentItem: MaterialSymbol {
                         anchors.centerIn: parent
@@ -249,6 +254,7 @@ Item {
                     enabled: root.stepForward !== null
                     onClicked: root.stepSize(1)
                     colBackground: "transparent"
+                    colRipple: Appearance.colors.colLayer2Active
                     colBackgroundHover: Appearance.colors.colLayer2
                     contentItem: MaterialSymbol {
                         anchors.centerIn: parent
@@ -267,6 +273,7 @@ Item {
             objectName: "editMenuRemove"
             implicitHeight: 40
             colBackground: "transparent"
+            colRipple: Appearance.colors.colLayer2Active
             colBackgroundHover: Appearance.colors.colLayer2
             // Presence: the same write the drawer's toggle and Settings >
             // Widgets make, through the one spelling. The dismiss is raised as
@@ -279,8 +286,10 @@ Item {
                 // re-enables the widget at the position the store still
                 // holds for it.
                 const before = EditMode.listCopy(Config.options.plugins.enabled);
-                GlobalStates.editUndoPush(() =>
-                    Config.setNestedValue("plugins.enabled", before));
+                GlobalStates.editUndoPush(EditMode.swap(
+                    () => EditMode.listCopy(Config.options.plugins.enabled),
+                    (value) => Config.setNestedValue("plugins.enabled", value),
+                    before));
                 Config.setNestedValue("plugins.enabled",
                     EditMode.enabledWithout(Config.options.plugins.enabled, root.manifest.id));
                 root.dismissRequested();

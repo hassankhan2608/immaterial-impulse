@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 import qs.modules.common
 import qs.modules.common.widgets
+import qs.modules.imi.mediaControls
 import qs.modules.common.functions
 import qs.services
 import qs.modules.common.models
@@ -11,75 +12,36 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Mpris
+import "../../common/functions/media_art.js" as MediaArt
 
 Item {
     id: root
 
     property real cardWidth:     240
-    property real buttonPadding: Appearance.spacing.space50
     property real artMargin:     Appearance.spacing.space50
 
     property var player: MprisController.activePlayer
 
-    property var    artUrl:      player?.trackArtUrl ?? ""
+    property var    artUrl:      MediaArt.resolve(player?.trackArtUrl ?? "", player?.metadata)
     property string trackTitle:  player?.trackTitle  ?? ""
     property string trackArtist: player?.trackArtist ?? ""
     property bool   isPlaying:   player?.isPlaying   ?? false
     property bool   hasTrack:    trackTitle.length > 0
 
-    property string artDownloadLocation: Directories.coverArt
-    property string artFileName:         Qt.md5(artUrl)
-    property string artFilePath:         `${artDownloadLocation}/${artFileName}`
-    property bool   artDownloaded:       false
-
-    property string displayedArtFilePath: {
-        if (!root.artDownloaded) return ""
-        if (root.artUrl.startsWith("file://")) return root.artUrl
-        return Qt.resolvedUrl(artFilePath)
+    MediaArtSource {
+        id: artSource
+        artUrl: root.artUrl
     }
+    readonly property string displayedArtFilePath: artSource.displayedArtFilePath
+    readonly property bool artDownloaded: artSource.downloaded
 
     property color artDominantColor: ColorUtils.mix(
-        colorQuantizer?.colors[0] ?? Appearance.colors.colPrimary,
+        artSource.colors[0] ?? Appearance.colors.colPrimary,
         Appearance.colors.colPrimaryContainer,
         0.8)
 
     property QtObject blendedColors: AdaptedMaterialScheme {
         color: root.artDominantColor
-    }
-
-    onArtFilePathChanged: {
-        if (!root.artUrl || root.artUrl.length === 0) {
-            root.artDominantColor = Appearance.m3colors.m3secondaryContainer
-            root.artDownloaded = false
-            return
-        }
-
-        if (root.artUrl.startsWith("file://")) {
-            root.artDownloaded = true
-            return
-        }
-
-        artDownloader.targetFile  = root.artUrl
-        artDownloader.artFilePath = root.artFilePath
-        root.artDownloaded = false
-        artDownloader.running = true
-    }
-
-    Process {
-        id: artDownloader
-        property string targetFile:  root.artUrl
-        property string artFilePath: root.artFilePath
-        // Positional args ($1/$2), never spliced into the script body: targetFile
-        // is MPRIS artUrl (attacker-controllable), so interpolation was injectable.
-        command: ["bash", "-c", '[ -f "$1" ] || curl -sSL "$2" -o "$1"', "bash", artFilePath, targetFile]
-        onExited: { root.artDownloaded = true }
-    }
-
-    ColorQuantizer {
-        id: colorQuantizer
-        source: root.displayedArtFilePath
-        depth: 0
-        rescaleSize: 1
     }
 
     visible:        root.hasTrack
@@ -124,6 +86,15 @@ Item {
             id: blurredArt
             anchors.fill: parent
             source: root.displayedArtFilePath
+            // Bound the decode to the card's RESTING size, not the file: a
+            // 1200x1200 cover decoded full-res only to be blurred behind a
+            // small card wasted memory and decode time. Constants, not
+            // card.width/height - the card rides root's animated implicitWidth
+            // (Behavior on show/hide), and a geometry-bound sourceSize is a
+            // full re-decode per animation frame (the bound-to-geometry reload
+            // trap the wallpaper decode entry in AGENT.md records).
+            sourceSize.width: root.cardWidth
+            sourceSize.height: 46
             fillMode: Image.PreserveAspectCrop
             cache: false
             antialiasing: true

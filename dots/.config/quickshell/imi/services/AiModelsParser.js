@@ -13,26 +13,108 @@ function guessModelName(model) {
     return result;
 }
 
-function parseCustomProviderModels(responseJsonString, baseUrl, providerName, keyId) {
+// The base of an OpenAI-compatible API, from whatever the user typed. The
+// fetch appends `/models` and the models' endpoints append
+// `/chat/completions`, so a base that already ends in either - pasted from
+// the browser bar, which is how one gets `http://host/v1/models` into a
+// field labelled Base URL - produced `/v1/models/models`, a 404 with an empty
+// body, and a fetch that "gave nothing".
+function normalizeBaseUrl(url) {
+    let base = `${url ?? ""}`.trim();
+    base = base.replace(/\/+$/, "");
+    base = base.replace(/\/(models|chat\/completions)$/i, "");
+    return base.replace(/\/+$/, "");
+}
+
+function parseCustomProviderModels(responseJsonString, baseUrl, providerName, keyId, apiFormat) {
     try {
         if (!responseJsonString || responseJsonString.trim() === "") return [];
         const data = JSON.parse(responseJsonString);
         if (!data || !Array.isArray(data.data)) return [];
         let result = [];
-        let sanitizedBaseUrl = baseUrl;
-        if (sanitizedBaseUrl.endsWith("/")) {
-            sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -1);
-        }
+        const sanitizedBaseUrl = normalizeBaseUrl(baseUrl);
         data.data.forEach(model => {
             if (!model.id) return;
             result.push({
-                name: guessModelName(model.id),
+                // "<ProviderName>: <Model>" (spec 2026-08-31): applied HERE
+                // so the picker, the message headers and the browse rows all
+                // agree without any of them re-deriving it.
+                name: providerName + ": " + guessModelName(model.id),
+                providerName: providerName,
                 model: model.id,
+                // Generators are named like generators; no /models listing
+                // says which endpoint a model wants, so the id has to.
+                imageGeneration: /image|dall-e|flux|diffusion/i.test(model.id),
                 description: `Online | Custom (${providerName}) | ${model.id}`,
                 endpoint: sanitizedBaseUrl + "/chat/completions",
                 requires_key: true,
                 key_id: keyId,
-                api_format: "openai"
+                api_format: apiFormat || "openai"
+            });
+        });
+        return result;
+    } catch (e) {
+        return [];
+    }
+}
+
+// Anthropic's GET /v1/models: {data:[{id, display_name, ...}]} - same
+// spine as the OpenAI listing, different endpoint suffix and dialect.
+function parseAnthropicProviderModels(responseJsonString, baseUrl, providerName, keyId) {
+    try {
+        if (!responseJsonString || responseJsonString.trim() === "") return [];
+        const data = JSON.parse(responseJsonString);
+        if (!data || !Array.isArray(data.data)) return [];
+        const sanitizedBaseUrl = normalizeBaseUrl(baseUrl);
+        let result = [];
+        data.data.forEach(model => {
+            if (!model.id) return;
+            result.push({
+                name: providerName + ": " + (model.display_name || guessModelName(model.id)),
+                providerName: providerName,
+                model: model.id,
+                description: `Online | ${providerName} | ${model.id}`,
+                endpoint: sanitizedBaseUrl + "/messages",
+                requires_key: true,
+                key_id: keyId,
+                api_format: "anthropic",
+                thinking: true
+            });
+        });
+        return result;
+    } catch (e) {
+        return [];
+    }
+}
+
+// Google AI listing: GET {base}/models?key=... ->
+// {models:[{name:"models/gemini-...", displayName, supportedGenerationMethods}]}.
+// Only generateContent-capable entries become chat models; the endpoint is
+// model-in-path with :streamGenerateContent, the gemini dialect appends the
+// key itself.
+function parseGeminiProviderModels(responseJsonString, baseUrl, providerName, keyId) {
+    try {
+        if (!responseJsonString || responseJsonString.trim() === "") return [];
+        const data = JSON.parse(responseJsonString);
+        if (!data || !Array.isArray(data.models)) return [];
+        const sanitizedBaseUrl = normalizeBaseUrl(baseUrl);
+        let result = [];
+        data.models.forEach(model => {
+            const raw = String(model.name || "");
+            if (!raw) return;
+            const methods = model.supportedGenerationMethods || [];
+            if (methods.indexOf("generateContent") === -1) return;
+            const id = raw.replace(/^models\//, "");
+            result.push({
+                name: providerName + ": " + (model.displayName || guessModelName(id)),
+                providerName: providerName,
+                model: id,
+                description: `Online | ${providerName} | ${id}`,
+                endpoint: sanitizedBaseUrl + "/models/" + id + ":streamGenerateContent",
+                requires_key: true,
+                key_id: keyId,
+                api_format: "gemini",
+                thinking: /thinking/i.test(id)
             });
         });
         return result;

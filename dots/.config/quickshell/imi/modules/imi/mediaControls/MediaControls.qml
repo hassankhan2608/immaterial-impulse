@@ -37,7 +37,7 @@ Scope {
         return Config.options.bar.bottom ? "right" : "left"
     }
     readonly property real gap: Config.options.bar.cornerStyle === 3 ? Appearance.sizes.hyprlandGapsOut : 0
-    readonly property bool cornerStyleReducesGap: Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 2
+    readonly property bool cornerStyleReducesGap: Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 2 || Config.options.bar.cornerStyle === 4
     readonly property real barThickness: barVertical ? Appearance.sizes.verticalBarWidth : Appearance.sizes.barHeight
 
     // The cava process used to live here, gated on an expression naming every
@@ -204,18 +204,23 @@ Scope {
     IpcHandler {
         target: "mediaControls"
 
+        // Through GlobalStates, never the loader: assigning loader.active
+        // directly destroys its binding to mediaControlsOpen, after which
+        // the shortcuts (which set the state) do nothing and CavaRef (which
+        // reads it) never arms - one IPC call left the visualizer dead and
+        // the keybind inert for the session.
         function toggle(): void {
-            mediaControlsLoader.active = !mediaControlsLoader.active;
-            if (mediaControlsLoader.active)
+            GlobalStates.mediaControlsOpen = !GlobalStates.mediaControlsOpen;
+            if (GlobalStates.mediaControlsOpen)
                 Notifications.timeoutAll();
         }
 
         function close(): void {
-            mediaControlsLoader.active = false;
+            GlobalStates.mediaControlsOpen = false;
         }
 
         function open(): void {
-            mediaControlsLoader.active = true;
+            GlobalStates.mediaControlsOpen = true;
             Notifications.timeoutAll();
         }
     }

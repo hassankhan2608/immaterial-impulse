@@ -29,9 +29,18 @@ Canvas { // Visualizer
         var n = points.length;
         if (n < 2) return;
 
-        // Smoothing: simple moving average (optional)
+        // Smoothing: simple moving average (optional). Reuse the buffer across
+        // paints - reallocating it every frame (this runs at ~display rate per
+        // visible visualizer) churned the GC for nothing; only the band count
+        // changing needs a new array.
         var smoothWindow = root.smoothing; // adjust for more/less smoothing
-        root.smoothPoints = [];
+        var sp = root.smoothPoints;
+        // Fill BEFORE assigning on the resize path: assigning first copies the
+        // still-empty array into the property, and the writes that follow land
+        // in the detached local - one blank frame per band-count change. The
+        // steady-state reuse writes through the wrapper, as push always did.
+        var fresh = sp.length !== n;
+        if (fresh) sp = new Array(n);
         for (var i = 0; i < n; ++i) {
             var sum = 0, count = 0;
             for (var j = -smoothWindow; j <= smoothWindow; ++j) {
@@ -39,9 +48,9 @@ Canvas { // Visualizer
                 sum += points[idx];
                 count++;
             }
-            root.smoothPoints.push(sum / count);
+            sp[i] = root.live ? sum / count : 0; // not playing -> flat line
         }
-        if (!root.live) root.smoothPoints.fill(0); // If not playing, show no points
+        if (fresh) root.smoothPoints = sp;
 
         ctx.beginPath();
         ctx.moveTo(0, h);

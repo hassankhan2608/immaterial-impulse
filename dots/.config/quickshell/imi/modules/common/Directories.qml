@@ -75,13 +75,27 @@ Singleton {
     property string notificationsPath: FileUtils.trimFileProtocol(`${Directories.cache}/notifications/notifications.json`)
     property string generatedMaterialThemePath: FileUtils.trimFileProtocol(`${Directories.state}/user/generated/colors.json`)
     property string generatedWallpaperCategoryPath: FileUtils.trimFileProtocol(`${Directories.state}/user/generated/wallpaper/category.txt`)
-    property string cliphistDecode: FileUtils.trimFileProtocol(`/tmp/quickshell/media/cliphist`)
+    // Decoded clipboard previews. Per PROCESS under a parent every instance
+    // shares: two shells (a nested harness beside the session) used to decode
+    // into one directory and each wiped the other's files on start, and a
+    // reload that rebuilds this singleton re-runs the cleanup below - which
+    // took the files out from under the launcher's live previews. The
+    // cleanup sweeps only siblings whose process is gone (and files left by
+    // the old flat layout), so nothing accumulates past a session and nothing
+    // alive is touched.
+    readonly property string cliphistDecodeRoot: FileUtils.trimFileProtocol(`/tmp/quickshell/media/cliphist`)
+    property string cliphistDecode: `${cliphistDecodeRoot}/${Quickshell.processId}`
     property string screenshotTemp: "/tmp/quickshell/media/screenshot"
     property string wallpaperSwitchScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/colors/switchwall.sh`)
     property string defaultAiPrompts: Quickshell.shellPath("defaults/ai/prompts")
     property string userAiPrompts: FileUtils.trimFileProtocol(`${Directories.shellConfig}/ai/prompts`)
     property string userActions: FileUtils.trimFileProtocol(`${Directories.shellConfig}/actions`)
     property string aiChats: FileUtils.trimFileProtocol(`${Directories.state}/user/ai/chats`)
+    property string aiSessions: FileUtils.trimFileProtocol(`${Directories.state}/user/ai/chats/sessions`)
+    // Durable copies of chat attachments: cliphist's decode dir is a /tmp
+    // cache that vanishes underneath a message, which is how a request went
+    // out pointing at a file that no longer existed.
+    property string aiAttachments: FileUtils.trimFileProtocol(`${Directories.state}/user/ai/attachments`)
     property string aiTranslationScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/ai/gemini-translate.sh`)
     property string iconThemeScanScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/icons/scan-icon-themes.py`)
     property string iconThemeApplyScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/icons/apply-icon-theme.sh`)
@@ -127,6 +141,7 @@ Singleton {
         Quickshell.execDetached(["mkdir", "-p", `${root.shellConfig}`])
         Quickshell.execDetached(["mkdir", "-p", `${root.userPresetsPath}`])
         Quickshell.execDetached(["mkdir", "-p", `${root.userActions}`])
+        Quickshell.execDetached(["mkdir", "-p", `${root.aiAttachments}`])
     }
 
     // Cleanup on init
@@ -139,8 +154,12 @@ Singleton {
         Quickshell.execDetached(["bash", "-c", `rm -rf '${coverArt}'; mkdir -p '${coverArt}'`])
         Quickshell.execDetached(["bash", "-c", `rm -rf '${booruPreviews}'; mkdir -p '${booruPreviews}'`])
         Quickshell.execDetached(["bash", "-c", `rm -rf '${latexOutput}'; mkdir -p '${latexOutput}'`])
-        Quickshell.execDetached(["bash", "-c", `rm -rf '${cliphistDecode}'; mkdir -p '${cliphistDecode}'`])
+        Quickshell.execDetached(["bash", "-c",
+            `mkdir -p '${cliphistDecodeRoot}'; for d in '${cliphistDecodeRoot}'/*; do n=$(basename "$d"); `
+            + `[ "$n" = '${Quickshell.processId}' ] && continue; [ -d "$d" ] && [ -d "/proc/$n" ] && continue; rm -rf "$d"; done; `
+            + `mkdir -p '${cliphistDecode}'`])
         Quickshell.execDetached(["mkdir", "-p", `${aiChats}`])
+        Quickshell.execDetached(["mkdir", "-p", `${aiSessions}`])
         Quickshell.execDetached(["rm", "-rf", `${tempImages}`])
     }
 }

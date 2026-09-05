@@ -44,6 +44,90 @@ class WallpaperEngineScannerTests(unittest.TestCase):
             self.assertEqual(projects[0]["title"], "A live wallpaper")
             self.assertEqual(projects[0]["preview"], str(valid / "preview.jpg"))
 
+    def test_scanner_emits_user_settable_properties(self):
+        # The reference model (jagrat7/linux-wallpaper-engine's
+        # parseProjectProperties): only the five control types get a row,
+        # booleans serialize to "1"/"0" - the form WE's --set-property takes -
+        # everything else verbatim, ordered by the author's order/index keys.
+        scanner = load_scanner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "42"
+            project.mkdir()
+            (project / "project.json").write_text(json.dumps({
+                "title": "With knobs",
+                "type": "scene",
+                "general": {"properties": {
+                    "rain": {"type": "bool", "text": "Rain", "value": True, "order": 2},
+                    "schemecolor": {"type": "color", "text": "Scheme color",
+                                    "value": "0 0.5 0", "order": 1},
+                    "speed": {"type": "slider", "text": "Speed", "value": 1.5,
+                              "min": 0, "max": 3, "step": 0.1, "order": 3},
+                    "mode": {"type": "combo", "text": "Mode", "value": "a", "order": 4,
+                             "options": [{"label": "A", "value": "a"},
+                                          {"label": "B", "value": "b"}]},
+                    "heading": {"type": "text", "text": "Just a heading"},
+                    "tex": {"type": "scenetexture", "value": "x"},
+                }},
+            }))
+
+            projects = scanner.scan(str(root))
+            props = projects[0]["properties"]
+
+            names = [p["name"] for p in props]
+            # Ordered by the author's order key; unsupported types absent.
+            self.assertEqual(names, ["schemecolor", "rain", "speed", "mode"])
+            by_name = {p["name"]: p for p in props}
+            self.assertEqual(by_name["rain"]["value"], "1")
+            self.assertEqual(by_name["rain"]["type"], "bool")
+            self.assertEqual(by_name["schemecolor"]["value"], "0 0.5 0")
+            self.assertEqual(by_name["speed"]["min"], 0)
+            self.assertEqual(by_name["speed"]["max"], 3)
+            self.assertEqual(by_name["speed"]["step"], 0.1)
+            self.assertEqual(by_name["mode"]["options"],
+                             [{"label": "A", "value": "a"}, {"label": "B", "value": "b"}])
+
+    def test_combo_numeric_option_values_are_integer_keyed(self):
+        # WE keys combo options by std::to_string(int), so a numeric option
+        # value must serialize as an integer string - "2", not "2.0"/"1.5" -
+        # or --set-property's lookup never matches and the choice is dropped.
+        # A slider's value stays a float (WE reads it with stof), so the int
+        # cast is combo-options-only.
+        scanner = load_scanner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "7"
+            project.mkdir()
+            (project / "project.json").write_text(json.dumps({
+                "title": "Numeric combo",
+                "type": "scene",
+                "general": {"properties": {
+                    "quality": {"type": "combo", "text": "Quality", "value": 2, "order": 1,
+                                "options": [{"label": "Low", "value": 1},
+                                            {"label": "High", "value": 2.0}]},
+                    "speed": {"type": "slider", "text": "Speed", "value": 1.5,
+                              "min": 0, "max": 3, "step": 0.1, "order": 2},
+                }},
+            }))
+
+            by_name = {p["name"]: p for p in scanner.scan(str(root))[0]["properties"]}
+            self.assertEqual(by_name["quality"]["options"],
+                             [{"label": "Low", "value": "1"}, {"label": "High", "value": "2"}])
+            # The combo's own current value is integer-keyed the same way...
+            self.assertEqual(by_name["quality"]["value"], "2")
+            # ...but the slider keeps its float.
+            self.assertEqual(by_name["speed"]["value"], "1.5")
+
+    def test_scanner_properties_default_to_an_empty_list(self):
+        scanner = load_scanner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "7"
+            project.mkdir()
+            (project / "project.json").write_text(json.dumps({"title": "Plain", "type": "video"}))
+            projects = scanner.scan(str(root))
+            self.assertEqual(projects[0]["properties"], [])
+
     def test_scanner_confines_preview_to_the_project_directory(self):
         scanner = load_scanner()
         with tempfile.TemporaryDirectory() as directory:

@@ -2,6 +2,7 @@ import qs
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
+import qs.modules.imi.mediaControls
 import qs.modules.common.functions
 import qs.modules.common.plugins.designsystem.services
 import Quickshell.Services.Mpris
@@ -80,6 +81,19 @@ Item {
                 if (GlobalStates.sidebarRightOpen)
                     root.runEntrance();
             });
+        // The content is built on the open edge, after onSidebarRightOpenChanged
+        // has already fired without it - so a deep link written before the
+        // panel existed is honoured here.
+        root.consumeDialogRequest();
+    }
+
+    // GlobalStates.sidebarRightDialog names a dialog to open ("bluetooth");
+    // consume it and clear it, the way SidebarLeftContent consumes its tab.
+    function consumeDialogRequest() {
+        if (GlobalStates.sidebarRightDialog === "") return;
+        if (GlobalStates.sidebarRightDialog === "bluetooth")
+            root.showBluetoothDialog = true;
+        GlobalStates.sidebarRightDialog = "";
     }
 
     function runEntrance() {
@@ -93,6 +107,7 @@ Item {
         function onSidebarRightOpenChanged() {
             if (GlobalStates.sidebarRightOpen) {
                 root.runEntrance();
+                root.consumeDialogRequest();
                 return;
             }
             if (!GlobalStates.sidebarRightOpen) {
@@ -102,6 +117,12 @@ Item {
                 root.showAudioOutputDialog = false;
                 root.showAudioInputDialog = false;
             }
+        }
+        // A request written while the panel is already open has no open
+        // edge behind it, so it is honoured on the write as well.
+        function onSidebarRightDialogChanged() {
+            if (GlobalStates.sidebarRightOpen)
+                root.consumeDialogRequest();
         }
     }
 
@@ -255,9 +276,7 @@ Item {
                                     Image {
                                         id: avatarImage
                                         anchors.fill: parent
-                                        source: Config.options.profile.avatarPath !== "" 
-                                            ? "file://" + Config.options.profile.avatarPicture 
-                                            : "file:///home/" + (Quickshell.env("USER") ?? "user") + "/.face"
+                                        source: UserAvatar.url
                                         sourceSize.width: avatarImage.width * 2
                                         sourceSize.height: avatarImage.height * 2
                                         fillMode: Image.PreserveAspectCrop

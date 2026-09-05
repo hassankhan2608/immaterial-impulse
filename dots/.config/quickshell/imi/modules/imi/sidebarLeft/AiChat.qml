@@ -4,6 +4,8 @@ import qs.modules.common
 import qs.modules.common.widgets
 import qs.modules.common.functions
 import qs.modules.imi.sidebarLeft.aiChat
+import qs.modules.imi.aiProviders
+import "../../../services/ai/prompt_history.js" as PromptHistory
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -17,16 +19,207 @@ Item {
     property var inputField: messageInputField
     property string commandPrefix: "/"
 
+    // Prompt recall (the tested fold) and the edit takeback. Reset on every
+    // send so a recalled prompt does not leak into the next stepping run.
+    property var promptHistoryState: PromptHistory.idle()
+    property int editingMessageIndex: -1
+
+    function stepPromptHistory(delta) {
+        const r = PromptHistory.step(root.promptHistoryState,
+            Ai.ownPromptHistory, messageInputField.text, delta);
+        if (!r.handled) return false;
+        root.promptHistoryState = { index: r.index, backup: r.backup };
+        if (r.text !== null) {
+            messageInputField.text = r.text;
+            messageInputField.cursorPosition = messageInputField.text.length;
+        }
+        return true;
+    }
+
+    function beginEdit(messageIndex, content) {
+        root.editingMessageIndex = messageIndex;
+        messageInputField.text = String(content ?? "");
+        messageInputField.cursorPosition = messageInputField.text.length;
+        messageInputField.forceActiveFocus();
+    }
+
+    function regenerateLastAnswer() {
+        for (let at = Ai.messageIDs.length - 1; at >= 0; at--) {
+            if (Ai.messageByID[Ai.messageIDs[at]]?.role === "assistant") {
+                Ai.regenerate(at);
+                return;
+            }
+        }
+    }
+
+    function editLastQuestion() {
+        for (let at = Ai.messageIDs.length - 1; at >= 0; at--) {
+            const m = Ai.messageByID[Ai.messageIDs[at]];
+            if (m?.role === "user" && m.visibleToUser !== false) {
+                root.beginEdit(at, String(m.rawContent ?? m.content ?? ""));
+                return;
+            }
+        }
+    }
+
+    function cancelEdit() {
+        if (root.editingMessageIndex < 0) return;
+        root.editingMessageIndex = -1;
+        messageInputField.clear();
+    }
+
+    function acceptComposer(inputText) {
+        AiDrafts.clear(AiSessions.currentId);
+        root.promptHistoryState = PromptHistory.idle();
+        if (root.editingMessageIndex >= 0) {
+            const at = root.editingMessageIndex;
+            root.editingMessageIndex = -1;
+            Ai.editAndResend(at, inputText);
+            return;
+        }
+        root.handleInput(inputText);
+    }
+
+    // One number the opening choreography hangs off: the composer's
+    // rise/blur and the transcript reveal both fire when it bumps.
+    property int entranceTrigger: -1
+
+    // The keys view: the chat area renders the shared providers editor in
+    // place - the maintainer's call over a jump to Settings. Closing it is
+    // an arrival, so the transcript reveals again.
+    // One view over the transcript at a time: "" (the chat), "keys", or
+    // "sessions". Closing any of them is an arrival, so the transcript
+    // reveals; the step-back below reads the same emptiness.
+    property string activeView: ""
+    // Where the open view's back arrow RETURNS to: the view it was opened
+    // from (the fork's viewReturnTo), not always the chat - browse opened
+    // from Providers & keys goes back there.
+    property string viewReturnTo: ""
+    function toggleView(name) {
+        root.viewReturnTo = "";
+        root.activeView = (root.activeView === name) ? "" : name;
+    }
+    function openView(name, from) {
+        root.viewReturnTo = from ?? "";
+        root.activeView = name;
+    }
+    function closeView() {
+        const back = root.viewReturnTo;
+        root.viewReturnTo = "";
+        root.activeView = back;
+    }
+    onActiveViewChanged: if (root.activeView === "") root.revealTranscript()
+
+    // ---- transcript reveal ------------------------------------------------
+    // Delegates in view when this bumps run a short arrival; offscreen rows
+    // are created settled. Never mid-answer: a reveal is an opening
+    // transition, and replaying it over a turn still being written asks
+    // every settled turn to enter again around it.
+    property int transcriptRevealToken: -1
+    function revealTranscript() {
+        if (Ai.isGenerating) return;
+        root.transcriptRevealToken = Math.max(0, root.transcriptRevealToken + 1);
+        transcriptRevealWindow.restart();
+    }
+    // A message added while the pane is on screen arrives - the delegates
+    // created inside this short window play the same fade-and-rise the
+    // reveal uses, so a fresh answer lands the way one does in a chat app
+    // instead of snapping into existence.
+    property bool messageArrivalWindow: false
+    Timer {
+        id: messageArrivalTimer
+        interval: 400
+        onTriggered: root.messageArrivalWindow = false
+    }
+    Connections {
+        // The SOURCE list, not the view's count: the view creates the new
+        // delegate before its own countChanged fires, so a window opened
+        // there is a window opened one message late. The service's property
+        // change precedes the model propagation.
+        target: Ai
+        function onMessageIDsChanged() {
+            if (!GlobalStates.sidebarLeftOpen) return;
+            root.messageArrivalWindow = true;
+            messageArrivalTimer.restart();
+        }
+    }
+
+    Timer {
+        id: transcriptRevealWindow
+        // Covers the stagger while keeping delegates later created by
+        // scrolling settled - an opening transition, never a list-populate
+        // one.
+        interval: Appearance.animation.elementMoveEnter.duration
+            + Appearance.animation.elementMoveSmall.duration * 2
+        onTriggered: root.transcriptRevealToken = -1
+    }
+
+    // ---- the empty state's hello -------------------------------------------
+    property string emptyStateGreeting: ""
+    readonly property var greetingLines: [
+        Translation.tr("Hello"),
+        Translation.tr("What's on your mind?"),
+        Translation.tr("Ready when you are"),
+        Translation.tr("Ask away"),
+        Translation.tr("Where were we?")
+    ]
+    function refreshGreeting() {
+        const configured = String(Config.options.sidebar.ai.greeting ?? "").trim();
+        root.emptyStateGreeting = configured.length > 0 ? configured
+            : root.greetingLines[Math.floor(Math.random() * root.greetingLines.length)];
+    }
+    Component.onCompleted: {
+        root.refreshGreeting();
+        if (messageInputField.text.length === 0)
+            messageInputField.text = AiDrafts.take(AiSessions.currentId);
+    }
+
+    Connections {
+        target: AiSessions
+        function onSessionOpened(id) {
+            // Only an EMPTY composer takes the stored draft - a half-typed
+            // thought is never clobbered by a stale one.
+            if (messageInputField.text.length === 0)
+                messageInputField.text = AiDrafts.take(id);
+        }
+        function onCurrentIdChanged() {
+            if (AiSessions.currentId === "" && messageInputField.text.length === 0)
+                messageInputField.text = AiDrafts.take("");
+        }
+    }
+
     property var suggestionQuery: ""
     property var suggestionList: []
 
+    // Inline message editing: the vacuum below yanked focus back to the
+    // composer after the first keystroke in a message's edit field.
+    property bool transcriptEditActive: false
+
+    // The vacuum stands down whenever ANY other editable text item holds
+    // focus - the temp chip's inline editor was armed and instantly
+    // disarmed by it, which read as the chip not responding at all.
+    function composerMayVacuum() {
+        const afi = root.Window.activeFocusItem;
+        return !(afi && afi !== messageInputField
+            && afi.cursorPosition !== undefined && afi.readOnly === false);
+    }
+
     onFocusChanged: focus => {
-        if (focus) {
+        // Never while a canvas view covers the composer: stealing focus to
+        // a hidden input routed the browse view's search typing into the
+        // chat box. And never while a message is being edited in place,
+        // nor while any other editor owns the keys.
+        if (focus && root.activeView === "" && !root.transcriptEditActive
+                && root.composerMayVacuum()) {
             root.inputField.forceActiveFocus();
         }
     }
 
     Keys.onPressed: event => {
+        // Same guard as onFocusChanged: with a view open, the composer is
+        // under an overlay and must not vacuum the keys - nor while a
+        // message edit field owns them.
+        if (root.activeView !== "" || root.transcriptEditActive || !root.composerMayVacuum()) return;
         messageInputField.forceActiveFocus();
         if (event.modifiers === Qt.NoModifier) {
             if (event.key === Qt.Key_PageUp) {
@@ -38,14 +231,14 @@ Item {
             }
         }
         if ((event.modifiers & Qt.ControlModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_O) {
-            Ai.clearMessages();
+            AiSessions.newSession();
         }
     }
 
     property var allCommands: [
         {
             name: "attach",
-            description: Translation.tr("Attach a file. Only works with Gemini."),
+            description: Translation.tr("Attach a file. Works with Gemini and vision-capable OpenAI-compatible models."),
             execute: args => {
                 Ai.attachFile(args.join(" ").trim());
             }
@@ -143,56 +336,96 @@ Item {
             name: "test",
             description: Translation.tr("Markdown test"),
             execute: () => {
-                Ai.addMessage(`
-<think>
-A longer think block to test revealing animation
-OwO wem ipsum dowo sit amet, consekituwet awipiscing ewit, sed do eiuwsmod tempow inwididunt ut wabowe et dowo mawa. Ut enim ad minim weniam, quis nostwud exeucitation uwuwamcow bowowis nisi ut awiquip ex ea commowo consequat. Duuis aute iwuwe dowo in wepwependewit in wowuptate velit esse ciwwum dowo eu fugiat nuwa pawiatuw. Excepteuw sint occaecat cupidatat non pwowoident, sunt in cuwpa qui officia desewunt mowit anim id est wabowum. Meouw! >w<
-Mowe uwu wem ipsum!
-</think>
-## ✏️ Markdown test
-### Formatting
-
-- *Italic*, \`Monospace\`, **Bold**, [Link](https://example.com)
-- Arch lincox icon <img src="${Quickshell.shellPath("assets/icons/arch-symbolic.svg")}" height="${Appearance.font.pixelSize.small}"/>
-
-### Table
-
-Quickshell vs AGS/Astal
-
-|                          | Quickshell       | AGS/Astal         |
-|--------------------------|------------------|-------------------|
-| UI Toolkit               | Qt               | Gtk3/Gtk4         |
-| Language                 | QML              | Js/Ts/Lua         |
-| Reactivity               | Implied          | Needs declaration |
-| Widget placement         | Mildly difficult | More intuitive    |
-| Bluetooth & Wifi support | ❌               | ✅                |
-| No-delay keybinds        | ✅               | ❌                |
-| Development              | New APIs         | New syntax        |
-
-### Code block
-
-Just a hello world...
-
-\`\`\`cpp
-#include <bits/stdc++.h>
-// This is intentionally very long to test scrolling
-const std::string GREETING = \"UwU\";
-int main(int argc, char* argv[]) {
-    std::cout << GREETING;
-}
-\`\`\`
-
-### LaTeX
-
-
-Inline w/ dollar signs: $\\frac{1}{2} = \\frac{2}{4}$
-
-Inline w/ double dollar signs: $$\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}$$
-
-Inline w/ backslash and square brackets \\[\\int_0^\\infty \\frac{1}{x^2} dx = \\infty\\]
-
-Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
-`, Ai.interfaceRole);
+                Ai.simulateStream(Ai.testStreamText);
+            }
+        },
+        {
+            name: "remember",
+            description: Translation.tr("Save a fact to assistant memory"),
+            execute: args => {
+                const fact = args.join(" ").trim();
+                if (fact.length === 0) {
+                    Ai.addMessage(Translation.tr("Usage: %1remember THE_FACT").arg(root.commandPrefix), Ai.interfaceRole);
+                } else if (AiMemory.remember(fact, "user")) {
+                    Ai.addMessage(Translation.tr("Remembered: %1").arg(fact), Ai.interfaceRole);
+                } else {
+                    Ai.addMessage(Translation.tr("Already known (or memory is disabled)."), Ai.interfaceRole);
+                }
+            }
+        },
+        {
+            name: "forget",
+            description: Translation.tr("Delete a fact by its id (see /memory)"),
+            execute: args => {
+                if (AiMemory.forget(args[0] ?? ""))
+                    Ai.addMessage(Translation.tr("Forgotten."), Ai.interfaceRole);
+                else
+                    Ai.addMessage(Translation.tr("No fact with that id - %1memory lists them.").arg(root.commandPrefix), Ai.interfaceRole);
+            }
+        },
+        {
+            name: "memory",
+            description: Translation.tr("List assistant memory"),
+            execute: () => {
+                if (AiMemory.facts.length === 0) {
+                    Ai.addMessage(Translation.tr("Memory is empty. %1remember adds a fact; the model can too, announced.").arg(root.commandPrefix), Ai.interfaceRole);
+                    return;
+                }
+                const lines = AiMemory.facts.map(f => `- \`${f.id}\` ${f.text} *(${f.source})*`);
+                Ai.addMessage(Translation.tr("## Assistant memory") + "\n\n" + lines.join("\n")
+                    + "\n\n" + Translation.tr("%1forget ID deletes one.").arg(root.commandPrefix), Ai.interfaceRole);
+            }
+        },
+        {
+            name: "usage",
+            description: Translation.tr("Show token usage"),
+            execute: () => {
+                const row = (label, b) => `| ${label} | ${b.total ?? 0} | ${b.requests ?? 0} | ${b.ok ?? 0} | ${b.err ?? 0} |`;
+                Ai.addMessage([
+                    Translation.tr("## Token usage"),
+                    "",
+                    `| | ${Translation.tr("tokens")} | ${Translation.tr("requests")} | ok | err |`,
+                    "|---|---|---|---|---|",
+                    row(Translation.tr("Today"), AiUsage.today),
+                    row(Translation.tr("7 days"), AiUsage.week),
+                    row(Translation.tr("30 days"), AiUsage.month),
+                    row(Translation.tr("All time"), AiUsage.allTime),
+                ].join("\n"), Ai.interfaceRole);
+            }
+        },
+        {
+            name: "diagnose",
+            description: Translation.tr("Why didn't the chat respond?"),
+            execute: () => {
+                const model = Ai.models[Ai.currentModelId];
+                const keyLen = model?.requires_key
+                    ? String(Ai.apiKeys?.[model.key_id] ?? "").length : -1;
+                const lastExit = Ai.lastRequestExitCode;
+                const agoMin = Ai.lastRequestAt > 0
+                    ? Math.round((Date.now() - Ai.lastRequestAt) / 60000) : -1;
+                const yes = "✅", no = "❌";
+                const rows = [
+                    `| ${Translation.tr("Model")} | ${model ? `${model.name} (\`${model.model}\`)` : no + " " + Translation.tr("none selected")} |`,
+                    `| ${Translation.tr("Dialect")} | ${model?.api_format ?? "-"} |`,
+                    `| ${Translation.tr("Endpoint")} | \`${model?.endpoint ?? "-"}\` |`,
+                    `| ${Translation.tr("API key")} | ${keyLen === -1 ? Translation.tr("not needed") : keyLen > 0 ? yes + " " + Translation.tr("present (%1 chars)").arg(keyLen) : no + " " + Translation.tr("MISSING - set it in Providers & keys")} |`,
+                    `| ${Translation.tr("Keyring")} | ${KeyringStorage.loaded ? yes : no + " " + Translation.tr("not loaded yet")} |`,
+                    `| ${Translation.tr("Models fetched")} | ${Ai.modelList.length} |`,
+                    `| ${Translation.tr("Tool mode")} | ${Ai.currentTool} |`,
+                    `| ${Translation.tr("Persona")} | ${AiPersonas.active?.name ?? Translation.tr("Custom")} |`,
+                    `| ${Translation.tr("Last request")} | ${lastExit === -1 ? Translation.tr("none this session") : Translation.tr("exit %1, %2 min ago").arg(lastExit).arg(agoMin)} |`,
+                    `| ${Translation.tr("Generating now")} | ${Ai.isGenerating ? yes : no} |`,
+                ];
+                Ai.addMessage(Translation.tr("## Diagnosis") + "\n\n| | |\n|---|---|\n" + rows.join("\n")
+                    + "\n\n" + Translation.tr("Probing the endpoint…"), Ai.interfaceRole);
+                Ai.probeEndpoint();
+            }
+        },
+        {
+            name: "export",
+            description: Translation.tr("Export this chat to Downloads"),
+            execute: () => {
+                Ai.exportChat();
             }
         },
     ]
@@ -234,50 +467,6 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
         }
     }
 
-    component StatusItem: MouseArea {
-        id: statusItem
-        property string icon
-        property string statusText
-        property string description
-        hoverEnabled: true
-        implicitHeight: statusItemRowLayout.implicitHeight
-        implicitWidth: statusItemRowLayout.implicitWidth
-
-        RowLayout {
-            id: statusItemRowLayout
-            spacing: 0
-            MaterialSymbol {
-                text: statusItem.icon
-                iconSize: Appearance.font.pixelSize.huge
-                color: Appearance.colors.colSubtext
-            }
-            StyledText {
-                font.pixelSize: Appearance.font.pixelSize.small
-                text: statusItem.statusText
-                color: Appearance.colors.colSubtext
-                animateChange: true
-            }
-        }
-
-        StyledToolTip {
-            text: statusItem.description
-            extraVisibleCondition: false
-            alternativeVisibleCondition: statusItem.containsMouse
-        }
-    }
-
-    component StatusSeparator: Rectangle {
-        implicitWidth: 4
-        implicitHeight: 4
-        radius: implicitWidth / 2
-        color: Appearance.colors.colOutlineVariant
-    }
-
-    // The pane's members run their entrance UNDER the slide, ungated (see
-    // the right sidebar's comment for the twice-learned reason): content,
-    // hint, suggestions, composer, each individually, with the composer -
-    // last rank - as the visible tail after the panel lands, which is the
-    // fork's own left-pane look.
     Connections {
         target: GlobalStates
         function onSidebarLeftOpenChanged() {
@@ -289,6 +478,10 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                     emptyStatePlaceholder.scale = 0.85;
                     glyphGrow.start();
                 }
+                root.entranceTrigger++;
+                root.revealTranscript();
+                if (emptyStatePlaceholder.shown)
+                    root.refreshGreeting();
             }
         }
     }
@@ -336,71 +529,63 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
             reference: root.width
         }
 
-        Item {
+        Rectangle { // Tools bar
+            id: toolsBarSurface
+            property real appear: 1   // wave member, first rank
+            Layout.fillWidth: true
+            implicitHeight: controlBar.implicitHeight + Appearance.spacing.space150
+            radius: Appearance.rounding.full
+            color: Appearance.colors.colLayer1
+            clip: true
+
+            ChatControlBar {
+                id: controlBar
+                anchors.fill: parent
+                anchors.leftMargin: Appearance.spacing.space100
+                anchors.rightMargin: Appearance.spacing.space100
+                inputField: messageInputField
+                commandPrefix: root.commandPrefix
+                onKeysRequested: root.toggleView("keys")
+                onSessionsRequested: root.toggleView("sessions")
+            }
+        }
+
+        Rectangle {
+            id: chatAreaSurface
             property real appear: 1
+            color: Appearance.colors.colLayer1
             // Messages
             Layout.fillWidth: true
             Layout.fillHeight: true
             layer.enabled: true
+            radius: Appearance.rounding.large
             layer.effect: OpacityMask {
                 maskSource: Rectangle {
                     width: swipeView.width
                     height: swipeView.height
-                    radius: Appearance.rounding.small
+                    radius: Appearance.rounding.large
                 }
             }
 
-            StyledRectangularShadow {
-                z: 1
-                target: statusBg
-                opacity: messageListView.atYBeginning ? 0 : 1
-                visible: opacity > 0
+            // The page under the providers view: it fades and zooms INWARD as
+            // the view arrives - the M3 container step-back - and gives its
+            // input up while covered. One wrapper drives every transcript-side
+            // child; the keys view stays a sibling above it. (The children
+            // keep their original indentation: re-indenting them all would
+            // bury this change's actual diff.)
+            Item {
+                id: transcriptPage
+                anchors.fill: parent
+                scale: root.activeView === "" ? 1 : 0.95
+                opacity: root.activeView === "" ? 1 : 0
+                visible: opacity > 0.01
+                enabled: root.activeView === ""
+                Behavior on scale {
+                    animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
+                }
                 Behavior on opacity {
                     animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                 }
-            }
-            Rectangle {
-                id: statusBg
-                z: 2
-                anchors {
-                    horizontalCenter: parent.horizontalCenter
-                    top: parent.top
-                    topMargin: 0
-                }
-                implicitWidth: statusRowLayout.implicitWidth + 10 * 2
-                implicitHeight: Math.max(statusRowLayout.implicitHeight, 38)
-                radius: Appearance.rounding.normal - root.padding
-                color: messageListView.atYBeginning ? Appearance.colors.colLayer2 : Appearance.colors.colLayer2Base
-                Behavior on color {
-                    animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
-                }
-                RowLayout {
-                    id: statusRowLayout
-                    anchors.centerIn: parent
-                    spacing: Appearance.spacing.space150
-
-                    StatusItem {
-                        icon: Ai.currentModelHasApiKey ? "key" : "key_off"
-                        statusText: ""
-                        description: Ai.currentModelHasApiKey ? Translation.tr("API key is set\nChange with /key YOUR_API_KEY") : Translation.tr("No API key\nSet it with /key YOUR_API_KEY")
-                    }
-                    StatusSeparator {}
-                    StatusItem {
-                        icon: "device_thermostat"
-                        statusText: Ai.temperature.toFixed(1)
-                        description: Translation.tr("Temperature\nChange with /temp VALUE")
-                    }
-                    StatusSeparator {
-                        visible: Ai.tokenCount.total > 0
-                    }
-                    StatusItem {
-                        visible: Ai.tokenCount.total > 0
-                        icon: "token"
-                        statusText: Ai.tokenCount.total
-                        description: Translation.tr("Total token count\nInput: %1\nOutput: %2").arg(Ai.tokenCount.input).arg(Ai.tokenCount.output)
-                    }
-                }
-            }
 
             ScrollEdgeFade {
                 z: 1
@@ -410,25 +595,101 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
 
             StyledListView { // Message list
                 id: messageListView
+                // An unclipped ListView renders off-screen delegates OVER
+                // the tools bar above it, and their readOnly TextAreas ate
+                // every click on the chips whenever the transcript was
+                // scrolled anywhere but the top.
+                clip: true
                 z: 0
                 anchors.fill: parent
                 spacing: Appearance.spacing.space150
                 popin: false
-                topMargin: statusBg.implicitHeight + statusBg.anchors.topMargin * 2
+                topMargin: Appearance.spacing.space100
+                bottomMargin: Appearance.spacing.space100
+                leftMargin: Appearance.spacing.space100
+                rightMargin: Appearance.spacing.space100
 
                 touchpadScrollFactor: Config.options.interactions.scrolling.touchpadScrollFactor * 1.4
                 mouseScrollFactor: Config.options.interactions.scrolling.mouseScrollFactor * 1.4
 
                 property int lastResponseLength: 0
-                onContentHeightChanged: {
-                    if (atYEnd)
-                        Qt.callLater(positionViewAtEnd);
+                // FOLLOW is a state, not a per-chunk atYEnd check: every
+                // chunk grows the content past the viewport, so atYEnd
+                // flickers false mid-stream, the scroll pill strobed and the
+                // late reposition yanked the view (the recorded jitter).
+                // Only the USER breaks follow - contentY moving UP, which
+                // growth and positionViewAtEnd never do - and reaching the
+                // bottom re-arms it.
+                property bool following: true
+                // Follow breaks on EXPLICIT user input only. The old
+                // contentY-decrease detector also fired on the ListView's
+                // own layout adjustments mid-stream, silently killing the
+                // follow partway through every long answer (both recorded
+                // runs show it dead in their late windows).
+                Connections {
+                    target: messageListView
+                    function onUserWheeled(delta) {
+                        if (delta > 0) {
+                            messageListView.following = false;
+                            messageListView.chasing = false;
+                            messageListView.followVel = 0;
+                        }
+                    }
                 }
-                onCountChanged: {
-                    // Auto-scroll when new messages are added
-                    if (atYEnd)
-                        Qt.callLater(positionViewAtEnd);
+                onMovingChanged: if (moving) { following = false; chasing = false; followVel = 0; }
+                onAtYEndChanged: if (atYEnd) following = true
+
+                // The chase, not the snap: positionViewAtEnd() per chunk
+                // repainted the whole viewport in bursts - the recorded
+                // stutter. Growth now retargets one short animation from
+                // wherever the view is, so the follow reads as continuous
+                // motion; the detector above still stops it the moment the
+                // user scrolls up, because an upward wheel is the one thing
+                // that moves contentY down mid-chase.
+                // The chase is a per-frame exponential approach: every
+                // frame closes a fixed fraction of the remaining gap, so
+                // velocity is proportional to distance and there is no
+                // easing cycle to restart. The recorded SmoothedAnimation
+                // version ran its short hop to completion, stopped, and
+                // re-eased on the next chunk - scroll advanced on every
+                // other frame in bursts, which was the remaining stutter.
+                property bool chasing: false
+                property real followVel: 0
+                function followToEnd() { chasing = true; }
+                FrameAnimation {
+                    id: followTick
+                    running: messageListView.chasing && messageListView.following
+                    onTriggered: {
+                        // SmoothDamp: velocity is STATE, so it stays
+                        // continuous while the target jumps with every
+                        // chunk. The previous gap-proportional step made
+                        // speed track the gap directly - measured on video
+                        // as a 0..79px/frame sawtooth (decay, stall, jump).
+                        const end = messageListView.originY + messageListView.contentHeight
+                            + messageListView.bottomMargin - messageListView.height;
+                        const y = messageListView.contentY;
+                        const gap = end - y;
+                        if (gap <= 0.5 && Math.abs(messageListView.followVel) < 8) {
+                            messageListView.chasing = false;
+                            messageListView.followVel = 0;
+                            return;
+                        }
+                        const dt = Math.min(frameTime, 0.05);
+                        const omega = 2 / 0.35;   // smoothTime 350ms
+                        const x = omega * dt;
+                        const damp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+                        const change = y - end;
+                        const temp = (messageListView.followVel + omega * change) * dt;
+                        messageListView.followVel = (messageListView.followVel - omega * temp) * damp;
+                        let next = end + (change + temp) * damp;
+                        if (next > end) { next = end; messageListView.followVel = 0; }
+                        // Written past the wheel Behavior: smoothed writes
+                        // queue behind alwaysRunToEnd and the chase freezes.
+                        messageListView.setContentYImmediate(next);
+                    }
                 }
+                onContentHeightChanged: if (following) followToEnd()
+                onCountChanged: if (following) followToEnd()
 
                 add: null // Prevent function calls from being janky
 
@@ -441,6 +702,11 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 delegate: AiMessage {
                     required property var modelData
                     required property int index
+                    transcriptRevealToken: root.transcriptRevealToken
+                    transcriptRevealDelay: index * 40
+                    arrivalWindow: root.messageArrivalWindow
+                    onEditResendRequested: (messageIndex, content) => root.beginEdit(messageIndex, content)
+                    onEditingChanged: root.transcriptEditActive = editing
                     messageIndex: index
                     messageData: {
                         Ai.messageByID[modelData];
@@ -454,14 +720,407 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 z: 2
                 shown: Ai.messageIDs.length === 0
                 icon: "neurology"
-                title: Translation.tr("Large language models")
-                description: Translation.tr("Type /key to get started with online models\nCtrl+O to expand sidebar\nCtrl+P to pin sidebar\nCtrl+D to detach sidebar")
+                title: root.emptyStateGreeting
+                description: Translation.tr("Ask anything")
                 shape: MaterialShape.Shape.PixelCircle
             }
 
             ScrollToBottomButton {
                 z: 3
                 target: messageListView
+            }
+
+            Loader {
+                // The keys worth knowing before the first message.
+                z: 3
+                anchors {
+                    horizontalCenter: parent.horizontalCenter
+                    bottom: parent.bottom
+                    bottomMargin: Appearance.spacing.space200
+                }
+                width: Math.min(parent.width - Appearance.spacing.space200 * 2,
+                    Appearance.font.pixelSize.huge * 18)
+                active: Ai.messageIDs.length === 0
+                opacity: active ? 1 : 0
+                visible: opacity > 0.01
+                Behavior on opacity {
+                    animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                }
+                sourceComponent: ColumnLayout {
+                    spacing: Appearance.spacing.space25
+                    EmptyStateKey {
+                        // No providers, no models: the one row that matters
+                        // leads, and it opens the door it names.
+                        visible: Ai.modelList.length === 0
+                        Layout.fillWidth: true
+                        keys: ["+"]
+                        label: Translation.tr("No providers yet - add one to start chatting")
+                        actionable: true
+                        onTriggered: root.activeView = "keys"
+                    }
+                    EmptyStateKey {
+                        visible: Ai.modelList.length > 0
+                        Layout.fillWidth: true
+                        keys: ["/key"]
+                        label: Translation.tr("Manage providers & keys")
+                        actionable: true
+                        onTriggered: root.activeView = "keys"
+                    }
+                    EmptyStateKey { Layout.fillWidth: true; keys: ["Ctrl", "O"]; label: Translation.tr("Expand the sidebar") }
+                    EmptyStateKey { Layout.fillWidth: true; keys: ["Ctrl", "P"]; label: Translation.tr("Pin it open") }
+                    EmptyStateKey { Layout.fillWidth: true; keys: ["Ctrl", "D"]; label: Translation.tr("Detach it into its own window") }
+                }
+            }
+            }
+
+            Loader {
+                // Providers & keys, rendered in place over the transcript.
+                id: overlayViewLoader
+                z: 10
+                anchors.fill: parent
+                // LATCHED, never bound to activeView directly: a row's click
+                // closes the view, and a binding that unloads on close
+                // destroys the very MouseArea still holding the pointer
+                // grab - the next click then misdelivered until the pointer
+                // state reset (the "can't click Chats until I scroll" bug).
+                // The view now outlives the close through its fade and
+                // unloads only once invisible, the SettingsContent dialog
+                // hosts' shape.
+                readonly property bool wanted: root.activeView.length > 0
+                property string shownView: ""
+                active: false
+                Connections {
+                    target: root
+                    function onActiveViewChanged() {
+                        if (root.activeView.length === 0) return;
+                        if (overlayViewLoader.active) {
+                            // View-to-view (keys -> browse): the click that
+                            // asked lives in the OLD view - swap next turn,
+                            // never under the pressed surface. `wanted`
+                            // alone never fired here: it stays true across
+                            // the switch, which left shownView stale and
+                            // both in-view doors dead.
+                            Qt.callLater(() => {
+                                if (root.activeView.length > 0)
+                                    overlayViewLoader.shownView = root.activeView;
+                            });
+                            return;
+                        }
+                        overlayViewLoader.shownView = root.activeView;
+                        overlayViewLoader.active = true;
+                    }
+                }
+                onLoaded: if (overlayViewLoader.shownView === "keys" && !KeyringStorage.loaded) KeyringStorage.fetchKeyringData()
+                opacity: wanted ? 1 : 0
+                visible: opacity > 0.01
+                onVisibleChanged: if (!visible && !wanted) overlayViewLoader.active = false
+                Behavior on opacity {
+                    animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                }
+
+                sourceComponent: overlayViewLoader.shownView === "keys" ? keysViewComponent
+                    : overlayViewLoader.shownView === "sessions" ? sessionsViewComponent
+                    : overlayViewLoader.shownView === "browse" ? browseViewComponent : null
+
+                Component {
+                    id: browseViewComponent
+                    BrowseModelsView {
+                        onClosed: root.closeView()
+                    }
+                }
+
+                Component {
+                    id: sessionsViewComponent
+                    SessionListView {
+                        onClosed: root.closeView()
+                    }
+                }
+
+                Component {
+                    id: keysViewComponent
+                Rectangle {
+                    color: Appearance.colors.colLayer1
+                    radius: Appearance.rounding.large
+
+                    // Arrives from the right, the fork's going-deeper
+                    // direction; the back arrow is the way out.
+                    transform: Translate { id: keysViewSlide; y: 0 }
+                    Component.onCompleted: {
+                        keysViewSlide.x = 24;
+                        keysSlideAnim.start();
+                    }
+                    NumberAnimation {
+                        id: keysSlideAnim
+                        target: keysViewSlide
+                        property: "x"
+                        to: 0
+                        duration: Appearance.animation.elementMoveEnter.duration
+                        easing.type: Easing.OutExpo
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Appearance.spacing.space150
+                        spacing: Appearance.spacing.space100
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Appearance.spacing.space100
+                            RippleButton {
+                                implicitWidth: 32
+                                implicitHeight: 32
+                                buttonRadius: Appearance.rounding.full
+                                colBackground: "transparent"
+                                colRipple: Appearance.colors.colLayer2Active
+                                onClicked: root.closeView()
+                                contentItem: MaterialSymbol {
+                                    anchors.centerIn: parent
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: "arrow_back"
+                                    iconSize: Appearance.font.pixelSize.larger
+                                    color: Appearance.colors.colOnLayer1
+                                }
+                            }
+                            StyledText {
+                                text: Translation.tr("Providers & keys")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                font.weight: Font.DemiBold
+                                color: Appearance.colors.colOnLayer1
+                            }
+                            Item { Layout.fillWidth: true }
+                            RippleButton {
+                                // The fetch: a flat primary-inked icon in
+                                // the header (was a text button lost at the
+                                // bottom; the filled FAB read too heavy).
+                                implicitWidth: 36
+                                implicitHeight: 36
+                                buttonRadius: Appearance.rounding.full
+                                colBackground: "transparent"
+                                colBackgroundHover: Appearance.colors.colLayer2Hover
+                                colRipple: Appearance.colors.colLayer2Active
+                                onClicked: Ai.fetchCustomModels()
+                                contentItem: MaterialSymbol {
+                                    anchors.centerIn: parent
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: "sync"
+                                    iconSize: Appearance.font.pixelSize.larger
+                                    color: Appearance.colors.colPrimary
+                                }
+                                StyledToolTip { text: Translation.tr("Fetch models") }
+                            }
+                        }
+
+                        StyledFlickable {
+                            id: keysScroll
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            // Pinned, or one unwrapped label inflates the
+                            // content item and the whole column slides past
+                            // the sidebar's edge (the persona hint did).
+                            contentWidth: keysScroll.width
+                            contentHeight: keysColumn.implicitHeight
+
+                            ColumnLayout {
+                                id: keysColumn
+                                width: keysScroll.width
+                                spacing: Appearance.spacing.space150
+
+                                ConfigTextArea {
+                                    // The current model's key, for models
+                                    // whose key is NOT a provider card's
+                                    // (an Anthropic entry, an import) -
+                                    // removed once as a duplicate, back
+                                    // gated to exactly the case the cards
+                                    // cannot cover.
+                                    readonly property var keyModel: Ai.models[Ai.currentModelId]
+                                    visible: (keyModel?.requires_key ?? false)
+                                        && !String(keyModel?.key_id ?? "").startsWith("custom_provider_")
+                                    Layout.fillWidth: true
+                                    buttonIcon: "key"
+                                    text: Translation.tr("%1 key").arg(keyModel?.name ?? "")
+                                    placeholderText: Translation.tr("Enter API key")
+                                    password: true
+                                    value: KeyringStorage.loaded
+                                        ? (KeyringStorage.keyringData.apiKeys?.[keyModel?.key_id] || "")
+                                        : ""
+                                    onValueChanged: {
+                                        if (!textArea.activeFocus || !visible) return;
+                                        const keyId = keyModel?.key_id;
+                                        if (!keyId) return;
+                                        const currentText = value;
+                                        Qt.callLater(() => {
+                                            if (KeyringStorage.loaded)
+                                                KeyringStorage.setNestedField(["apiKeys", keyId], currentText);
+                                        });
+                                    }
+                                }
+
+                                AiProvidersEditor {
+                                    Layout.fillWidth: true
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.topMargin: Appearance.spacing.space100
+                                    spacing: Appearance.spacing.space100
+                                    MaterialSymbol {
+                                        text: "person_play"
+                                        iconSize: Appearance.font.pixelSize.larger
+                                        color: Appearance.colors.colOnLayer1
+                                    }
+                                    StyledText {
+                                        text: Translation.tr("Persona")
+                                        color: Appearance.colors.colOnLayer1
+                                        font.pixelSize: Appearance.font.pixelSize.small
+                                    }
+                                }
+                                Flow {
+                                    // One chip per persona plus Custom; a
+                                    // pick applies prompt AND temperature.
+                                    Layout.fillWidth: true
+                                    spacing: Appearance.spacing.space50
+                                    Repeater {
+                                        model: [{ "id": "", "name": Translation.tr("Custom"), "icon": "edit_note", "description": Translation.tr("The free-text prompt below") }]
+                                            .concat(AiPersonas.all)
+                                        delegate: RippleButton {
+                                            id: personaChip
+                                            required property var modelData
+                                            readonly property bool current: AiPersonas.activeId === modelData.id
+                                            implicitHeight: 30
+                                            implicitWidth: chipRow.implicitWidth + Appearance.spacing.space200 * 2
+                                            buttonRadius: Appearance.rounding.full
+                                            colBackground: current ? Appearance.colors.colPrimaryContainer : Appearance.colors.colLayer2
+                                            colBackgroundHover: current ? Appearance.colors.colPrimaryContainerHover : Appearance.colors.colLayer2Hover
+                                            colRipple: current ? Appearance.colors.colPrimaryContainerActive : Appearance.colors.colLayer2Active
+                                            onClicked: AiPersonas.pick(modelData.id)
+                                            contentItem: Item {
+                                                implicitWidth: chipRow.implicitWidth
+                                                implicitHeight: chipRow.implicitHeight
+                                                RowLayout {
+                                                    id: chipRow
+                                                    anchors.centerIn: parent
+                                                    spacing: Appearance.spacing.space50
+                                                    MaterialSymbol {
+                                                        text: personaChip.modelData.icon ?? "person"
+                                                        iconSize: Appearance.font.pixelSize.normal
+                                                        color: personaChip.current ? Appearance.m3colors.m3onPrimaryContainer : Appearance.colors.colOnLayer2
+                                                    }
+                                                    StyledText {
+                                                        text: personaChip.modelData.name
+                                                        font.pixelSize: Appearance.font.pixelSize.smaller
+                                                        color: personaChip.current ? Appearance.m3colors.m3onPrimaryContainer : Appearance.colors.colOnLayer2
+                                                    }
+                                                }
+                                            }
+                                            StyledToolTip { text: personaChip.modelData.description ?? "" }
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Appearance.spacing.space100
+                                    MaterialSymbol {
+                                        text: "psychology"
+                                        iconSize: Appearance.font.pixelSize.larger
+                                        color: Appearance.colors.colOnLayer1
+                                    }
+                                    StyledText {
+                                        text: Translation.tr("System prompt")
+                                        color: Appearance.colors.colOnLayer1
+                                        font.pixelSize: Appearance.font.pixelSize.small
+                                    }
+                                    StyledText {
+                                        visible: AiPersonas.activeId !== ""
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideRight
+                                        text: Translation.tr("(the persona above speaks; typing here switches to Custom)")
+                                        color: Appearance.colors.colSubtext
+                                        font.pixelSize: Appearance.font.pixelSize.smaller
+                                    }
+                                }
+                                Rectangle {
+                                    // A document deserves a document editor -
+                                    // the one-row field clipped the prompt
+                                    // into an unreadable sliver.
+                                    Layout.fillWidth: true
+                                    implicitHeight: 140
+                                    radius: Appearance.rounding.normal
+                                    color: Appearance.colors.colLayer2
+                                    border.width: 1
+                                    border.color: Appearance.colors.colOutlineVariant
+
+                                    StyledFlickable {
+                                        anchors.fill: parent
+                                        anchors.margins: Appearance.spacing.space100
+                                        clip: true
+                                        contentHeight: promptEditor.implicitHeight
+
+                                        TextArea {
+                                            id: promptEditor
+                                            width: parent.width
+                                            wrapMode: TextEdit.Wrap
+                                            background: null
+                                            renderType: Text.NativeRendering
+                                            font.family: Appearance.font.family.main
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                            color: Appearance.colors.colOnLayer2
+                                            selectionColor: Appearance.colors.colSecondaryContainer
+                                            placeholderText: Translation.tr("Extra instructions for every chat")
+                                            placeholderTextColor: Appearance.colors.colSubtext
+                                            text: Config.options.ai.systemPrompt ?? ""
+                                            onTextChanged: {
+                                                // Keystrokes only; a dying
+                                                // view must not write (the
+                                                // provider-wipe rule).
+                                                if (!activeFocus || !visible) return;
+                                                if (Config.options.ai.systemPrompt !== text) {
+                                                    Config.options.ai.systemPrompt = text;
+                                                    // The card the user just
+                                                    // typed into is what
+                                                    // should speak.
+                                                    if (Config.options.ai.persona !== "")
+                                                        Config.options.ai.persona = "";
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RippleButton {
+                                    Layout.fillWidth: true
+                                    implicitHeight: 40
+                                    buttonRadius: Appearance.rounding.normal
+                                    colBackground: "transparent"
+                                    colBackgroundHover: Appearance.colors.colLayer2Hover
+                                    colRipple: Appearance.colors.colLayer2Active
+                                    onClicked: root.openView("browse", "keys")
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: Appearance.spacing.space100
+                                        spacing: Appearance.spacing.space100
+                                        MaterialSymbol {
+                                            text: "travel_explore"
+                                            iconSize: Appearance.font.pixelSize.larger
+                                            color: Appearance.colors.colPrimary
+                                        }
+                                        StyledText {
+                                            Layout.fillWidth: true
+                                            text: (Config.options.ai.customProviders ?? []).length > 0
+                                                ? Translation.tr("Browse models")
+                                                : Translation.tr("Browse OpenRouter models")
+                                            color: Appearance.colors.colOnLayer1
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
             }
         }
 
@@ -529,20 +1188,77 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
         }
 
         Rectangle { // Input area
-            property real appear: 1
             id: inputWrapper
             property real spacing: Appearance.spacing.space100
             Layout.fillWidth: true
             radius: Appearance.rounding.normal - root.padding
             color: Appearance.colors.colLayer2
             implicitHeight: Math.max(inputFieldRowLayout.implicitHeight + inputFieldRowLayout.anchors.topMargin + commandButtonsRow.implicitHeight + commandButtonsRow.anchors.bottomMargin + spacing, 45) + (attachedFileIndicator.implicitHeight + spacing + attachedFileIndicator.anchors.topMargin)
+                + (editBanner.visible ? editBanner.implicitHeight + spacing : 0)
             clip: true
 
             Behavior on implicitHeight {
                 animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
             }
 
-            AttachedFileIndicator {
+            // The fork's composer rise: fade + de-blur + rise as the
+            // choreography's last rank, after the pane's wave has landed.
+            // One writer per channel: this owns opacity, blur and the
+            // transform; the wave no longer dresses this surface.
+            transform: Translate { id: inputWrapperRise }
+            layer.enabled: inputBlur.radius > 0
+            layer.effect: FastBlur { radius: inputBlur.radius }
+            QtObject { id: inputBlur; property real radius: 0 }
+
+            Connections {
+                target: root
+                function onEntranceTriggerChanged() {
+                    if (root.entranceTrigger < 0) return;
+                    inputWrapperAnim.stop();
+                    inputWrapper.opacity = 0;
+                    inputBlur.radius = 20;
+                    inputWrapperRise.y = 40;
+                    inputWrapperAnim.start();
+                }
+            }
+            SequentialAnimation {
+                id: inputWrapperAnim
+                PauseAnimation { duration: Appearance.animation.scale(320) }
+                ParallelAnimation {
+                    NumberAnimation { target: inputWrapper; property: "opacity"; to: 1; duration: Appearance.animation.scale(320); easing.type: Easing.OutCubic }
+                    NumberAnimation { target: inputBlur; property: "radius"; to: 0; duration: Appearance.animation.scale(350); easing.type: Easing.OutCubic }
+                    NumberAnimation { target: inputWrapperRise; property: "y"; to: 0; duration: Appearance.animation.scale(450); easing.type: Easing.OutExpo }
+                }
+            }
+
+            RowLayout { // The takeback banner: says the mode, names the exit.
+                id: editBanner
+                visible: root.editingMessageIndex >= 0
+                anchors {
+                    top: attachedFileIndicator.bottom
+                    left: parent.left
+                    right: parent.right
+                    topMargin: visible ? Appearance.spacing.space50 : 0
+                    leftMargin: Appearance.spacing.space150
+                    rightMargin: Appearance.spacing.space150
+                }
+                spacing: Appearance.spacing.space50
+                MaterialSymbol {
+                    text: "edit_note"
+                    iconSize: Appearance.font.pixelSize.larger
+                    color: Appearance.colors.colPrimary
+                }
+                StyledText {
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                    text: Translation.tr("Editing a question - Enter resends as a new chat, Esc cancels")
+                    color: Appearance.colors.colSubtext
+                    font.pixelSize: Appearance.font.pixelSize.smaller
+                }
+            }
+
+            Flow {
+                // The attachment tray: compact removable thumbs, wrapping.
                 id: attachedFileIndicator
                 anchors {
                     top: parent.top
@@ -550,8 +1266,17 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                     right: parent.right
                     margins: visible ? 5 : 0
                 }
-                filePath: Ai.pendingFilePath
-                onRemove: Ai.attachFile("")
+                visible: Ai.pendingFilePaths.length > 0
+                spacing: Appearance.spacing.space50
+                Repeater {
+                    model: Ai.pendingFilePaths
+                    delegate: AttachmentThumb {
+                        required property string modelData
+                        path: modelData
+                        removable: true
+                        onRemove: Ai.removeAttachment(modelData)
+                    }
+                }
             }
 
             RowLayout { // Input field and send button
@@ -582,6 +1307,10 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                         background: null
 
                         onTextChanged: {
+                            // The draft survives (spec 2026-08-31); the
+                            // takeback edit records nothing while active.
+                            if (root.editingMessageIndex < 0)
+                                AiDrafts.record(AiSessions.currentId, messageInputField.text);
                             // Handle suggestions
                             if (messageInputField.text.length === 0) {
                                 root.suggestionQuery = "";
@@ -692,11 +1421,25 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                         }
 
                         function accept() {
-                            root.handleInput(text);
+                            root.acceptComposer(text);
                             text = "";
                         }
 
                         Keys.onPressed: event => {
+                            // These live HERE, not on the pane root: the
+                            // TextArea holds focus and consumes modified
+                            // arrows internally, so root arms never fire.
+                            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_R) {
+                                root.regenerateLastAnswer();
+                                event.accepted = true;
+                                return;
+                            }
+                            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Up
+                                    && messageInputField.text.length === 0) {
+                                root.editLastQuestion();
+                                event.accepted = true;
+                                return;
+                            }
                             if (event.key === Qt.Key_Tab) {
                                 suggestions.acceptSelectedWord();
                                 event.accepted = true;
@@ -706,6 +1449,17 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                             } else if (event.key === Qt.Key_Down && suggestions.visible) {
                                 suggestions.selectedIndex = Math.min(root.suggestionList.length - 1, suggestions.selectedIndex + 1);
                                 event.accepted = true;
+                            } else if (event.key === Qt.Key_Up && event.modifiers === Qt.NoModifier
+                                    && root.editingMessageIndex < 0
+                                    && (messageInputField.text.length === 0 || root.promptHistoryState.index !== -1)) {
+                                // Shell-style recall - only from an empty
+                                // draft, so cursor movement in a real
+                                // multi-line message is never hijacked.
+                                if (root.stepPromptHistory(-1)) event.accepted = true;
+                            } else if (event.key === Qt.Key_Down && event.modifiers === Qt.NoModifier
+                                    && root.editingMessageIndex < 0
+                                    && root.promptHistoryState.index !== -1) {
+                                if (root.stepPromptHistory(1)) event.accepted = true;
                             } else if ((event.key === Qt.Key_Enter || event.key === Qt.Key_Return)) {
                                 if (event.modifiers & Qt.ShiftModifier) {
                                     // Insert newline
@@ -715,7 +1469,7 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                                     // Accept text
                                     const inputText = messageInputField.text;
                                     messageInputField.clear();
-                                    root.handleInput(inputText);
+                                    root.acceptComposer(inputText);
                                     event.accepted = true;
                                 }
                             } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
@@ -743,8 +1497,12 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                                 }
                                 event.accepted = false; // No image, let text pasting proceed
                             } else if (event.key === Qt.Key_Escape) {
-                                // Esc to detach file
-                                if (Ai.pendingFilePath.length > 0) {
+                                if (root.editingMessageIndex >= 0) {
+                                    // Cancel the takeback before Escape can
+                                    // mean detach-file.
+                                    root.cancelEdit();
+                                    event.accepted = true;
+                                } else if (Ai.pendingFilePaths.length > 0) {
                                     Ai.attachFile("");
                                     event.accepted = true;
                                 } else {
@@ -761,15 +1519,21 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                     implicitWidth: 40
                     implicitHeight: 40
                     buttonRadius: Appearance.rounding.small
-                    enabled: messageInputField.text.length > 0
+                    // While generating this is the STOP control (M3's send
+                    // morph) - the one way to end a runaway answer.
+                    enabled: messageInputField.text.length > 0 || Ai.isGenerating
                     toggled: enabled
 
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: sendButton.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                         onClicked: {
+                            if (Ai.isGenerating) {
+                                Ai.stopGeneration();
+                                return;
+                            }
                             const inputText = messageInputField.text;
-                            root.handleInput(inputText);
+                            root.acceptComposer(inputText);
                             messageInputField.clear();
                         }
                     }
@@ -780,7 +1544,7 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                         horizontalAlignment: Text.AlignHCenter
                         iconSize: 22
                         color: sendButton.enabled ? Appearance.m3colors.m3onPrimary : Appearance.colors.colOnLayer2Disabled
-                        text: "arrow_upward"
+                        text: Ai.isGenerating ? "stop" : "arrow_upward"
                     }
                 }
             }
@@ -795,23 +1559,46 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 anchors.rightMargin: Appearance.spacing.space100
                 spacing: Appearance.spacing.space50
 
-                property var commandsShown: [
-                    {
-                        name: "",
-                        sendDirectly: false,
-                        dontAddSpace: true
-                    },
-                    {
-                        name: "clear",
-                        sendDirectly: true
-                    },
-                ]
-
-                ApiInputBoxIndicator {
-                    // Model indicator
-                    icon: "api"
-                    text: Ai.getModel()?.name ?? ""
-                    tooltipText: Translation.tr("Current model: %1\nSet it with %2model MODEL").arg(Ai.getModel()?.name ?? "").arg(root.commandPrefix)
+                StyledComboBox { // The model picker lives at the composer now.
+                    id: modelPicker
+                    Layout.fillWidth: false
+                    Layout.preferredWidth: Math.min(implicitWidth, 190)
+                    Layout.minimumWidth: 0
+                    implicitHeight: 28
+                    // Model names are long; the menu opens wider than the
+                    // compact button so they read whole.
+                    popupWidth: 260
+                    buttonIcon: "network_intelligence"
+                    textRole: "name"
+                    colBackground: "transparent"
+                    colBackgroundHover: Appearance.colors.colLayer2Hover
+                    colBackgroundActive: Appearance.colors.colLayer2Active
+                    model: Ai.pickerModelList.map(id => ({ name: Ai.models[id]?.name ?? id, value: id }))
+                        .concat([{ name: Translation.tr("Browse models…"), value: "__browse__" }])
+                    currentIndex: Ai.pickerModelList.indexOf(Ai.currentModelId)
+                    // First use / a stale persisted id: nothing selected, and
+                    // a blank button reads as broken.
+                    displayText: modelPicker.currentIndex < 0
+                        ? Translation.tr("Select model")
+                        : (modelPicker.model[modelPicker.currentIndex]?.name ?? "")
+                    onActivated: index => {
+                        const chosen = modelPicker.model[index];
+                        if (!chosen) return;
+                        if (chosen.value === "__browse__") {
+                            root.openView("browse", "");
+                            modelPicker.currentIndex = Ai.pickerModelList.indexOf(Ai.currentModelId);
+                            return;
+                        }
+                        Ai.setModel(chosen.value);
+                    }
+                    // A pick writes currentIndex and destroys the binding, so
+                    // the /model command path resyncs it here.
+                    Connections {
+                        target: Ai
+                        function onCurrentModelIdChanged() {
+                            modelPicker.currentIndex = Ai.pickerModelList.indexOf(Ai.currentModelId);
+                        }
+                    }
                 }
 
                 ApiInputBoxIndicator {
@@ -823,32 +1610,6 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
 
                 Item {
                     Layout.fillWidth: true
-                }
-
-                ButtonGroup {
-                    // Command buttons
-                    padding: 0
-
-                    Repeater {
-                        // Command buttons
-                        model: commandButtonsRow.commandsShown
-                        delegate: ApiCommandButton {
-                            property string commandRepresentation: `${root.commandPrefix}${modelData.name}`
-                            buttonText: commandRepresentation
-                            downAction: () => {
-                                if (modelData.sendDirectly) {
-                                    root.handleInput(commandRepresentation);
-                                } else {
-                                    messageInputField.text = commandRepresentation + (modelData.dontAddSpace ? "" : " ");
-                                    messageInputField.cursorPosition = messageInputField.text.length;
-                                    messageInputField.forceActiveFocus();
-                                }
-                                if (modelData.name === "clear") {
-                                    messageInputField.text = "";
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }

@@ -1,4 +1,5 @@
 import qs.modules.common
+import "modules/common/functions/bar_popup_slot.js" as BarPopupSlot
 import qs.services
 import QtQuick
 import Quickshell
@@ -13,6 +14,8 @@ Singleton {
     property bool barOpen: true
     property bool crosshairOpen: false
     property bool sidebarLeftOpen: false
+    // A path here opens the fullscreen image viewer on it; "" closes it.
+    property string aiImageViewerSource: ""
     // Which tab the left sidebar shows next time it opens, as the tab's
     // untranslated id rather than its index: every name in the tab bar is a
     // Translation.tr(...) call, so a deep link resolved against the label
@@ -23,7 +26,16 @@ Singleton {
     // shown"; SidebarLeftContent consumes it on open and clears it, the way
     // GlobalStates.settingsPage is consumed.
     property string sidebarLeftTab: ""
+    // The icon of the left sidebar's CURRENT page, published live by
+    // SidebarLeftContent so the bar button's glyph can follow the page.
+    property string sidebarLeftTabIcon: ""
     property bool sidebarRightOpen: false
+    // A dialog the right sidebar opens next time it shows ("bluetooth"),
+    // consumed and cleared by SidebarRightContent the way sidebarLeftTab is.
+    // A property, not a signal: the sidebar's content is a Loader that only
+    // exists while the panel is shown, so a signal fired from the bar before
+    // the panel has been built reaches nothing.
+    property string sidebarRightDialog: ""
     property bool mediaControlsOpen: false
     property bool sysTrayOverflowOpen: false
     // The idle path: hypridle's listener blanks every screen, and the ladder
@@ -54,6 +66,19 @@ Singleton {
     // draws its cutout into this box and measures its clicks against the same
     // rectangle, so the pixels it judges are the pixels the depth layer masks.
     property var clockDepthViewports: ({})
+    // The active Wallpaper Engine scene's content aspect (w/h), published by
+    // Background from the live surface's real content size - which the crop
+    // picker needs because the scene's authored aspect is not the preview
+    // image's. 0 while no scene is live or before its first frame (a video
+    // has no content aspect to pan, so it stays 0).
+    property real weContentAspect: 0
+    // A grabbed PNG of the active scene's FULL uncropped frame (its real
+    // aspect), and which project it is for - the crop picker shows the actual
+    // scene rather than the preview image, which does not depict it. Written
+    // by Background when the renderer answers a scene grab; the picker checks
+    // the project id so a stale grab is never shown.
+    property string weSceneGrabPath: ""
+    property string weSceneGrabProject: ""
     // True while a copy snip's crop/clipboard pipeline runs; cancel paths
     // must not dismiss (and thereby kill) the in-flight process.
     property bool snipCopyInFlight: false
@@ -75,11 +100,71 @@ Singleton {
     property real desktopMenuX: 0
     property real desktopMenuY: 0
     property string wallpaperSelectorTarget: "wallpaper"
-    // The bar hover popup (StyledPopup) whose target widget is currently
-    // hovered. Adjacent bar popups are separate layer-shell surfaces, so a
-    // lingering one can paint over a newly opened neighbour; each popup watches
-    // this so the previous one closes at once instead of overlapping the new one.
+    // The bar hover popup whose target widget is currently hovered. Adjacent
+    // bar popups are separate layer-shell surfaces, so a lingering one can
+    // paint over a newly opened neighbour.
+    //
+    // The RULES for who gets it live here, beside the slot, rather than in the
+    // popup type. They used to sit in StyledPopup, which meant a shared widget
+    // in modules/common/widgets arbitrated a global resource between its own
+    // instances - it read this slot, wrote it, gated on `editMode`, and
+    // watched for another popup taking over. A component in the shared folder
+    // is meant to be presentational; that one was running a protocol.
+    //
+    // Now a popup only ASKS. It declares what it wants and is told; the two
+    // functions below are the whole protocol, and the popup keeps no rule of
+    // its own except what its own hover state means.
     property var activeBarPopup: null
+
+    // Grant the card to `popup`, or refuse. Returns whether it now holds it.
+    // The decision itself is in bar_popup_slot.js, which the QML unit suite
+    // drives directly - this singleton is substituted by a double there, so a
+    // rule written inline here would be tested through a copy of itself.
+    function claimBarPopup(popup): bool {
+        if (!popup) return false;
+        const occupant = root.activeBarPopup;
+        const verdict = BarPopupSlot.resolveClaim({
+            editMode: root.editMode,
+            isOccupant: occupant === popup,
+            occupantPresent: occupant !== null && occupant !== undefined,
+            occupantPinned: occupant?.pinnedOpen ?? false,
+            candidatePinned: popup.pinnedOpen ?? false,
+        });
+        if (verdict === BarPopupSlot.REFUSE) return false;
+        if (verdict === BarPopupSlot.ALREADY) return true;
+
+        // Tell the outgoing holder before the swap, so a neighbour that was
+        // only lingering on its hover grace collapses on the frame the pointer
+        // lands on the new widget rather than 180ms later.
+        if (occupant && occupant.releaseHoverHold)
+            occupant.releaseHoverHold();
+        root.activeBarPopup = popup;
+        return true;
+    }
+
+    // Vacate, if `popup` is the one holding it. Called by a popup being
+    // destroyed under its own card - a tray that empties, a plugin disabled -
+    // which would otherwise strand the card at its last size with a live input
+    // mask, and by the overlay once a card has finished exiting.
+    function releaseBarPopup(popup) {
+        if (root.activeBarPopup === popup)
+            root.vacateBarPopup();
+    }
+
+    // Empty the slot, telling whoever held it first.
+    //
+    // Every path that empties it goes through here, which is the half the old
+    // arrangement got for free and this one has to be deliberate about: each
+    // popup used to watch the slot and drop its own hover grace on ANY change,
+    // so a card exiting and Edit Mode opening both collapsed a lingering
+    // neighbour. With the watching gone, the notification has to come from the
+    // place that does the emptying.
+    function vacateBarPopup() {
+        const occupant = root.activeBarPopup;
+        root.activeBarPopup = null;
+        if (occupant && occupant.releaseHoverHold)
+            occupant.releaseHoverHold();
+    }
     // Edit Mode: the desktop shrinks into a viewport and every affordance it
     // normally hides comes out (docs/superpowers/specs/2026-08-16-edit-mode-design.md).
     //
@@ -256,6 +341,7 @@ Singleton {
         const entries = root.editUndoBatch;
         root.editUndoBatch = null;
         if (entries === null || entries.length === 0) return;
+        root.editRedoStack = [];
         if (entries.length === 1) {
             root.editUndoStack = EditMode.undoPush(root.editUndoStack, entries[0]);
             return;
@@ -266,23 +352,40 @@ Singleton {
         // and replaying those in order leaves it at 60 - the last entry wins
         // and the undo appears to move the widget forward. The group drag that
         // introduced batches never showed it, because its entries are one per
-        // widget and independent, so any order looks right.
-        root.editUndoStack = EditMode.undoPush(root.editUndoStack, () => {
-            for (let index = entries.length - 1; index >= 0; index--) entries[index]();
-        });
+        // widget and independent, so any order looks right. `composite` is
+        // that walk, and it returns the redo of the whole gesture.
+        root.editUndoStack = EditMode.undoPush(root.editUndoStack, EditMode.composite(entries));
     }
+    // The redo stack: what each undone entry returned (edit_mode.js's `swap`
+    // makes every entry return the entry that reverses it). A NEW mutation
+    // empties it - the redone future was on the history the user just left.
+    property var editRedoStack: []
     function editUndoPush(entry) {
         if (!root.editMode) return;
         if (root.editUndoBatch !== null) {
             root.editUndoBatch.push(entry);
             return;
         }
+        root.editRedoStack = [];
         root.editUndoStack = EditMode.undoPush(root.editUndoStack, entry);
     }
     function editUndo() {
         const popped = EditMode.undoPop(root.editUndoStack);
         root.editUndoStack = popped.stack;
-        if (popped.entry !== null) popped.entry();
+        if (popped.entry === null) return;
+        const redo = popped.entry();
+        if (typeof redo === "function")
+            root.editRedoStack = EditMode.undoPush(root.editRedoStack, redo);
+    }
+    function editRedo() {
+        const popped = EditMode.undoPop(root.editRedoStack);
+        root.editRedoStack = popped.stack;
+        if (popped.entry === null) return;
+        const undo = popped.entry();
+        // Straight onto the stack: not through editUndoPush, which would empty
+        // the redo stack this entry just came from and fold into an open batch.
+        if (typeof undo === "function")
+            root.editUndoStack = EditMode.undoPush(root.editUndoStack, undo);
     }
 
     property bool dropShelfOpen: false
@@ -310,10 +413,11 @@ Singleton {
     onEditModeChanged: {
         if (root.editMode) {
             root.clockDepthSelectOpen = false;
-            // StyledPopup refuses NEW claims for the length of the mode; this
-            // is the popup already holding the card when the mode opens, whose
-            // card would otherwise sit over the bar being edited.
-            root.activeBarPopup = null;
+            // New claims are refused for the length of the mode (see
+            // claimBarPopup); this is the popup already holding the card when
+            // the mode opens, whose card would otherwise sit over the bar being
+            // edited.
+            root.vacateBarPopup();
             // ...and the same argument, one layer up. Both sidebars are
             // `WlrLayer.Top` and the mode's chrome is `Overlay`, so an open
             // right sidebar is painted over by the widget drawer that shares

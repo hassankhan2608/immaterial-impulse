@@ -29,6 +29,19 @@ ColumnLayout {
         },
     ]
     property var currentValue: null
+    // Dense: when every option carries an icon, the chips are icon-only and
+    // name themselves on hover, and the row's label carries the current
+    // option's name - four text chips took ~350px, four icons take ~150, and
+    // a group's choice rows all fit beside their labels. A choice with a
+    // text-only option keeps its text chips.
+    property bool compact: false
+    readonly property bool iconOnly: root.compact && root.options.length > 0
+        && root.options.every(option => (option.icon ?? "").length > 0)
+    readonly property string currentName: {
+        for (const option of root.options)
+            if (option.value == root.currentValue) return option.displayName ?? "";
+        return "";
+    }
     // A full-width row beneath the choice, for what the current option means
     // on this machine. Empty for every caller that does not set it, and an
     // empty RowLayout has no height, so it costs nothing elsewhere. The gap
@@ -41,12 +54,31 @@ ColumnLayout {
     spacing: 0
     Layout.leftMargin: Appearance.spacing.space100
     Layout.rightMargin: Appearance.spacing.space100
+    // A stacked row is two lines that belong together; the air goes BETWEEN
+    // rows, not between a label and its own chips.
+    Layout.topMargin: rowGrid.stacked ? Appearance.spacing.space100 : 0
 
-    RowLayout {
+    // A grid, not a row: a labelled row whose chips cannot share the line with
+    // the label STACKS - label above, chips on a row of their own beneath,
+    // right-aligned and still able to wrap - instead of wrapping the chips
+    // beside a vertically centred label, which put "Bold" alone on a second
+    // line next to "Minute hand" and read as a mistake. The cells move by
+    // Layout.row/column; the same three children serve both shapes.
+    GridLayout {
+        id: rowGrid
         Layout.fillWidth: true
-        spacing: Appearance.spacing.space150
+        columns: 3
+        columnSpacing: Appearance.spacing.space150
+        rowSpacing: Appearance.spacing.space25
+        readonly property bool stacked: root.text !== ""
+            && labelGroup.implicitWidth + rowGrid.columnSpacing + buttonsFlow.naturalWidth > rowGrid.width
 
         RowLayout {
+            id: labelGroup
+            Layout.row: 0
+            Layout.column: 0
+            // Stacked, the label sits on the bottom of its line, hugging the chips.
+            Layout.alignment: rowGrid.stacked ? (Qt.AlignLeft | Qt.AlignBottom) : Qt.AlignVCenter
             spacing: Appearance.spacing.space150
             visible: root.text !== ""
             OptionalMaterialSymbol {
@@ -56,8 +88,22 @@ ColumnLayout {
             StyledText {
                 id: labelWidget
                 Layout.fillWidth: true
+                // The label keeps its width when the row is short of room, so
+                // it is the chips that yield and wrap - not the label that is
+                // drawn under them (the clock's "Cookie: minute hand" row lost
+                // its last word under five chips).
+                Layout.minimumWidth: labelWidget.implicitWidth
                 text: root.text
                 color: Appearance.colors.colOnSecondaryContainer
+                opacity: root.enabled ? 1 : 0.4
+            }
+            // The current choice by name, since dense chips do not spell it.
+            StyledText {
+                visible: root.iconOnly && root.currentName.length > 0
+                Layout.minimumWidth: implicitWidth
+                text: root.currentName
+                font.pixelSize: Appearance.font.pixelSize.small
+                color: Appearance.colors.colSubtext
                 opacity: root.enabled ? 1 : 0.4
             }
             InfoTooltipIcon {
@@ -66,9 +112,33 @@ ColumnLayout {
             }
         }
 
+        // The unlabelled path's right edge. With the Flow the only item in the
+        // row, its `Layout.alignment: Qt.AlignRight` aligned it inside a cell
+        // that was already its own width and the surplus stayed at the row's
+        // end - so in a card the chips sat left, right after the title, and
+        // four stacked cards had four different right edges. The spacer takes
+        // the surplus (the Flow's maximum is its natural width), and when the
+        // row is narrower than the chips the spacer is 0 and the Flow shrinks
+        // and wraps as before. The labelled path's label already fills.
+        Item {
+            Layout.row: 0
+            Layout.column: 1
+            // On the label's row: fills the unlabelled row so the chips earn
+            // the right edge, and fills a stacked row's remainder beside the
+            // label so the label keeps the left.
+            visible: !root.text || rowGrid.stacked
+            Layout.fillWidth: true
+        }
+
         Flow {
             id: buttonsFlow
-            Layout.fillWidth: !root.text
+            Layout.row: rowGrid.stacked ? 1 : 0
+            Layout.column: rowGrid.stacked ? 0 : 2
+            Layout.columnSpan: rowGrid.stacked ? 3 : 1
+            // Fills on both paths now, capped at its natural width: with the
+            // label holding its minimum, a row too narrow for label and chips
+            // gives the Flow less and the chips wrap, labelled or not.
+            Layout.fillWidth: true
             Layout.alignment: Qt.AlignRight
             spacing: Appearance.spacing.space25
 
@@ -98,15 +168,24 @@ ColumnLayout {
                 }
                 return counted > 0 ? total + spacing * (counted - 1) : 0;
             }
-            Layout.preferredWidth: root.text ? buttonsFlow.naturalWidth : -1
-            // Not paired with a `Layout.minimumWidth: 0`: an ALIGNED child is
-            // handed its preferred size and positioned, never resized, so the
-            // minimum is never consulted. A row too narrow for its chips
-            // therefore overflows rather than wrapping - measured, a 228px row
-            // leaves this Flow at its full 333px. That predates this fix and is
-            // its own change: making the chips yield means giving up
-            // `Layout.alignment`, and then the right edge has to be earned some
-            // other way.
+            // On BOTH paths. The first fix handed the natural width over only
+            // when the row had a label - the unlabelled row, which the Quick
+            // page's Bar & Screen cards use (`Layout.fillWidth: false`,
+            // right-aligned under a heading of their own), kept the circle,
+            // and the same four chips latched one per line there once the
+            // page was built across frames ("This broke again").
+            Layout.preferredWidth: buttonsFlow.naturalWidth
+            // An ALIGNED child is handed its preferred size and positioned,
+            // never resized, so a row too narrow for its chips overflowed
+            // rather than wrapping - the Quick page's Bar style card, once a
+            // fifth style joined, drew its last chip past the card's edge
+            // (measured: a 461px Flow in a 442px card). On the unlabelled path
+            // the Flow FILLS its cell up to the natural width as a maximum: a
+            // wider cell leaves it at the natural width, right-aligned, and a
+            // narrower one gives it less, which is when the chips wrap for the
+            // real reason - on the labelled path too, since the label holds its
+            // own minimum width and cannot be the thing that yields.
+            Layout.maximumWidth: buttonsFlow.naturalWidth
 
             Repeater {
                 model: root.options
@@ -127,7 +206,12 @@ ColumnLayout {
                     leftmost: index === 0
                     rightmost: index === root.options.length - 1
                     buttonIcon: modelData.icon || ""
-                    buttonText: modelData.displayName
+                    buttonText: root.iconOnly ? "" : modelData.displayName
+                    // An icon-only chip names itself on hover.
+                    StyledToolTip {
+                        extraVisibleCondition: root.iconOnly
+                        text: modelData.displayName ?? ""
+                    }
                     toggled: root.currentValue == modelData.value
                     // An option the shell declines. It is still drawn, and still
                     // drawn as current if a stored config already holds it -

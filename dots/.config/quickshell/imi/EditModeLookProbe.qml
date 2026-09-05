@@ -289,10 +289,9 @@ ShellRoot {
         }
     }
 
-    // The chrome's two pieces, when there are any. Reached through the loader
-    // rather than held as ids, since they do not exist at rest.
+    // The chrome's toolbar, when there is one. Reached through the loader
+    // rather than held as an id, since it does not exist at rest.
     readonly property Item toolbar: chromeLoader.item?.toolbarItem ?? null
-    readonly property Item tabBar: chromeLoader.item?.tabBarItem ?? null
 
     readonly property matrix4x4 matrix: Qt.matrix4x4(
         harness.applied.scale, 0, 0, harness.applied.x,
@@ -313,8 +312,6 @@ ShellRoot {
             + ` cornerColor=${harness.cornerWidgetColor}`
             + ` toolbar=${harness.toolbar?.x ?? -1},${harness.toolbar?.y ?? -1}`
             + `,${harness.toolbar?.width ?? 0},${harness.toolbar?.height ?? 0}`
-            + ` tabbar=${harness.tabBar?.x ?? -1},${harness.tabBar?.y ?? -1}`
-            + `,${harness.tabBar?.width ?? 0},${harness.tabBar?.height ?? 0}`
             + ` area=${harness.area.x},${harness.area.y},${harness.area.width},${harness.area.height}`
             + ` reserved=${harness.insetTop},${harness.insetBottom}`
             + ` chromeColor=${Appearance.m3colors.m3surfaceContainer}`);
@@ -374,11 +371,18 @@ ShellRoot {
         // left rather than in the middle of a panel it overlaps.
         const freeX = harness.area.x + harness.area.width - (harness.card.x + harness.card.width);
         const freeY = harness.area.y + harness.area.height - (harness.card.y + harness.card.height);
-        harness.check("...about dead centre of the usable area, with room for the drawer",
+        // Sideways the card is centred with room for the drawer. Vertically the
+        // two bands are UNEQUAL since the tab bar left: the toolbar's band above
+        // (edge margin, chrome, margin) and one margin below, with any slack
+        // the width's constraint leaves shared equally between them.
+        const bandTop = harness.edgeMargin + harness.chromeThickness + harness.margin;
+        const gapTop = harness.card.y - harness.area.y;
+        harness.check("...centred sideways with room for the drawer, under the toolbar's band, a margin above the area's bottom",
             Math.abs((harness.card.x - harness.area.x) - freeX) < 0.5
-                && Math.abs((harness.card.y - harness.area.y) - freeY) < 0.5
                 && harness.card.x - harness.area.x >= harness.drawerWidth / 2 + harness.margin - 0.5
-                && harness.card.y - harness.area.y >= harness.margin - 0.5,
+                && gapTop >= bandTop - 0.5
+                && freeY >= harness.margin - 0.5
+                && Math.abs((gapTop - bandTop) - (freeY - harness.margin)) < 0.5,
             `card=${harness.card.x.toFixed(1)},${harness.card.y.toFixed(1)}`
                 + ` ${harness.card.width.toFixed(1)}x${harness.card.height.toFixed(1)}`
                 + ` area=${harness.area.y.toFixed(1)}+${harness.area.height.toFixed(1)}`);
@@ -387,12 +391,10 @@ ShellRoot {
         // and one that has left the screen is not there at all. Both bands are
         // opened by the shrink itself, which is why this is asserted against
         // the card rather than against a chosen inset.
-        harness.check("the toolbar and the tab bar sit in the bands the shrink opened",
-            harness.toolbar !== null && harness.tabBar !== null
+        harness.check("the toolbar sits in the band the shrink opened above the desktop",
+            harness.toolbar !== null
                 && harness.toolbar.y >= 0
-                && harness.toolbar.y + harness.toolbar.height <= harness.card.y + 0.5
-                && harness.tabBar.y >= harness.card.y + harness.card.height - 0.5
-                && harness.tabBar.y + harness.tabBar.height <= harness.screenHeight,
+                && harness.toolbar.y + harness.toolbar.height <= harness.card.y + 0.5,
             `toolbar=${harness.toolbar?.y.toFixed(1)}+${harness.toolbar?.height.toFixed(1)}`
                 + ` band=${harness.card.y.toFixed(1)}`);
         // ...and clear of the two edges the bar and the dock own, by the edge
@@ -409,14 +411,12 @@ ShellRoot {
         // check is about, so it is the outer number that belongs here - and
         // the inner one is asserted by the band check above.
         harness.check("...clear of the bar's and the dock's own edges",
-            harness.toolbar !== null && harness.tabBar !== null
+            harness.toolbar !== null
                 && harness.toolbar.y >= harness.insetTop + harness.edgeMargin - 0.5
-                && harness.tabBar.y + harness.tabBar.height
-                    <= harness.screenHeight - harness.insetBottom
-                        - harness.edgeMargin + 0.5
                 && harness.card.y >= harness.insetTop
+                // No chrome below now: the card itself keeps a margin off the dock.
                 && harness.card.y + harness.card.height
-                    <= harness.screenHeight - harness.insetBottom,
+                    <= harness.screenHeight - harness.insetBottom - harness.margin + 0.5,
             `toolbar=${harness.toolbar?.y.toFixed(1)} reserved=${harness.insetTop},${harness.insetBottom}`);
         // ...and on the desktop's own axis rather than the screen's, which is
         // the same point today and stops being one when the drawer translates
@@ -424,20 +424,15 @@ ShellRoot {
         // centred in the area: chrome that drifted toward one edge would still
         // be "inside the band".
         const gapAbove = harness.toolbar !== null ? harness.toolbar.y - harness.area.y : -1;
-        const gapBelow = harness.tabBar !== null
-            ? harness.area.y + harness.area.height - (harness.tabBar.y + harness.tabBar.height) : -2;
-        harness.check("...centred on the desktop, in two bands of equal height",
-            harness.toolbar !== null && harness.tabBar !== null
+        harness.check("...centred on the desktop, the edge margin off the area's top",
+            harness.toolbar !== null
                 && Math.abs((harness.toolbar.x + harness.toolbar.width / 2)
                     - (harness.card.x + harness.card.width / 2)) < 0.5
-                && Math.abs((harness.tabBar.x + harness.tabBar.width / 2)
-                    - (harness.card.x + harness.card.width / 2)) < 0.5
-                && Math.abs(gapAbove - gapBelow) < 0.5
-                // ...and both are the EDGE margin. Equal to each other alone
-                // passes at any symmetric value, including the old one, so it
-                // could not see the band's split arrive or leave.
+                // The EDGE margin, not any gap: a band placed at 0.5 would put
+                // the toolbar in the middle of its band, and this could not see
+                // the split arrive or leave.
                 && Math.abs(gapAbove - harness.edgeMargin) < 0.5,
-            `gaps=${gapAbove.toFixed(1)},${gapBelow.toFixed(1)}`
+            `toolbar=${harness.toolbar?.x.toFixed(1)}+${harness.toolbar?.width.toFixed(1)} card=${harness.card.x.toFixed(1)}+${harness.card.width.toFixed(1)} gapAbove=${gapAbove.toFixed(1)} edgeMargin=${harness.edgeMargin}`
                 + ` edgeMargin=${harness.edgeMargin.toFixed(1)}`);
         harness.check("in the mode at rest the lattice is down",
             !widgetCanvas.gridVisible && widgetCanvas.gridStrength === 0);
@@ -515,7 +510,7 @@ ShellRoot {
         // whole surface on the real shell, and "the desktop came back" and "the
         // toolbar went away" are two different regressions.
         harness.check("...and takes the chrome with it", !chromeLoader.active
-            && harness.toolbar === null && harness.tabBar === null);
+            && harness.toolbar === null);
         harness.shoot("after", () => harness.finish());
     }
 

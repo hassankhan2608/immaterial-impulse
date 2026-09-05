@@ -137,11 +137,30 @@ Singleton {
             root.options.bar.media.preferredPlayer = normalized;
     }
 
-    function migrateSplitCheatsheetButtons() {
-        if (root.options.cheatsheet.migratedSplitButtons)
+    function migrateRecordIndicatorIntoBar() {
+        if (root.options.bar.layouts.migratedRecordIndicator)
             return;
-        root.setNestedValue("cheatsheet.splitButtons", true);
-        root.setNestedValue("cheatsheet.migratedSplitButtons", true);
+        const layout = root.options.bar.layouts.rightLayout.slice();
+        if (!layout.includes("recordIndicator")) {
+            const at = layout.indexOf("privacyIndicator");
+            layout.splice(at >= 0 ? at : layout.length, 0, "recordIndicator");
+            root.setNestedValue("bar.layouts.rightLayout", layout);
+        }
+        root.setNestedValue("bar.layouts.migratedRecordIndicator", true);
+    }
+
+    function migrateSplitCheatsheetButtons() {
+        if (!root.options.cheatsheet.migratedSplitButtons) {
+            root.setNestedValue("cheatsheet.splitButtons", true);
+            root.setNestedValue("cheatsheet.migratedSplitButtons", true);
+        }
+        // The first pass ran once and cannot see a false written after it:
+        // the p3drovfx fork trial rewrote the whole config without this
+        // migration, keeping the marker and reverting the value.
+        if (!root.options.cheatsheet.migratedSplitButtons2) {
+            root.setNestedValue("cheatsheet.splitButtons", true);
+            root.setNestedValue("cheatsheet.migratedSplitButtons2", true);
+        }
     }
 
     function migrateDesktopWidgetsToPlugins() {
@@ -498,6 +517,7 @@ Singleton {
             root.migratePreferredPlayerToBusId();
             root.migrateDeadParallaxSwitches();
             root.migrateSplitCheatsheetButtons();
+            root.migrateRecordIndicatorIntoBar();
             root.migrateDesktopWidgetsToPlugins();
             root.migrateDesktopWidgetOptionsToPlugins();
         }
@@ -544,12 +564,20 @@ Singleton {
                 // config-file-only, no settings toggle on purpose.
                 property bool storeEnabled: false
                 property real blurOpacity: 0.1
+                // Desktop widgets take the shell's own opacity (Settings > Quick's
+                // "Shell opacity", appearance.transparency.backgroundTransparency
+                // inverted) instead of blurOpacity above.
+                property bool followShellOpacity: false
                 // How desktop widgets frost their background over the wallpaper:
                 //   "tint" - a translucent palette-tinted panel (cheap, no blur)
                 //   "blur" - a true in-shell blur of the wallpaper region behind
                 //            the widget (samples the live Wallpaper Engine surface
                 //            or the static image)
                 property string frostMode: "blur"
+                // Whether desktop widgets cast their shadow (WidgetElevation,
+                // the one shadow a widget casts). On by default; off is one
+                // gate at that one place, whatever a widget passes down.
+                property bool shadows: true
                 // Set once the built-in desktop widgets have been
                 // translated into `enabled`. Without it the migration
                 // re-adds a widget on every launch and the user can never
@@ -570,6 +598,14 @@ Singleton {
                 property bool migratedWorldClockTimezones: false
             }
 
+            // Tools for whoever is working ON the shell rather than in it.
+            // Off by default and deliberately not discoverable from anywhere
+            // else: what it reveals is a reference surface, not a feature, and
+            // a user who has not asked for it should never meet one.
+            property JsonObject developer: JsonObject {
+                property bool enable: false
+            }
+
             property JsonObject policies: JsonObject {
                 property int ai: 1 // 0: No | 1: Yes | 2: Local
                 property int weeb: 1 // 0: No | 1: Open | 2: Closet
@@ -578,27 +614,34 @@ Singleton {
             property JsonObject ai: JsonObject {
                 property string systemPrompt: "## Style\n- Use casual tone, don't be formal!\n- Always be brief and to the point, unless asked otherwise\n- Don't repeat the user's question\n- Be approachable: Avoid using overly complicated, domain-specific terms and provide analogies when asked to explain a concept\n\n## Context (ignore when irrelevant)\n- You are a helpful and inspiring sidebar assistant on a {DISTRO} Linux system\n- Desktop environment: {DE}\n- Current date & time: {DATETIME}\n- Focused app: {WINDOWCLASS}\n\n## Presentation\n- Use Markdown features in your response: \n  - **Bold** text to **highlight keywords** in your response\n  - **Split long information into small sections** with h2 headers and a relevant emoji at the start of it (for example `## 🐧 Linux`). Bullet points are preferred over long paragraphs, unless you're offering writing support or instructed otherwise by the user.\n- Asked to compare different options? You should firstly use a table to compare the main aspects, then elaborate or include relevant comments from online forums *after* the table. Make sure to provide a final recommendation for the user's use case!\n- Use LaTeX formatting for mathematical and scientific notations whenever appropriate. Enclose all LaTeX '$$' delimiters. NEVER generate LaTeX code in a latex block unless the user explicitly asks for it. DO NOT use LaTeX for regular documents (resumes, letters, essays, CVs, etc.).\n\nThanks!\n"
                 property string tool: "functions" // search, functions, or none
+                // The active persona id; "" is the free-text System prompt
+                // card. User personas ({id,name,icon,description,
+                // systemPrompt,temperature}) shadow built-ins by id.
+                property string persona: ""
+                property list<var> personas: []
+                property JsonObject memory: JsonObject {
+                    // Facts the assistant keeps between chats (see
+                    // AiMemory); the list itself lives beside the chats.
+                    property bool enabled: true
+                    property int limit: 40
+                }
                 property list<var> customProviders: [
                     {
                         "enabled": false,
                         "name": "OpenRouter",
-                        "baseUrl": "https://openrouter.ai/api/v1"
+                        // "openai" (any OpenAI-compatible server) or
+                        // "anthropic" (fixed api.anthropic.com, key only).
+                        "type": "openai",
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        // Curation: empty surfaces every fetched model;
+                        // name raw model ids to surface only those (the
+                        // Browse view's toggles write this).
+                        "selectedModels": []
                     }
                 ]
-                property list<var> extraModels: [
-                    {
-                        "api_format": "openai", // Most of the time you want "openai". Use "gemini" for Google's models
-                        "description": "This is a custom model. Edit the config to add more! | Anyway, this is DeepSeek R1 Distill LLaMA 70B",
-                        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
-                        "homepage": "https://openrouter.ai/deepseek/deepseek-r1-distill-llama-70b:free", // Not mandatory
-                        "icon": "spark-symbolic", // Not mandatory
-                        "key_get_link": "https://openrouter.ai/settings/keys", // Not mandatory
-                        "key_id": "openrouter",
-                        "model": "deepseek/deepseek-r1-distill-llama-70b:free",
-                        "name": "Custom: DS R1 Dstl. LLaMA 70B",
-                        "requires_key": true
-                    }
-                ]
+                // No shipped example model (maintainer's call): models
+                // arrive via providers or the OpenRouter browse.
+                property list<var> extraModels: []
             }
 
             property JsonObject appearance: JsonObject {
@@ -638,6 +681,11 @@ Singleton {
                     property real contentTransparency: 0.57
                 }
                 property JsonObject terminal: JsonObject {
+                    // kitty's window opacity (background_opacity), 1 = opaque.
+                    // Written into the generated theme's managed block, so it
+                    // is shell config - a preset carries it with appearance -
+                    // rather than a hand edit an update would lose.
+                    property real opacity: 1.0
                     property JsonObject background: JsonObject {
                         property bool enabled: false
                         property string imagePath: ""
@@ -719,7 +767,7 @@ Singleton {
                 property JsonObject systemMonitor: JsonObject { property bool locked: false; property bool vertical: false; property int updateInterval: 3000 }
                 property JsonObject weatherWidget: JsonObject { property bool locked: false; property string sizeMode: "3x1" }
                 property JsonObject currencyWidget: JsonObject { property bool locked: false; property string sizeMode: "2x1"; property string baseCurrency: "USD"; property string quote1: "EUR"; property string quote2: "GBP"; property string quote3: "JPY"; property string quote4: "CAD" }
-                property JsonObject lyrics: JsonObject { property bool showFloatingLyrics: false; property bool lyricsUseRomaji: false }
+                property JsonObject lyrics: JsonObject { property bool showFloatingLyrics: false; property bool lyricsUseRomaji: false; property bool showRomanization: false; property bool showTranslation: false }
             }
 
             property JsonObject audio: JsonObject {
@@ -838,11 +886,70 @@ Singleton {
                 // Without this the change above is invisible to anyone who has
                 // ever run the shell, because a stored value beats a QML one.
                 property bool migratedSplitButtons: false
+                // Second pass: a config the p3drovfx fork trial rewrote
+                // (2026-08-27) kept the first marker but lost the value, and
+                // defaults/config.json shipped the pre-migration false until
+                // 2026-08-31 - both leave a false nobody chose behind a
+                // marker saying it was handled.
+                property bool migratedSplitButtons2: false
                 property bool useMouseSymbol: false
                 property bool useFnSymbol: false
                 property JsonObject fontSize: JsonObject {
                     property int key: Appearance.font.pixelSize.smaller
                     property int comment: Appearance.font.pixelSize.smaller
+                }
+
+                // The typing test tab (Monkeytype-style, ported from the p3drovfx
+                // fork). On by default: the tab is the only host it has here.
+                property bool enableTypingTest: true
+                property JsonObject typingTest: JsonObject {
+                    property string language: "english_1k"
+                    property string mode: "time"
+                    // Zen without a target is free typing; guided zen keeps the
+                    // generated words but drops both limits, so the test only
+                    // ends when the user says so.
+                    property bool zenGuided: false
+                    property int time: 30
+                    property int words: 50
+                    property bool punctuation: false
+                    property bool numbers: false
+                    property bool showLiveWpm: false
+                    property bool showLiveAccuracy: false
+                    property bool smoothCaret: true
+                    // Typing surface. fontSize is the target text size in px:
+                    // the test is the hero of the page, so it does not follow
+                    // the shell's body scale.
+                    property int fontSize: 26
+                    property int visibleLines: 3
+                    property string caretStyle: "line" // line, block, underline, off
+                    // Highlight everything but the current word at reduced
+                    // emphasis, the way Monkeytype's word highlight does.
+                    property bool highlightCurrentWord: false
+                    property bool blindMode: false
+                    // Tab restarts the test, as on Monkeytype. Off by default
+                    // because Tab also walks the page's controls.
+                    property bool quickRestart: false
+                    // Finish a words/quote test on the last word without
+                    // needing a trailing space.
+                    property bool finishOnLastWord: true
+                    property JsonObject keyboard: JsonObject {
+                        property bool enable: true
+                        property string layout: "qwerty" // qwerty, qwertz, azerty, dvorak, colemak
+                        property bool highlightNextKey: true
+                    }
+                    property JsonObject sounds: JsonObject {
+                        property bool enable: true
+                        // Monkeytype pack ids, catalogued in
+                        // assets/typing/sounds-manifest.json.
+                        property string theme: "click1"
+                        property string errorTheme: "error1"
+                        property int volume: 55
+                        property bool errorSound: true
+                    }
+                    property JsonObject history: JsonObject {
+                        property bool enable: true
+                        property int maxEntries: 100
+                    }
                 }
             }
 
@@ -1043,11 +1150,15 @@ Singleton {
                     }
                 }
                 property bool bottom: false // Instead of top
-                property int cornerStyle: 0 // 0: Hug | 1: Float | 2: Plain rectangle | 3: M3
+                property int cornerStyle: 0 // 0: Hug | 1: Float | 2: Islands | 3: M3 | 4: Float Islands (M3's three sections, each drawn as Float's plate)
                 property bool shadow: false // Soft drop shadow under the bar background
                 property string borderless: "pills"
                 property string topLeftIcon: "spark" // Options: "distro" or any icon name in ~/.config/quickshell/imi/assets/icons
                 property bool showBackground: true
+                // With the background off and the groups transparent, a shade
+                // from the screen edge fading across the bar, so glyphs stay
+                // legible over a bright wallpaper. Drawn only in that state.
+                property bool edgeShadow: false
                 // Opacity of the bar's background chrome (bar/pill fills, hug
                 // corners), 0-1. 1 = fully opaque (unchanged). Multiplies the
                 // global appearance.transparency alpha rather than replacing it,
@@ -1081,7 +1192,12 @@ Singleton {
                 property JsonObject layouts: JsonObject {
                     property list<string> leftLayout: ["workspaces"]
                     property list<string> middleLayout: ["clockWidget"]
-                    property list<string> rightLayout: ["submapIndicator", "privacyIndicator", "systemIcons"]
+                    property list<string> rightLayout: ["submapIndicator", "recordIndicator", "privacyIndicator", "systemIcons"]
+                    // Whether recordIndicator has been folded into a stored
+                    // rightLayout that predates it (the chip draws nothing
+                    // while no recording runs, so arriving unasked costs no
+                    // bar space).
+                    property bool migratedRecordIndicator: false
                 }
                 
                 property list<string> screenList: [] // List of names, like "eDP-1", find out with 'hyprctl monitors' command
@@ -1503,7 +1619,9 @@ Singleton {
                 }
                 
                 property JsonObject ai: JsonObject {
-                    property bool textFadeIn: false
+                    property bool textFadeIn: true
+                    // Empty rolls a fresh hello per opening; set to pin one.
+                    property string greeting: ""
                 }
                 property JsonObject booru: JsonObject {
                     property bool allowNsfw: false
@@ -1528,6 +1646,11 @@ Singleton {
                 property JsonObject quickToggles: JsonObject {
                     property string style: "android" // Options: classic, android
                     property JsonObject android: JsonObject {
+                        // The paged layout (spec 2026-08-31). Each page is a
+                        // list of {type, size}. Empty means "not migrated
+                        // yet": the panel then reads the legacy `toggles`
+                        // below as one page and writes this key back once.
+                        property list<var> pages: []
                         property int columns: 5
                         property list<var> toggles: [
                             { "size": 2, "type": "network" },
@@ -1665,6 +1788,40 @@ Singleton {
                     property int fps: 30
                     property string scaling: "fill"
                     property bool silent: true
+                    // The rest of the engine's flag set, global defaults the
+                    // per-project overrides (WallpaperEngineOverrides) fall
+                    // back to. volume is 0..100 with 100 the renderer's old
+                    // fixed "full internal volume, mix in the system mixer";
+                    // audioProcessing is WE's audio-reactive recorder, on by
+                    // default like WE's own; the three disables mirror WE's
+                    // --disable-mouse/--disable-parallax/--disable-particles.
+                    property int volume: 100
+                    property bool audioProcessing: true
+                    property bool disableMouse: false
+                    property bool disableParallax: false
+                    property bool disableParticles: false
+                    // renderScale is a quality/performance dial: the renderer
+                    // draws into a window this fraction of the surface size and
+                    // the scene graph upscales, 0.25..1 with 1 = native. It is
+                    // the video path (composited at window size) where it cuts
+                    // real work; a SCENE renders into its own authored-
+                    // resolution FBO regardless, so for a heavy scene fps is the
+                    // lever and this only trims the final composite.
+                    property real renderScale: 1.0
+                    // Hide wallpapers the compatibility scan marked broken
+                    // from the selector grid (WallpaperEngineCompat).
+                    property bool hideBroken: false
+                    // Which output plays the wallpaper's sound. Empty means
+                    // the first screen the compositor reports.
+                    //
+                    // There is one renderer PER OUTPUT (Background.qml is a
+                    // Variants over Quickshell.screens), so binding every one
+                    // of them to `silent` alone played the same audio track
+                    // once per monitor - #338. Audio is a LOAD-TIME decision
+                    // inside WE, so this cannot follow the focused monitor
+                    // without reloading wallpapers on every focus change; it
+                    // is a place the user names once instead.
+                    property string audioMonitor: ""
                 }
             }
 

@@ -80,6 +80,10 @@ AbstractBackgroundWidget {
     property real canvasOffsetX: 0
     property real canvasOffsetY: 0
     property rect wallpaperRect: Qt.rect(0, 0, 0, 0)
+    // The decode bound the desktop's wallpaper request carries; forwarded to
+    // the frost so the two stay one pixmap-cache entry (see
+    // WallpaperBlurSurface's decodeWidth note).
+    property size wallpaperDecodeSize: Qt.size(0, 0)
 
     // This widget's top-left in the wallpaper's own coordinates - the space the
     // frost samples in. Sampling at the widget's canvas position instead is
@@ -161,6 +165,15 @@ AbstractBackgroundWidget {
     readonly property var gridSpec: (manifest && manifest.grid) ? manifest.grid : null
     readonly property var offeredGridSizes: GridSizes.offeredSizes(rootWidget.gridSpec)
     readonly property bool gridResizable: rootWidget.offeredGridSizes.length > 1
+    // The grip is armed for EVERY grid-sized widget, not only the resizable
+    // ones: with a single offered span the elastic walk finds no next size,
+    // so the whole drag becomes the clamped rubber-band bow and the release
+    // commits the span the widget already has (which pushes no undo entry).
+    // The pull is part of how the desktop feels ("the elastic effect...
+    // does not exist for Notes"), and a widget with one span deserves the
+    // same give as its neighbours. The Size row and the edit stepper stay
+    // gated on gridResizable - they act on a CHOICE, and one span is none.
+    readonly property bool gripArmed: rootWidget.gridSized
     // Stored -> manifest default -> null, which is the content-sized path.
     readonly property var storedGridSize: GridSizes.resolveSize(rootWidget.gridSpec,
         manifest ? PluginState.gridSize(manifest.id, screenName) : undefined)
@@ -320,7 +333,10 @@ AbstractBackgroundWidget {
         const next = GridSizes.formatSize(size);
         const before = PluginState.gridSize(id, screen, surface) ?? null;
         if (before !== next)
-            GlobalStates.editUndoPush(() => PluginState.setGridSize(id, screen, before, surface));
+            GlobalStates.editUndoPush(EditMode.swap(
+                () => PluginState.gridSize(id, screen, surface) ?? null,
+                (value) => PluginState.setGridSize(id, screen, value, surface),
+                before));
         PluginState.setGridSize(id, screen, next, surface);
     }
 
@@ -775,7 +791,10 @@ AbstractBackgroundWidget {
                 y: beforeY,
                 placementStrategy: rootWidget.placementStrategy
             };
-            GlobalStates.editUndoPush(() => PluginState.setPosition(id, screen, before, surface));
+            GlobalStates.editUndoPush(EditMode.swap(
+                () => PluginState.position(id, screen, surface),
+                (value) => PluginState.setPosition(id, screen, value, surface),
+                before));
         }
         PluginState.setPosition(id, screenName, {
             x: rootWidget.targetX,
@@ -840,6 +859,8 @@ AbstractBackgroundWidget {
             maskItem: modelData.mask ?? null
             wallpaperWidth: rootWidget.wallpaperRect.width
             wallpaperHeight: rootWidget.wallpaperRect.height
+            decodeWidth: rootWidget.wallpaperDecodeSize.width
+            decodeHeight: rootWidget.wallpaperDecodeSize.height
             surfaceX: rootWidget.frostSampleOrigin.x + x
             surfaceY: rootWidget.frostSampleOrigin.y + y
         }
@@ -928,7 +949,7 @@ AbstractBackgroundWidget {
         opacity: (GlobalStates.editMode || rootWidget.containsMouse
                 || resizeArea.containsMouse || rootWidget.resizingGrid)
             ? 0.5 : 0
-        visible: opacity > 0 && rootWidget.gridResizable && !rootWidget.interactionLocked
+        visible: opacity > 0 && rootWidget.gripArmed && !rootWidget.interactionLocked
 
         // The whole tier, not just its duration. Taking the number and leaving
         // the curve hands the animation Qt's default, which is Easing.Linear -

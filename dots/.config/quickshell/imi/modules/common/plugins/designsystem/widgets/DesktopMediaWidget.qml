@@ -6,6 +6,7 @@ import qs.modules.common
 import qs.modules.common.plugins
 import qs.modules.common.functions as Functions
 import qs.services
+import qs.modules.imi.mediaControls
 import "."
 
 Item {
@@ -21,9 +22,14 @@ Item {
     property bool chromeless: false
 
     property bool showLyrics: Config.options.appearance.mediaWidget.showLyrics
-    property bool useRomaji: Config.options.appearance.lyrics.lyricsUseRomaji
     property bool viewLyrics: false
     property bool useBlurBackground: false
+    // Shared-axis morph lift: the control face and the lyrics face are two
+    // peer surfaces on one axis. Going to lyrics, both travel up - the
+    // controls leaving off the top, the lyrics arriving from below - so the
+    // handover reads as one motion, not a crossfade. The wrapper's transport
+    // rides the same lift (see nandoroid-media/Widget.qml morphLift).
+    readonly property real morphLift: 28 * Appearance.effectiveScale
     // Handled state, for the card's elevation.
     property bool dragging: false
     // The host's box is animating; the cards drop their shadow for it.
@@ -37,9 +43,6 @@ Item {
         x: bgCard.x, y: bgCard.y, width: bgCard.width, height: bgCard.height, radius: bgCard.radius
     }]
 
-    onViewLyricsChanged: {
-        LyricsService.desktopWidgetLyricsActive = viewLyrics;
-    }
 
     // Main Card Background. Card bg = play/pause icon color (user request).
     WidgetCard {
@@ -65,20 +68,41 @@ Item {
 
         MaterialShape {
             anchors.fill: parent
-            shape: MaterialShape.Shape.Cookie4Sided
+            // Morphs with state, not a static frame: ShapeCanvas animates any
+            // `shape` change through its built-in prev->current polygon morph
+            // (elementMoveSmall clock), so the silhouette actually travels
+            // between the two faces - cookie at rest, clover while lyrics are
+            // up. The fill rides the same clock via the Behavior below, so
+            // shape and colour cross together instead of the colour snapping.
+            shape: viewLyrics ? MaterialShape.Shape.Clover4Leaf : MaterialShape.Shape.Cookie4Sided
             // Using colTertiaryContainer in dark mode and colSecondaryContainer in light mode for soft pastel visual
-            color: viewLyrics 
-                ? Appearance.colors.colPrimary 
+            color: viewLyrics
+                ? Appearance.colors.colPrimary
                 : (Appearance.m3colors.darkmode ? Appearance.colors.colOnTertiaryContainer : Appearance.colors.colSecondaryContainer)
+            Behavior on color {
+                ColorAnimation {
+                    duration: Appearance.animation.elementMoveSmall.duration
+                    easing.type: Appearance.animation.elementMoveSmall.type
+                    easing.bezierCurve: Appearance.animation.elementMoveSmall.bezierCurve
+                }
+            }
 
             MaterialSymbol {
                 anchors.centerIn: parent
                 text: viewLyrics ? "music_note" : "lyrics"
                 iconSize: 18 * Appearance.effectiveScale
                 fill: 0
-                color: viewLyrics 
-                    ? Appearance.colors.colOnPrimary 
+                color: viewLyrics
+                    ? Appearance.colors.colOnPrimary
                     : (Appearance.m3colors.darkmode ? Appearance.colors.colTertiaryContainer : Appearance.colors.colOnSecondaryContainer)
+                // The glyph's colour crosses on the shape's clock too.
+                Behavior on color {
+                    ColorAnimation {
+                        duration: Appearance.animation.elementMoveSmall.duration
+                        easing.type: Appearance.animation.elementMoveSmall.type
+                        easing.bezierCurve: Appearance.animation.elementMoveSmall.bezierCurve
+                    }
+                }
             }
 
             MouseArea {
@@ -91,18 +115,27 @@ Item {
         }
     }
 
-    // StackLayout to toggle between Media Control (0) and Lyrics View (1)
-    StackLayout {
+    // Shared-axis morph between Media Control (page 0) and Lyrics (page 1).
+    // A StackLayout swapped them in one frame; now both faces are stacked
+    // and travel together on the vertical axis - the outgoing face lifts up
+    // and fades, the incoming face rises into place and fades in. The hidden
+    // face drops to opacity 0 / visible:false, so it takes no input.
+    Item {
         id: mainStack
         anchors.fill: parent
         anchors.margins: 17 * Appearance.effectiveScale
         anchors.bottomMargin: 22 * Appearance.effectiveScale
-        currentIndex: viewLyrics ? 1 : 0
 
         // PAGE 0: Media Control & Info View
         ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
+            anchors.fill: parent
+            opacity: root.viewLyrics ? 0 : 1
+            visible: opacity > 0.01
+            enabled: !root.viewLyrics
+            // Leaves upward as the lyrics arrive; returns from above.
+            transform: Translate { y: root.viewLyrics ? -root.morphLift : 0
+                Behavior on y { SpanTravel {} } }
+            Behavior on opacity { SpanFade {} }
             spacing: 2 * Appearance.effectiveScale // Tighter spacing for title/artist
 
             // 1. TITLE (Centered, bounded from lyrics button)
@@ -371,180 +404,45 @@ Item {
             }
         }
 
-        // PAGE 1: Lyrics View (Clean 5 Lines Display)
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 0
-
-            Item { Layout.fillHeight: true } // Spacer
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                Layout.alignment: Qt.AlignVCenter
-                spacing: 4 * Appearance.effectiveScale
-
-                // 5 Line Lyrics Display (dynamically centered around the active line index 'before')
-                Repeater {
-                    model: {
-                        if (LyricsService.slots.length === 0) return [];
-                        let mid = LyricsService.before;
-                        // Returns 5 indices centered around 'mid': [mid-2, mid-1, mid, mid+1, mid+2]
-                        return [mid - 2, mid - 1, mid, mid + 1, mid + 2];
-                    }
-                    delegate: StyledText {
-                        id: lyricLine
-                        readonly property int distanceFromActive: modelData - LyricsService.before
-                        property real flowOffset: 0
-                        property real flowOpacity: 1
-                        property real flowScale: 1
-
-                        Layout.fillWidth: true
-                        horizontalAlignment: Text.AlignHCenter
-                        wrapMode: Text.WordWrap
-                        text: {
-                            let slotIndex = modelData;
-                            if (slotIndex < 0 || slotIndex >= LyricsService.slots.length) return "";
-                            let slot = LyricsService.slots[slotIndex];
-                            if (typeof slot === "string") return slot;
-                            if (!slot) return "";
-                            return root.useRomaji
-                                ? (slot.romajiText || slot.originalText || "")
-                                : (slot.originalText || slot.romajiText || "");
-                        }
-                        font.pixelSize: modelData === LyricsService.before // Active line is bigger
-                            ? Appearance.font.pixelSize.large
-                            : Appearance.font.pixelSize.small
-                        font.weight: modelData === LyricsService.before ? Font.Bold : Font.Normal
-                        color: {
-                            if (modelData === LyricsService.before) return Appearance.colors.colPrimary;
-                            // Make outer lines even more faded
-                            let isOuter = (modelData === LyricsService.before - 2 || modelData === LyricsService.before + 2);
-                            let alpha = isOuter ? 0.25 : 0.45;
-                            return Functions.ColorUtils.applyAlpha(Appearance.colors.colPrimary, alpha);
-                        }
-                        elide: modelData === LyricsService.before ? Text.ElideNone : Text.ElideRight
-                        maximumLineCount: modelData === LyricsService.before ? 2 : 1 // Active line can wrap up to 2 lines for karaoke
-                        opacity: flowOpacity
-                        scale: flowScale
-                        transformOrigin: Item.Center
-                        transform: Translate { y: lyricLine.flowOffset }
-
-                        Connections {
-                            target: LyricsService
-                            function onActiveIndexChanged() {
-                                if (LyricsService.status === "ok") lyricAdvance.restart();
-                            }
-                        }
-
-                        SequentialAnimation {
-                            id: lyricAdvance
-                            PauseAnimation {
-                                duration: Math.abs(lyricLine.distanceFromActive)
-                                    * Appearance.animation.elementMoveFast.duration / 8
-                            }
-                            ParallelAnimation {
-                                NumberAnimation {
-                                    target: lyricLine
-                                    property: "flowOffset"
-                                    from: Appearance.spacing.space100
-                                    to: 0
-                                    duration: Appearance.animation.elementMoveEnter.duration
-                                    easing.type: Easing.BezierSpline
-                                    easing.bezierCurve: Appearance.animationCurves.expressiveDefaultSpatial
-                                }
-                                NumberAnimation {
-                                    target: lyricLine
-                                    property: "flowOpacity"
-                                    from: 0.35
-                                    to: 1
-                                    duration: Appearance.animation.elementMoveEnter.duration
-                                    easing.type: Easing.BezierSpline
-                                    easing.bezierCurve: Appearance.animationCurves.expressiveEffects
-                                }
-                                NumberAnimation {
-                                    target: lyricLine
-                                    property: "flowScale"
-                                    from: lyricLine.distanceFromActive === 0 ? 0.92 : 0.97
-                                    to: 1
-                                    duration: Appearance.animation.elementMoveEnter.duration
-                                    easing.type: Easing.BezierSpline
-                                    easing.bezierCurve: Appearance.animationCurves.expressiveDefaultSpatial
-                                }
-                            }
-                        }
-                        
-                        Behavior on font.pixelSize { NumberAnimation { duration: 200 } }
-                        Behavior on color { ColorAnimation { duration: 200 } }
-                    }
-                }
-                
-                // Fallback if no lyrics/loading
-                StyledText {
-                    visible: LyricsService.slots.length === 0
-                    Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignHCenter
-                    text: LyricsService.status === "loading"
-                        ? "Loading lyrics..."
-                        : LyricsService.status === "no_info"
-                            ? "Track information unavailable"
-                            : "No synchronized lyrics available"
-                    color: Functions.ColorUtils.applyAlpha(Appearance.colors.colPrimary, 0.6)
-                    font.pixelSize: Appearance.font.pixelSize.normal
-                }
-            }
-
-            Item { Layout.fillHeight: true } // Spacer
-        }
-    }
-
-    // Romaji/Original switcher (outside layout, anchored - won't affect centering)
-    Item {
-        id: romajiToggleBtn
-        anchors.bottom: parent.bottom
-        anchors.left: parent.left
-        anchors.bottomMargin: 16 * Appearance.effectiveScale
-        anchors.leftMargin: 16 * Appearance.effectiveScale
-        implicitWidth: 32 * Appearance.effectiveScale
-        implicitHeight: 32 * Appearance.effectiveScale
-        visible: viewLyrics
-        z: 20
-
-        property bool hovered: false
-
-        MaterialShape {
+        // PAGE 1: Lyrics - the shared word-synced component (the widget's
+        // own five-line renderer was line-level with no word sync; this is
+        // the same view the sidebar uses, so the two stay in step). Wrapped
+        // in a Loader so it arms the service (its own refcount) only while
+        // the lyrics page is actually shown.
+        Item {
+            id: lyricsPage
             anchors.fill: parent
-            shape: MaterialShape.Shape.Pill
-            color: Appearance.m3colors.darkmode ? Appearance.colors.colOnTertiaryContainer : Appearance.colors.colSecondaryContainer
-
-            MaterialSymbol {
-                anchors.centerIn: parent
-                text: root.useRomaji ? "text_fields" : "translate"
-                iconSize: 18 * Appearance.effectiveScale
-                fill: 1
-                color: romajiToggleBtn.hovered
-                    ? (Appearance.m3colors.darkmode ? Appearance.colors.colTertiaryContainer : Appearance.colors.colPrimary)
-                    : (Appearance.m3colors.darkmode ? Appearance.colors.colTertiaryContainer : Appearance.colors.colOnSecondaryContainer)
-                Behavior on color { ColorAnimation { duration: 150 } }
-            }
-
-            MouseArea {
+            opacity: root.viewLyrics ? 1 : 0
+            visible: opacity > 0.01
+            // Rises from below into place as the controls lift away; leaves
+            // back downward. Same axis, same lift as page 0 - the morph.
+            transform: Translate { y: root.viewLyrics ? 0 : root.morphLift
+                Behavior on y { SpanTravel {} } }
+            Behavior on opacity { SpanFade {} }
+            Loader {
                 anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                hoverEnabled: true
-                onEntered: romajiToggleBtn.hovered = true
-                onExited: romajiToggleBtn.hovered = false
-                onClicked: {
-                    // Write the CONFIG, not the property bound to it: assigning
-                    // to `root.useRomaji` destroyed its binding on the first
-                    // click, after which the toggle showed local state that
-                    // never persisted and no preset could move.
-                    if (Config.ready) {
-                        Config.options.appearance.lyrics.lyricsUseRomaji =
-                            !Config.options.appearance.lyrics.lyricsUseRomaji;
-                    }
+                anchors.margins: Appearance.spacing.space100
+                // Armed while the lyrics page is on screen OR still animating
+                // out, tracking the page's own visibility rather than
+                // viewLyrics. active:viewLyrics destroyed the component the
+                // instant the toggle flipped, so the morph faded out a blank
+                // page; active:true held the fetch's refcount forever, fetching
+                // lyrics behind the controls face. Tied to lyricsPage.visible
+                // it stays mounted through the fade and releases the refcount
+                // only once the page is fully hidden.
+                active: lyricsPage.visible
+                sourceComponent: Lyrics {
+                    player: MprisController.activePlayer
+                    textAlignment: Text.AlignHCenter
+                    textColor: Appearance.colors.colOnLayer0
+                    activeColor: Appearance.colors.colPrimary
+                    dimColor: Functions.ColorUtils.applyAlpha(Appearance.colors.colPrimary, 0.4)
                 }
             }
         }
     }
+    // The romaji/original switcher lived here as a widget-level anchored
+    // button reading the removed `useRomaji`; the shared Lyrics component now
+    // owns that toggle (and translation) in its own footer, so both faces
+    // stay in step with the sidebar. Nothing to duplicate here.
 }

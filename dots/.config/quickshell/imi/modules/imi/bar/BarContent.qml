@@ -17,6 +17,12 @@ Item {
     width: parent.width
     readonly property real barPadding: 0
     readonly property bool isMaterial: Config.options.bar.cornerStyle === 3
+    // Float Islands: M3's three sections, each drawn as Float's plate - the
+    // window rounding, the layer border, a gap off the edge and the windows -
+    // with the groups inside them exactly as Float draws them. The full-width
+    // plate goes transparent and three islands take its place.
+    readonly property bool isFloatIslands: Config.options.bar.cornerStyle === 4
+    readonly property bool floatPlate: Config.options.bar.cornerStyle === 1 || root.isFloatIslands
     readonly property real centerPillX: centerPill.x
     readonly property real centerPillWidth: centerPill.width
     property bool suppressDockerForMemoryTest: false
@@ -30,7 +36,7 @@ Item {
     // would frost the bare wallpaper behind it.
     readonly property Item backgroundItem: barBackground
     readonly property bool backgroundPainted: !centerOnly && Config.options.bar.showBackground
-        && Config.options.bar.cornerStyle !== 2 && !root.isMaterial
+        && Config.options.bar.cornerStyle !== 2 && !root.isMaterial && !root.isFloatIslands
     readonly property Item centerPillItem: centerPill
     readonly property bool centerPillPainted: centerPill.visible
 
@@ -43,6 +49,13 @@ Item {
     readonly property Item centerMaterialPillItem: centerMaterialPill
     readonly property Item rightMaterialPillItem: rightMaterialPill
     readonly property bool materialPillsPainted: root.isMaterial
+    // Float Islands' plates, handed to the blur region the same way.
+    readonly property Item leftIslandItem: leftIsland
+    readonly property Item centerIslandItem: centerIsland
+    readonly property Item rightIslandItem: rightIsland
+    readonly property bool leftIslandPainted: leftIsland.visible
+    readonly property bool centerIslandPainted: centerIsland.visible
+    readonly property bool rightIslandPainted: rightIsland.visible
 
     function filterLayout(layout) {
         return layout.filter(name => {
@@ -120,18 +133,38 @@ Item {
     // Only rendered when the background itself is painted (mirrors barBackground's color condition).
     Loader {
         active: Config.options.bar.shadow && !centerOnly && Config.options.bar.showBackground
-            && Config.options.bar.cornerStyle !== 2 && !root.isMaterial
+            && Config.options.bar.cornerStyle !== 2 && !root.isMaterial && !root.isFloatIslands
         anchors.fill: barBackground
         sourceComponent: StyledRectangularShadow {
             anchors.fill: undefined // The loader's anchors act on this, and this should not have any anchor
             target: barBackground
         }
     }
+    // The edge shadow: with the background off and the groups transparent the
+    // bar is glyphs straight over the wallpaper, so this shades the screen
+    // edge behind them and fades to nothing across the bar - from whichever
+    // edge the bar sits on. Drawn only in that state, and only when asked.
+    Rectangle {
+        id: edgeShadow
+        anchors.fill: parent
+        // Only where Show Background APPLIES - Hug, Float, Float Islands; M3
+        // and Islands paint their own containers whatever the switch says -
+        // and then only with it off and the groups transparent.
+        visible: Config.options.bar.edgeShadow && !Config.options.bar.showBackground
+            && Config.options.bar.borderless === "transparent"
+            && (Config.options.bar.cornerStyle === 0 || Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4)
+        gradient: Gradient {
+            orientation: Gradient.Vertical
+            GradientStop { position: 0; color: Config.options.bar.bottom ? "transparent" : Appearance.colors.colBarEdgeShade }
+            GradientStop { position: 1; color: Config.options.bar.bottom ? Appearance.colors.colBarEdgeShade : "transparent" }
+        }
+    }
+
     Rectangle {
         id: barBackground
         anchors.fill: parent
-        anchors.margins: Config.options.bar.cornerStyle === 1 ? Appearance.sizes.hyprlandGapsOut : 0
-        color: (!centerOnly && Config.options.bar.showBackground && Config.options.bar.cornerStyle !== 2 && !root.isMaterial) 
+        anchors.margins: root.floatPlate ? Appearance.sizes.hyprlandGapsOut : 0
+        color: (!centerOnly && Config.options.bar.showBackground && Config.options.bar.cornerStyle !== 2 && !root.isMaterial && !root.isFloatIslands)
             ? Appearance.colors.colBarBackground : "transparent"
         radius: Config.options.bar.cornerStyle === 1 ? Appearance.rounding.windowRounding : 0
         border.width: (!centerOnly && Config.options.bar.cornerStyle === 1) ? 1 : 0
@@ -158,10 +191,10 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         anchors.horizontalCenter: parent.horizontalCenter
         width: middleRow.implicitWidth + 10
-        height: parent.height - (Config.options.bar.cornerStyle === 1 ? Appearance.sizes.hyprlandGapsOut * 2 : 0)
+        height: parent.height - (root.floatPlate ? Appearance.sizes.hyprlandGapsOut * 2 : 0)
         color: Appearance.colors.colBarBackground
-        radius: Config.options.bar.cornerStyle === 1 ? Appearance.rounding.windowRounding : 0
-        border.width: Config.options.bar.cornerStyle === 1 ? 1 : 0
+        radius: root.floatPlate ? Appearance.rounding.windowRounding : 0
+        border.width: root.floatPlate ? 1 : 0
         border.color: Appearance.colors.colLayer0Border
 
         bottomLeftRadius:  Config.options.bar.cornerStyle === 0 && !Config.options.bar.bottom ? Appearance.rounding.screenRounding : radius
@@ -175,9 +208,68 @@ Item {
         anchors.fill: barBackground
         anchors.margins: root.barPadding
 
+        // Float Islands: one plate behind each populated section, declared
+        // before the sections so they paint under them. A section's inset
+        // from the container is the plate's own padding, so the plate reaches
+        // the container's edge (hyprlandGapsOut off the screen) exactly as
+        // Float's whole plate does.
+        readonly property real islandPad: Appearance.spacing.space125
+        component Island: Rectangle {
+            required property bool populated
+            visible: root.isFloatIslands && Config.options.bar.showBackground && !root.centerOnly && populated
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            color: Appearance.colors.colBarBackground
+            radius: Appearance.rounding.windowRounding
+            border.width: 1
+            border.color: Appearance.colors.colLayer0Border
+        }
+        component IslandShadow: Loader {
+            required property Item island
+            active: Config.options.bar.shadow && island.visible
+            anchors.fill: island
+            sourceComponent: StyledRectangularShadow {
+                anchors.fill: undefined
+                target: island
+            }
+        }
+        IslandShadow { island: leftIsland }
+        IslandShadow { island: centerIsland }
+        IslandShadow { island: rightIsland }
+        Island {
+            id: leftIsland
+            populated: root.effectiveLeftLayout.length > 0
+            anchors.left: leftSection.left
+            anchors.right: leftSection.right
+            anchors.leftMargin: -contentContainer.islandPad
+            anchors.rightMargin: -contentContainer.islandPad
+        }
+        Island {
+            id: centerIsland
+            populated: root.effectiveMiddleLayout.length > 0
+            anchors.left: absoluteCenter.left
+            anchors.right: absoluteCenter.right
+            anchors.leftMargin: -contentContainer.islandPad
+            anchors.rightMargin: -contentContainer.islandPad
+        }
+        Island {
+            id: rightIsland
+            populated: root.effectiveRightLayout.length > 0
+            anchors.left: rightSection.left
+            anchors.right: rightSection.right
+            anchors.leftMargin: -contentContainer.islandPad
+            anchors.rightMargin: -contentContainer.islandPad
+        }
+
         // Left
         Item {
             id: leftSection
+            // The plate behind this section, for a widget's popup-open
+            // indicator when its own group paints no pill: the material pill,
+            // the island, or the bar background - whichever this style paints.
+            readonly property Item popupAnchorSurface: root.isMaterial ? leftMaterialPill
+                : root.isFloatIslands ? leftIsland
+                : barBackground.color.a > 0 ? barBackground : null
             anchors.left: parent.left
             anchors.leftMargin: root.isMaterial ? (Config.options.hyprland.general.gapsOut || 5) : (Config.options.bar.cornerStyle === 1 ? Appearance.spacing.space50 : Appearance.spacing.space125)
             anchors.top: parent.top
@@ -295,6 +387,10 @@ Item {
         // Center
         Item {
             id: absoluteCenter
+            readonly property Item popupAnchorSurface: root.isMaterial ? centerMaterialPill
+                : root.isFloatIslands ? centerIsland
+                : centerPill.visible ? centerPill
+                : barBackground.color.a > 0 ? barBackground : null
             anchors.centerIn: parent
             width: root.isMaterial ? centerMaterialPill.implicitWidth : middleRow.implicitWidth
             height: parent.height
@@ -409,6 +505,9 @@ Item {
         // Right
         Item {
             id: rightSection
+            readonly property Item popupAnchorSurface: root.isMaterial ? rightMaterialPill
+                : root.isFloatIslands ? rightIsland
+                : barBackground.color.a > 0 ? barBackground : null
             anchors.right: parent.right
             anchors.rightMargin: root.isMaterial ? (Config.options.hyprland.general.gapsOut || 5) : (Config.options.bar.cornerStyle === 1 ? Appearance.spacing.space50 : Appearance.spacing.space125)
             anchors.top: parent.top

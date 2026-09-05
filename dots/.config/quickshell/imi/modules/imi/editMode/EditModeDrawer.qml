@@ -87,6 +87,16 @@ Item {
     // silently discard the other.
     signal lockPresenceResetRequested()
 
+    // The chrome surface reads this to take OnDemand keyboard focus while
+    // the search field is being typed into - and only then. Scene `focus`,
+    // NOT `activeFocus`: activeFocus requires the window to hold the very
+    // keyboard this flag exists to request, so gating on it could never
+    // turn true ("Still can't type"). A click sets the field's scene focus
+    // regardless; the surface then asks, the compositor grants, and
+    // activeFocus follows.
+    readonly property bool searchTakesKeys: appSearchField.focus && root.section === "dock"
+    onSectionChanged: appSearchField.focus = false
+
     // Which screen this drawer is arranging - handed in by the surface, so
     // the fork question below is asked about the right monitor.
     property string screenName: ""
@@ -578,12 +588,41 @@ Item {
             }
 
             // ---- dock apps ------------------------------------------------
-            MaterialTextField {
-                id: appSearchField
+            //
+            // The filled search row every other list in the shell carries
+            // (the phone apps page is the reference) - the outlined field
+            // that stood here read as a stranger. Typing works because the
+            // chrome surface takes OnDemand keyboard focus for exactly as
+            // long as this field holds focus (see EditModeChromeSurface):
+            // the surface is None by default so the canvas keeps Escape.
+            RowLayout {
+                id: dockSearchRow
                 property real appear: 1
                 visible: root.section === "dock"
                 Layout.fillWidth: true
-                placeholderText: Translation.tr("Search apps")
+                // Content-height, STATED: ToolbarTextField declares
+                // Layout.fillHeight: true of its own, and left to defaults
+                // this row soaked up the column's spare height and centred
+                // the field in the middle of the drawer (the phone apps
+                // page records the same remedy for the same field).
+                Layout.fillHeight: false
+                spacing: Appearance.spacing.space100
+
+                MaterialSymbol {
+                    Layout.alignment: Qt.AlignVCenter
+                    text: "search"
+                    iconSize: Appearance.font.pixelSize.large
+                    color: Appearance.colors.colSubtext
+                }
+                ToolbarTextField {
+                    id: appSearchField
+                    Layout.fillWidth: true
+                    placeholderText: Translation.tr("Search apps")
+                    // First Escape leaves the field (and returns the
+                    // surface to None); the next one walks the mode's own
+                    // ladder on the canvas.
+                    Keys.onEscapePressed: appSearchField.focus = false
+                }
             }
 
             ListView {

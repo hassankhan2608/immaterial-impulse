@@ -7,6 +7,7 @@ import qs.modules.common.widgets
 import qs.modules.common.plugins
 import Quickshell.Hyprland
 import "../../../common/functions/screenSelection.js" as ScreenSelection
+import "../../../common/functions/layout_ops.js" as LayoutOps
 import "../../dock/dock_geometry.js" as DockGeometry
 
 ContentPage {
@@ -169,33 +170,141 @@ ContentPage {
         }
 
         ContentSection {
+            id: barLayoutSection
             icon: "splitscreen_add"
             shape: MaterialShape.Shape.Cookie6Sided
             title: Translation.tr("Bar layout")
 
-            GroupedList {
-                LayoutSection {
-                    sectionTitle: Config.options.bar.vertical ? Translation.tr("Top") : Translation.tr("Left")
-                    layout: Config.options.bar.layouts.leftLayout
-                    availableWidgets: page.availableFor()
-                    getWidgetName: page.getWidgetName
-                    onUpdate: list => Config.options.bar.layouts.leftLayout = list
-                }
+            // The cross-group coordinator, BarEditController's shape at
+            // settings scale: buckets to layout_ops.dropTarget, literal
+            // stored paths, commits through layout_ops only. The settings
+            // lists are unfiltered, so visible == stored and only
+            // moveTargetForInsertion is needed.
+            property int dragBucket: -1
+            property int dragIndex: -1
+            readonly property var layoutLists: [leftList, centerList, rightList]
 
-                LayoutSection {
-                    sectionTitle: Translation.tr("Center")
-                    layout: Config.options.bar.layouts.middleLayout
-                    availableWidgets: page.availableFor()
-                    getWidgetName: page.getWidgetName
-                    onUpdate: list => Config.options.bar.layouts.middleLayout = list
+            function storedLayout(bucket) {
+                if (bucket === 0) return Config.options.bar.layouts.leftLayout;
+                if (bucket === 1) return Config.options.bar.layouts.middleLayout;
+                return Config.options.bar.layouts.rightLayout;
+            }
+            function writeLayout(bucket, list) {
+                if (bucket === 0) Config.options.bar.layouts.leftLayout = list;
+                else if (bucket === 1) Config.options.bar.layouts.middleLayout = list;
+                else Config.options.bar.layouts.rightLayout = list;
+            }
+            function dropBuckets() {
+                const buckets = [];
+                for (let b = 0; b < 3; b++)
+                    buckets.push(barLayoutSection.layoutLists[b].bucketFor(
+                        b === barLayoutSection.dragBucket ? barLayoutSection.dragIndex : -1));
+                return buckets;
+            }
+            function beginDrag(bucket, index) {
+                barLayoutSection.dragBucket = bucket;
+                barLayoutSection.dragIndex = index;
+            }
+            // Every pointer event: the gap opens in whichever list the drop
+            // would land in, and closes everywhere else - a foreign list
+            // parts too, which is what makes the drag legible before the
+            // drop.
+            function dragMoved(target) {
+                for (let b = 0; b < 3; b++) {
+                    if (!target || target.bucket !== b) {
+                        barLayoutSection.layoutLists[b].gapIndex = -1;
+                        continue;
+                    }
+                    // dropTarget's insertion index counts STORED slots - the
+                    // dragged hole included - while gapIndex speaks in the
+                    // REMAINING rows the list actually draws. In the drag's
+                    // own list those differ by one past the hole, which drew
+                    // the gap a slot below the pointer; the conversion is
+                    // the same one the commit already uses.
+                    barLayoutSection.layoutLists[b].gapIndex =
+                        (b === barLayoutSection.dragBucket)
+                            ? LayoutOps.moveTargetForInsertion(barLayoutSection.dragIndex, target.index)
+                            : target.index;
                 }
+            }
+            function endDrag() {
+                barLayoutSection.dragBucket = -1;
+                barLayoutSection.dragIndex = -1;
+                for (let b = 0; b < 3; b++)
+                    barLayoutSection.layoutLists[b].gapIndex = -1;
+            }
+            // A null target (dropped outside every bucket) commits nothing -
+            // the ReorderDragArea cancel rule.
+            function commitDrop(bucket, index, target) {
+                if (!target) return;
+                if (target.bucket === bucket) {
+                    const dest = LayoutOps.moveTargetForInsertion(index, target.index);
+                    if (dest === index) return;
+                    barLayoutSection.writeLayout(bucket,
+                        LayoutOps.move(barLayoutSection.storedLayout(bucket), index, dest));
+                    return;
+                }
+                const source = barLayoutSection.storedLayout(bucket);
+                const id = source[index];
+                barLayoutSection.writeLayout(bucket, LayoutOps.remove(source, index));
+                barLayoutSection.writeLayout(target.bucket, LayoutOps.insert(
+                    barLayoutSection.storedLayout(target.bucket), id, target.index));
+            }
+            // A stale id (an uninstalled plugin's widget) keeps a readable
+            // row: nameFor already falls back to the raw id, and the icon
+            // falls back here.
+            function rowInfoFor(id) {
+                const found = BarWidgets.available.find(entry => entry.id === id);
+                return { icon: found?.icon ?? "widgets", title: BarWidgets.nameFor(id) };
+            }
 
-                LayoutSection {
-                    sectionTitle: Config.options.bar.vertical ? Translation.tr("Bottom") : Translation.tr("Right")
-                    layout: Config.options.bar.layouts.rightLayout
-                    availableWidgets: page.availableFor()
-                    getWidgetName: page.getWidgetName
-                    onUpdate: list => Config.options.bar.layouts.rightLayout = list
+            component BarLayoutList: ReorderableList {
+                id: layoutList
+                property int bucket: -1
+                Layout.fillWidth: true
+                rowFor: id => barLayoutSection.rowInfoFor(id)
+                available: page.availableFor()
+                addButtonText: Translation.tr("Add widget")
+                bucketsProvider: () => barLayoutSection.dropBuckets()
+                onRowDragStarted: index => barLayoutSection.beginDrag(layoutList.bucket, index)
+                onRowDragMoved: target => barLayoutSection.dragMoved(target)
+                onRowDropped: (index, target) => {
+                    barLayoutSection.commitDrop(layoutList.bucket, index, target);
+                    // The commit may rebuild the emitting list's delegates,
+                    // so the delegate-side dragEnded is not guaranteed to
+                    // arrive - close the drag here, idempotently.
+                    barLayoutSection.endDrag();
+                }
+                onRowDragEnded: barLayoutSection.endDrag()
+                onAddRequested: id => barLayoutSection.writeLayout(layoutList.bucket,
+                    LayoutOps.insert(barLayoutSection.storedLayout(layoutList.bucket),
+                        id, barLayoutSection.storedLayout(layoutList.bucket).length))
+                onRemoveRequested: index => barLayoutSection.writeLayout(layoutList.bucket,
+                    LayoutOps.remove(barLayoutSection.storedLayout(layoutList.bucket), index))
+            }
+
+            ContentSubsection {
+                title: Config.options.bar.vertical ? Translation.tr("Top") : Translation.tr("Left")
+                BarLayoutList {
+                    id: leftList
+                    bucket: 0
+                    model: Config.options.bar.layouts.leftLayout
+                }
+            }
+            ContentSubsection {
+                title: Translation.tr("Center")
+                BarLayoutList {
+                    id: centerList
+                    bucket: 1
+                    model: Config.options.bar.layouts.middleLayout
+                }
+            }
+            ContentSubsection {
+                title: Config.options.bar.vertical ? Translation.tr("Bottom") : Translation.tr("Right")
+                BarLayoutList {
+                    id: rightList
+                    bucket: 2
+                    model: Config.options.bar.layouts.rightLayout
                 }
             }
         }
@@ -229,7 +338,8 @@ ContentPage {
                         { displayName: Translation.tr("Hug"),     icon: "line_curve", value: 0 },
                         { displayName: Translation.tr("Float"),   icon: "view_day",   value: 1 },
                         { displayName: Translation.tr("Islands"), icon: "crop_3_2",   value: 2 },
-                        { displayName: Translation.tr("M3"), icon: "interests",   value: 3 }
+                        { displayName: Translation.tr("M3"), icon: "interests",   value: 3 },
+                        { displayName: Translation.tr("Float Islands"), icon: "view_week", value: 4 }
                     ]
                 }
                 ConfigSelectionArray {
@@ -248,7 +358,7 @@ ContentPage {
                     ConfigSwitch {
                         buttonIcon: "variable_insert"
                         text: Translation.tr("Show Background")
-                        enabled: Config.options.bar.cornerStyle === 0 || Config.options.bar.cornerStyle === 1
+                        enabled: Config.options.bar.cornerStyle === 0 || Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4
                         checked: Config.options.bar.showBackground
                         onToggleRequested: Config.options.bar.showBackground = !Config.options.bar.showBackground
                     }
@@ -263,11 +373,26 @@ ContentPage {
                         ]
                     }
                 }
+                // Only meaningful with the background off and the groups
+                // transparent, which is when the bar is glyphs over the wallpaper.
+                ConfigSwitch {
+                    buttonIcon: "gradient"
+                    text: Translation.tr("Edge shadow")
+                    description: Translation.tr("Shade the screen edge behind an unpainted bar, for legibility")
+                    // The same three conditions the shade itself is drawn under:
+                    // a style where Show Background applies, that switch off,
+                    // and the groups transparent - so the row is never live
+                    // while the switch above it is greyed out.
+                    enabled: (Config.options.bar.cornerStyle === 0 || Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4)
+                        && !Config.options.bar.showBackground && Config.options.bar.borderless === "transparent"
+                    checked: Config.options.bar.edgeShadow
+                    onToggleRequested: Config.options.bar.edgeShadow = !Config.options.bar.edgeShadow
+                }
                 ConfigSwitch {
                     buttonIcon: "ev_shadow"
                     text: Translation.tr("Bar shadow")
                     enabled: Config.options.bar.showBackground
-                        && (Config.options.bar.cornerStyle === 0 || Config.options.bar.cornerStyle === 1)
+                        && (Config.options.bar.cornerStyle === 0 || Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4)
                     checked: Config.options.bar.shadow
                     onToggleRequested: Config.options.bar.shadow = !Config.options.bar.shadow
                 }
@@ -522,6 +647,9 @@ ContentPage {
                         onToggleRequested: Config.options.bar.resources.alwaysShowGpu = !Config.options.bar.resources.alwaysShowGpu
                     }
                 }
+                // Two switches per row, like the rows above: three uniform cells
+                // leave "GPU Temperature" a third of the row, and its switch was
+                // drawn over the next cell's label.
                 ConfigRow {
                     uniform: true
                     ConfigSwitch {
@@ -530,15 +658,15 @@ ContentPage {
                         checked: Config.options.bar.resources.alwaysShowDisk
                         onToggleRequested: Config.options.bar.resources.alwaysShowDisk = !Config.options.bar.resources.alwaysShowDisk
                     }
-                }
-                ConfigRow {
-                    uniform: true
                     ConfigSwitch {
                         buttonIcon: "swap_horiz"
                         text: Translation.tr("Swap")
                         checked: Config.options.bar.resources.alwaysShowSwap
                         onToggleRequested: Config.options.bar.resources.alwaysShowSwap = !Config.options.bar.resources.alwaysShowSwap
                     }
+                }
+                ConfigRow {
+                    uniform: true
                     ConfigSwitch {
                         buttonIcon: "thermostat"
                         text: Translation.tr("GPU Temperature")

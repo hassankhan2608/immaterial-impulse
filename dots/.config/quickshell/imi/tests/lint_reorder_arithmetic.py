@@ -2,7 +2,7 @@
 """A drag that reorders a list does it through `layout_ops.js`, not by hand.
 
 Four surfaces reorder a list by dragging one of its items - the bar's chip
-editor (`LayoutSection.qml`), the dock strip (`DragApps.qml`), the bar's copy of
+editor (`LayoutSection.qml`), the dock strip (`imi/dock/DragApps.qml`), the bar's copy of
 that strip (`DocktoPanel.qml`) and the Android quick toggles
 (`AndroidQuickToggleButton.qml`) - and all four had written the arithmetic out
 locally. The duplication was not the defect. The disagreement was: two of them
@@ -45,8 +45,11 @@ LAYOUT_OPS = "layout_ops.js"
 # sweep cannot go quiet: a rename, a move or a lost `DragHandler` would
 # otherwise empty the scope and report a clean tree.
 EXPECTED_SITES = {
-    "common/widgets/LayoutSection.qml",
-    "common/widgets/DragApps.qml",
+    # LayoutSection was superseded by ReorderableList (e64fe9153), whose
+    # drag machinery is the extracted ReorderDragArea - the DragHandler
+    # the sweep must keep reaching lives there now.
+    "common/widgets/ReorderDragArea.qml",
+    "imi/dock/DragApps.qml",
     "imi/bar/DocktoPanel.qml",
     "imi/sidebarRight/quickToggles/androidStyle/AndroidQuickToggleButton.qml",
 }

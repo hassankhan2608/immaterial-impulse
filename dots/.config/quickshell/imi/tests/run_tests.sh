@@ -269,6 +269,87 @@ if ! python3 "$SCRIPT_DIR/lint_spacing.py"; then
     exit 1
 fi
 
+echo "Running test ai skeleton contract..."
+if ! python3 "$SCRIPT_DIR/test_ai_skeleton_contract.py"; then
+    echo "test ai skeleton contract failed."
+    exit 1
+fi
+
+echo "Running test bar layout list contract..."
+if ! python3 "$SCRIPT_DIR/test_bar_layout_list_contract.py"; then
+    echo "test bar layout list contract failed."
+    exit 1
+fi
+
+echo "Running ripple tone lint..."
+if ! python3 "$SCRIPT_DIR/lint_ripple_tone.py"; then
+    echo "Ripple tone lint failed."
+    exit 1
+fi
+
+echo "Running combo box press tests..."
+if ! python3 "$SCRIPT_DIR/test_combo_box_press.py"; then
+    echo "Combo box press tests failed."
+    exit 1
+fi
+
+echo "Running keyring on-demand tests..."
+if ! python3 "$SCRIPT_DIR/test_keyring_on_demand.py"; then
+    echo "Keyring on-demand tests failed."
+    exit 1
+fi
+
+echo "Running openrgb stream tests..."
+if ! python3 "$SCRIPT_DIR/test_openrgb_stream.py"; then
+    echo "OpenRGB stream tests failed."
+    exit 1
+fi
+
+echo "Running presets apply-only tests..."
+if ! python3 "$SCRIPT_DIR/test_presets_apply_only.py"; then
+    echo "Presets apply-only tests failed."
+    exit 1
+fi
+
+echo "Running selection array flow tests..."
+if ! python3 "$SCRIPT_DIR/test_selection_array_flow.py"; then
+    echo "Selection array flow tests failed."
+    exit 1
+fi
+
+echo "Running sni watchdog planner tests..."
+if ! python3 "$SCRIPT_DIR/test_sni_watchdog.py"; then
+    echo "SNI watchdog planner tests failed."
+    exit 1
+fi
+
+# Source contract: ResourceUsage polls through FileViews, keeps df off the
+# fast tick, and never starts nvidia-smi outside the runtime-status gate -
+# the ungated spawn is what holds a hybrid laptop's dGPU out of suspend.
+echo "Running resource usage polling contract..."
+if ! python3 "$SCRIPT_DIR/test_resource_usage_polling.py"; then
+    echo "Resource usage polling contract failed."
+    exit 1
+fi
+
+# Source contract: per-project Wallpaper Engine settings reach the renderer
+# through the one resolution (WallpaperEngineOverrides.active) - a raw config
+# read makes every sidebar override a silent no-op.
+echo "Running Wallpaper Engine overrides wiring contract..."
+if ! python3 "$SCRIPT_DIR/test_we_overrides_wiring.py"; then
+    echo "Wallpaper Engine overrides wiring contract failed."
+    exit 1
+fi
+
+# Source contract: the compatibility scan runs in a spawned scanner process
+# (a wedged wallpaper kills the scanner, not the shell) and every reader of a
+# verdict goes through WallpaperEngineCompat.statusFor.
+echo "Running Wallpaper Engine compatibility wiring contract..."
+if ! python3 "$SCRIPT_DIR/test_we_compat_wiring.py"; then
+    echo "Wallpaper Engine compatibility wiring contract failed."
+    exit 1
+fi
+
 # Static lint: an Appearance token a QML file reads must be declared. An
 # undeclared one is `undefined`, which renders 0 after a single warning - or
 # NaN, with no warning at all, where the call site does arithmetic on it.
@@ -291,6 +372,28 @@ fi
 echo "Running GroupedList row-visibility lint..."
 if ! python3 "$SCRIPT_DIR/lint_grouped_list_row_visible.py"; then
     echo "GroupedList row-visibility lint failed."
+    exit 1
+fi
+
+# Static lint: the other half of the same component's rule. A group of related
+# rows is a GroupedList and never a rectangle wrapped around a list view -
+# M3_GUIDELINES.md says so in prose, and the phone roster was written the
+# forbidden way anyway. It drew square, because `clip` on a Rectangle clips to
+# the box and not to the radius.
+echo "Running hand-rolled row group lint..."
+if ! python3 "$SCRIPT_DIR/lint_hand_rolled_row_group.py"; then
+    echo "Hand-rolled row group lint failed."
+    exit 1
+fi
+
+# Static lint: a wave member declares `appear` once. Declaring it over a base
+# that already has one puts two properties of that name on the object - the
+# wave writes the derived one, the base's opacity binding reads its own, and
+# the member silently stops fading. The android quick toggles did exactly that
+# the day GroupButton moved onto RippleButton.
+echo "Running shadowed stagger appear lint..."
+if ! python3 "$SCRIPT_DIR/lint_shadowed_stagger_appear.py"; then
+    echo "Shadowed stagger appear lint failed."
     exit 1
 fi
 
@@ -423,6 +526,17 @@ if ! python3 "$SCRIPT_DIR/lint_clickable_cursor.py"; then
     exit 1
 fi
 
+# Static lint: a Control-derived widget (anything rooted in RippleButton and
+# its kin) does not redeclare a FINAL property such as horizontalPadding. That
+# is "Cannot override FINAL property" at load and a widget that is never
+# created, which nothing else in this suite can see; it happened twice with
+# the rule already in AGENT.md.
+echo "Running FINAL-property lint..."
+if ! python3 "$SCRIPT_DIR/lint_final_properties.py"; then
+    echo "FINAL-property lint failed."
+    exit 1
+fi
+
 # Static lint: a ConfigSwitch click is an intent. Assigning to `checked` - in
 # the widget or at a call site - destroys the binding every settings page hangs
 # on it, and the switch silently detaches from the config it is showing.
@@ -497,6 +611,29 @@ if ! python3 "$SCRIPT_DIR/lint_runtime_bus_isolation.py"; then
     exit 1
 fi
 
+# A shared widget is presentational, and this is the ratchet. The folder is a
+# promise - anything in it can be used by any surface - and 23 files were
+# quietly breaking it: reading the user's config, writing global state, driving
+# a service, spawning a process. Eleven moved out to their only consumer; the
+# rest are named with reasons, so the list can shrink and cannot grow.
+echo "Running dumb widget lint..."
+if ! python3 "$SCRIPT_DIR/lint_dumb_widgets.py"; then
+    echo "Dumb widget lint failed."
+    exit 1
+fi
+
+# The Components gallery covers every control that inherits the press morph.
+# The gallery's argument is that a shared interaction token can be reviewed
+# against everything it reaches; a catalogue missing eight of those types is
+# worse than no gallery, because it looks like the whole answer. The set is
+# computed from the tree rather than listed, so a new button joins it by
+# existing.
+echo "Running component gallery lint..."
+if ! python3 "$SCRIPT_DIR/lint_component_gallery.py"; then
+    echo "Component gallery lint failed."
+    exit 1
+fi
+
 echo "Running doc citation lint..."
 if ! python3 "$SCRIPT_DIR/lint_doc_citations.py"; then
     echo "Doc citation lint failed."
@@ -511,6 +648,19 @@ fi
 echo "Running changelog receipt tests..."
 if ! python3 "$SCRIPT_DIR/test_changelog_receipt.py"; then
     echo "Changelog receipt tests failed."
+    exit 1
+fi
+
+# The deploy guard. ~/.config/quickshell/imi is a copy and the deploy that
+# fills it is `rsync --delete`, so deploying from a branch cut off main takes
+# every other open PR's work off the maintainer's running shell - which is what
+# happened, invisibly, because a clean live log proves nothing when main is
+# clean. This drives `deploy-shell` over a throwaway repo with a stub `gh`,
+# holding both exemptions the first draft got wrong: cherry-picked work counts
+# as present, and a branch outside the deployed subtree is not a loss.
+echo "Running deploy guard tests..."
+if ! python3 "$SCRIPT_DIR/test_deploy_guard.py"; then
+    echo "Deploy guard tests failed."
     exit 1
 fi
 
@@ -1063,6 +1213,97 @@ if ! python3 "$SCRIPT_DIR/test_cheatsheet_width_budget.py"; then
     exit 1
 fi
 
+echo "Running typing test contract tests..."
+if ! python3 "$SCRIPT_DIR/test_typing_test_contract.py"; then
+    echo "Typing test contract tests failed."
+    exit 1
+fi
+
+echo "Running cliphist decode lifetime tests..."
+if ! python3 "$SCRIPT_DIR/test_cliphist_decode_lifetime.py"; then
+    echo "Cliphist decode lifetime tests failed."
+    exit 1
+fi
+
+echo "Running notification list entrance tests..."
+if ! python3 "$SCRIPT_DIR/test_notification_list_entrance.py"; then
+    echo "Notification list entrance tests failed."
+    exit 1
+fi
+
+# The System Icons bar widget: every icon that comes and goes slides through
+# a Revealer, and the bell's badge fades. Recorded snapping in and out.
+if ! python3 "$SCRIPT_DIR/test_system_icons_graceful.py"; then
+    echo "System icons graceful tests failed."
+    exit 1
+fi
+
+# A bar widget whose popup a click holds open marks it with the edge
+# PopupAnchorIndicator, on tokenised tiers, and paints no tonal container.
+if ! python3 "$SCRIPT_DIR/test_bar_popup_anchor_contract.py"; then
+    echo "Bar popup anchor contract failed."
+    exit 1
+fi
+
+# One opacity for the blurred shell surfaces (Settings > Quick), and widgets
+# that follow it through PluginState (Settings > Widgets).
+if ! python3 "$SCRIPT_DIR/test_shell_opacity_contract.py"; then
+    echo "Shell opacity contract failed."
+    exit 1
+fi
+
+# An unpainted bar can shade the screen edge behind it (Settings > Bar), and
+# the plate border thins with the fill.
+if ! python3 "$SCRIPT_DIR/test_bar_edge_shadow_contract.py"; then
+    echo "Bar edge shadow contract failed."
+    exit 1
+fi
+
+# The privacy indicator draws from the bar's palette, never the error pair.
+if ! python3 "$SCRIPT_DIR/test_privacy_indicator_palette.py"; then
+    echo "Privacy indicator palette tests failed."
+    exit 1
+fi
+
+# The generated kitty theme is never a file kitty refuses: no palette, no
+# theming; a placeholder left means no install; no // in the template.
+if ! python3 "$SCRIPT_DIR/test_terminal_theme_template.py"; then
+    echo "Terminal theme template tests failed."
+    exit 1
+fi
+
+# Quick toggle edit badges sit inside the tile, on one edge.
+if ! python3 "$SCRIPT_DIR/test_quick_toggle_edit_badges.py"; then
+    echo "Quick toggle edit badge tests failed."
+    exit 1
+fi
+
+# The install TUI's spinner forks nothing for time or sleep, so pacman's
+# glibc replacement cannot make it spam errors or run its clock negative.
+if ! python3 "$SCRIPT_DIR/test_installer_tui_spinner.py"; then
+    echo "Installer TUI spinner tests failed."
+    exit 1
+fi
+
+# A user's kitty settings survive an update: user.conf included last and
+# never synced over; opacity is shell config a preset carries.
+if ! python3 "$SCRIPT_DIR/test_kitty_user_config.py"; then
+    echo "Kitty user config tests failed."
+    exit 1
+fi
+
+echo "Running Float Islands bar style contract tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_float_islands_contract.py"; then
+    echo "Float Islands bar style contract tests failed."
+    exit 1
+fi
+
+echo "Running bar icon ring contract tests..."
+if ! python3 "$SCRIPT_DIR/test_bar_icon_ring_contract.py"; then
+    echo "Bar icon ring contract tests failed."
+    exit 1
+fi
+
 echo "Running calendar card tests..."
 if ! python3 "$SCRIPT_DIR/test_calendar_card.py"; then
     echo "Calendar card tests failed."
@@ -1284,6 +1525,16 @@ if ! python3 "$SCRIPT_DIR/test_wallpaper_engine.py"; then
     exit 1
 fi
 
+# The wallpaper's sound plays on ONE output. There is a WE renderer per screen
+# (Background.qml is a Variants over Quickshell.screens), so a per-output
+# surface reading the global `silent` flag played the same track once per
+# monitor - issue #338.
+echo "Running Wallpaper Engine audio-output contract..."
+if ! python3 "$SCRIPT_DIR/test_we_audio_single_output.py"; then
+    echo "Wallpaper Engine audio-output contract failed."
+    exit 1
+fi
+
 echo "Running preset state tests..."
 if ! python3 "$SCRIPT_DIR/test_presets.py"; then
     echo "Preset state tests failed."
@@ -1293,6 +1544,50 @@ fi
 echo "Running Settings navigation tests..."
 if ! python3 "$SCRIPT_DIR/test_settings_navigation.py"; then
     echo "Settings navigation tests failed."
+    exit 1
+fi
+
+# The button's ripple mask layer is on only while a ripple is drawn. Always on,
+# it was an offscreen render target per button across the whole shell - the
+# settings window's first frame drew 946 batches through it.
+echo "Running ripple layer gate tests..."
+if ! python3 "$SCRIPT_DIR/test_ripple_layer_gate.py"; then
+    echo "Ripple layer gate tests failed."
+    exit 1
+fi
+
+# A GroupButton's size animates for a press, never for a layout settling: the
+# settings rows shook for ~20 frames on the first open while every chip's
+# width travelled to the value the window's first polish had just given it.
+echo "Running group button settle tests..."
+if ! python3 "$SCRIPT_DIR/test_group_button_settle.py"; then
+    echo "Group button settle tests failed."
+    exit 1
+fi
+
+# A tmux pane never receives the terminal's default colours: tmux adopts an
+# OSC 11 it is sent as the pane's own background and paints it explicitly, and
+# a translucent kitty turns into a solid slab.
+echo "Running applycolor tmux pane tests..."
+if ! python3 "$SCRIPT_DIR/test_applycolor_tmux_panes.py"; then
+    echo "Applycolor tmux pane tests failed."
+    exit 1
+fi
+
+# The Bluetooth battery widget: one numeric lookup on BluetoothStatus feeds
+# the bar rings, At-a-glance and the dialog suffix; the widget follows the
+# ring rule and deep-links its click to the dialog.
+echo "Running Bluetooth battery widget contract tests..."
+if ! python3 "$SCRIPT_DIR/test_bluetooth_battery_widget.py"; then
+    echo "Bluetooth battery widget contract tests failed."
+    exit 1
+fi
+
+# Desktop widget shadows have one switch, gating the one shadow every widget
+# casts (WidgetElevation), on by default.
+echo "Running widget shadow toggle tests..."
+if ! python3 "$SCRIPT_DIR/test_widget_shadow_toggle.py"; then
+    echo "Widget shadow toggle tests failed."
     exit 1
 fi
 
@@ -1721,6 +2016,30 @@ fi
 echo "Running subject mask refinement tests..."
 if ! python3 "$SCRIPT_DIR/test_subject_mask_refine.py"; then
     echo "Subject mask refinement tests failed."
+    exit 1
+fi
+
+echo "Running subject-mask lasso tests..."
+if ! python3 "$SCRIPT_DIR/test_subject_mask_lasso.py"; then
+    echo "Subject-mask lasso tests failed."
+    exit 1
+fi
+
+echo "Running media art-trim tests..."
+if ! python3 "$SCRIPT_DIR/test_media_art_trim.py"; then
+    echo "Media art-trim tests failed."
+    exit 1
+fi
+
+echo "Running lyrics provider tests..."
+if ! python3 "$SCRIPT_DIR/test_lyrics_providers.py"; then
+    echo "Lyrics provider tests failed."
+    exit 1
+fi
+
+echo "Running unqualified-parent scope lint..."
+if ! python3 "$SCRIPT_DIR/lint_unqualified_parent_scope.py"; then
+    echo "Unqualified-parent scope lint failed."
     exit 1
 fi
 

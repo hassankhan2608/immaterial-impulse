@@ -12,7 +12,687 @@ own repo; the installer pins which revision it builds.
 
 ## [Unreleased]
 
+## [1.0.0-rc-14] — 2026-09-05
+
+### Changed
+- **Wallpaper Engine renderer pinned to qs-wallpaperengine v0.3.0.** The
+  installer now fetches the 0.3.0 prebuilt, which is the renderer the new
+  selector sidebar talks to: volume, the audio-reactive recorder,
+  mouse/parallax/particles, per-wallpaper properties, the live Fill crop
+  picker with the real-scene thumbnail, and the Quality dial all appear once
+  it is installed (Settings > Update Dots). On the previous renderer those
+  controls stay hidden.
+- **Lyrics load faster and stop re-fetching.** Fetched lyrics are cached on
+  disk, so replaying a song or reopening the media sidebar no longer re-hits
+  the network; a track change now fetches once instead of two or three times,
+  and a hung fetch gives up after 20s instead of spinning forever.
+
 ### Fixed
+- **Lyrics no longer flicker "no lyrics" on every track change**, and seeking
+  within a song no longer disrupts them.
+- **Media cover-art tint no longer freezes grey** on the dock after a track
+  with no artwork, and progress bars no longer misbehave on live streams or
+  when no player is present. Cover art for local files and on slow IPv6
+  networks loads reliably in the sidebar.
+
+## [1.0.0-rc-13] — 2026-09-04
+
+### Added
+- **A Wallpaper Engine sidebar in the wallpaper selector.** Browsing WE
+  wallpapers, the selector gains a settings sidebar: frame rate, scaling,
+  audio and volume, the audio-reactive recorder, mouse/parallax/particles,
+  and each wallpaper's own project.json properties — set globally or per
+  wallpaper. Broken wallpapers are flagged by a compatibility scan. Browsing
+  local files instead, the sidebar is a "places" rail.
+- **A crop picker for the "Fill" scale mode.** When a Wallpaper Engine scene
+  or image is larger than the monitor, its thumbnail becomes a section
+  selector — drag to choose which part is shown, and the wallpaper pans live.
+  The thumbnail shows the real scene grabbed from the renderer, not the
+  wallpaper's (often portrait) preview image.
+- **A Quality dial for Wallpaper Engine wallpapers.** Native / High / Balanced
+  / Low renders the wallpaper at a fraction of native and upscales. It cuts
+  real work for video wallpapers; for a heavy scene the frame rate is the
+  better lever, and the control says so.
+
+### Fixed
+- **The dedicated GPU is left asleep.** Resource polling no longer wakes a
+  runtime-suspended NVIDIA card every tick to read its stats, and the
+  wallpaper decode is bounded to what a screen can actually draw.
+
+## [1.0.0-rc-12] — 2026-09-03
+
+### Added
+- **Widget shadows can be turned off.** Settings > Plugins > Widget settings
+  gains a "Widget shadows" switch, on by default; off, no desktop widget
+  casts one.
+
+### Fixed
+- **Desktop widgets keep separate settings for the desktop and the lock
+  screen.** Rotating the System Monitor or GPU Monitor on Edit Mode's
+  Lockscreen tab rotated it on the desktop too; every widget setting now
+  follows the surface it is changed on, and the desktop's stays where it
+  was. Settings > Widgets keeps editing the desktop. Presets carry the lock
+  side too.
+
+## [1.0.0-rc-11] — 2026-09-03
+
+### Added
+- **A Bluetooth battery bar widget.** "Bluetooth battery" in Settings > Bar
+  draws one ring per connected Bluetooth device that reports a level - the
+  device's glyph in the resource monitor's ring, red at the battery low
+  threshold - and collapses when nothing reports. Hover lists every
+  connected device with its level; a click opens the Bluetooth dialog.
+  Controllers whose battery only UPower knows about count too, and they
+  get their own glyph in the device dialog now.
+
+### Fixed
+- **The battery popup's Health card no longer alarms at full health.** The
+  card was written for usage, where 100% is the problem; a battery's health
+  (and a Bluetooth device's charge) is a level, where empty is.
+- **At-a-glance shows a controller's battery.** The desktop widget only
+  counted devices BlueZ reported a battery for; it reads the same lookup as
+  the quick toggle now, UPower fallback included.
+
+## [1.0.0-rc-10] — 2026-09-03
+
+### Changed
+- **The typing test scales with the screen.** Its stage was a fixed
+  1100x640 on every monitor; it now takes a share of the room the bar and
+  the dock leave, held to a 16:9 stage, so it grows on a larger screen
+  without becoming it.
+
+### Fixed
+- **tmux panes stay translucent after a new shell opens in them.** rc-9 stopped
+  the colour push from handing a pane the terminal's default colours, but the
+  shell rc files (zsh and fish) still sent the full sequence file on every new
+  shell, and tmux starts one in every pane - so a new pane went opaque again.
+  Inside tmux the rc files now send the pane-safe file.
+- **The cheatsheet fits the screen again.** The window was sized to its
+  tallest page, so the typing test and the periodic table opened as tall as
+  the keybind table - past both screen edges on a 1080p display. The window
+  follows the tab it is showing now, and the keybind table itself shrinks
+  uniformly (the way the Elements page always has) when a full keybind set
+  is larger than the screen, instead of running off it.
+
+## [1.0.0-rc-9] — 2026-09-03
+
+### Changed
+- **The clock's options are organised.** Digital, Cookie, Pixel and Quote
+  rows sit under a header each, with the style's icon, instead of repeating
+  the style in every label; switches pair up two to a line, and a choice
+  whose options all have icons draws dense icon chips - named on hover, the
+  current one named beside the label - so every row fits on one line. The
+  cookie clock's options take less height than they did while reading as
+  four groups. A header appears
+  only while its rows do.
+- **Edit Mode has one toolbar.** The Desktop and Lockscreen tabs lead it,
+  and the tab bar that sat under the desktop is gone; the desktop takes the
+  band it occupied. The edge-snapping toggle shows a grid, on or off.
+
+### Added
+- **Undo and redo in Edit Mode.** Two toolbar buttons beside Done, and
+  Ctrl+Shift+Z or Ctrl+Y alongside Ctrl+Z. Every undoable change - moves,
+  spans, adds, removes, bar and dock reorders, lock islands - can be redone;
+  a new change clears the redo history.
+
+### Fixed
+- **tmux panes stay translucent.** Every colour change pushed the terminal's
+  default background into each tmux pane, and tmux adopted it as the pane's
+  own and painted it as a solid slab inside an otherwise blurred kitty.
+  Panes now receive only the palette, plus a reset of any default they had
+  adopted before, and inherit the background from the terminal itself.
+- **The settings rows no longer shake on the first open.** Every chip in
+  every selection row grew for twenty frames while its row wrapped and
+  unwrapped behind it: the button animated a width the window's first
+  layout had just given it. A button's size now travels only under the
+  pointer, for the press bounce; a layout settling lands.
+- **The first open of Settings after a restart blocks the shell far less.**
+  It froze about sixteen frames while fourteen pages that were not on
+  screen were moved into the new window and laid out; pages built ahead
+  now wait outside the window until first shown. Every button in the shell
+  also stops rendering through its own offscreen layer while idle.
+- **A labelled row of chips that cannot fit stacks them under the label.**
+  The clock's "minute hand" row drew its chips over the last word.
+- **The edge shadow is offered only where Show Background applies.** It was
+  live under M3, whose pills paint themselves, and drew under them; the
+  switch and the shade now need Hug, Float or Float Islands with Show
+  Background off and group style None, all three.
+
+## [1.0.0-rc-8] — 2026-09-03
+
+### Added
+- **Terminal opacity is a shell setting.** Settings > Appearance > Terminal
+  gains an opacity slider, written into the generated kitty theme, so a
+  preset carries it and an update cannot lose it. Blur is the compositor's.
+
+### Fixed
+- **Your kitty edits survive an update.** kitty.conf was rewritten on every
+  update and the directory synced with `--delete`; it now includes
+  `~/.config/kitty/user.conf` last, a file the installer never ships or
+  deletes, and matugen's generated palette file is left alone too.
+- **The installer's progress spinner no longer floods the screen during the
+  glibc upgrade.** It forked `sleep` and `date` every tick, and while pacman
+  replaces glibc nothing can start: each tick printed "cannot execute" and
+  the elapsed clock went negative. It keeps time and sleeps with bash
+  builtins now, and a milestone never moves backwards.
+- **The M3 bar's profile text is centred.** Its two lines sat 2 px low in
+  the pill.
+- **Quick toggle edit badges belong visibly to their tile.** The remove
+  badge hung outside the top-left corner and the resize handle outside the
+  bottom-right, so neighbours' badges met in the gutter and the bottom row's
+  handles were clipped; both now sit inside the tile on its right edge.
+- **kitty no longer refuses to start after a theme generation with no
+  palette.** With the palette file missing or empty the colour generator
+  copied its kitty template out with every `$placeholder` intact, and kitty
+  rejected its whole config. The generator now stops without a palette,
+  never installs a theme with a placeholder left, and the template's one
+  inline `//` comment, which kitty read as part of a colour, is gone.
+- **Settings > Quick's Bar & Screen chips line up on the right.** In the
+  stacked cards the chip rows sat left, right after each title, leaving four
+  different right edges; a segmented row without a label now earns the right
+  edge and still wraps when the row is narrower than its chips.
+- **Settings > Bar's resource switches no longer overlap.** The last row
+  packed three switches; "GPU Temperature" needed more than a third of the
+  row and its switch was drawn over the VRAM label. Two per row, like the
+  rows above.
+- **The installer explains a partially upgraded system before building.**
+  A build tool that cannot load a library it was built against (a user's
+  `cmake` missing `libjsoncpp.so.26`) used to fail deep inside the MicroTeX
+  build; the installer now checks the toolchain runs before the first
+  package and says to finish `pacman -Syu`.
+
+## [1.0.0-rc-7] — 2026-09-02
+
+### Added
+- **An edge shadow for an unpainted bar.** With the background off and the
+  group style None the bar is glyphs over the wallpaper; Settings > Bar's
+  "Edge shadow" shades the screen edge behind it, fading across the bar from
+  whichever edge it sits on, the way a macOS menu bar does.
+- **A shell opacity slider.** Settings > Quick, beside the transparency
+  switches: one opacity for every blurred shell surface - the bar, the
+  sidebars, the dock, the settings window, the cheatsheet, and the bar's
+  popups. Inert while Automatic picks the amount from the wallpaper.
+- **Widgets can follow the shell opacity.** Settings > Widgets gains "Follow
+  shell opacity": widget panels take the shell's value, and the widgets' own
+  slider shows it and yields.
+- **A bar widget's open popup is marked on the bar's edge.** While a click
+  holds a popup open - Docker, Discord voice, the tray's overflow - a primary
+  indicator as long as the widget lies on the bar's popup-facing edge under
+  it, growing in and fading out, under every bar style and group style. It
+  replaces the tonal container the tray's overflow button used to paint,
+  which only read on M3.
+- **Float Islands bar style.** A fifth bar style (Settings > Bar > Bar style,
+  also on the Quick page): M3's three sections - left, centre, right - each
+  drawn as Float's plate, with the window rounding, the layer border and a
+  gap off the screen edge and the windows, and the widget groups inside them
+  exactly as Float draws them. Works for the bottom and vertical bars, takes
+  the same blur, shadow and background switches as Float.
+
+### Fixed
+- **The keyboard layout in the System Icons follows the palette.** Its colour
+  was set once at load and stayed behind when the pill's colour changed,
+  light text on the light hovered M3 pill.
+- **The privacy indicator is danger-red in both themes.** In the dark theme
+  it was a pastel pink pill with a dark glyph - M3's error role flips
+  saturation with the theme - and read as decoration; it now takes the
+  saturated member of the error pair in either theme, under every bar style.
+- **The plate border follows the shell opacity.** It was mixed with the
+  thinned fill and stayed an opaque ring around a see-through bar, sidebar,
+  dock or popup; it is thinned by the same amount now.
+- **The System Icons bar widget no longer snaps icons in and out.** The
+  notification bell appeared and vanished between two frames with the icons
+  beside it jumping to close the gap, and Bluetooth and VPN did the same. Each
+  now slides through the same revealer the mic-mute icon always had, following
+  the bar's orientation, and the unread badge fades.
+- **The Docker bar widget answers a click.** It opened its container popup
+  with no feedback at all; it is a button now - the press squish, the ripple
+  from the press point - and its open state is the bar's new edge indicator.
+- **Settings > Quick's Bar & Screen cards hold their chips.** With a fifth
+  bar style the Bar style chips ran past their card, and Bar position's had
+  been overflowing their padding all along: the page is 720 wide, and two
+  columns leave each card room for only one of the four chip rows. The cards
+  stack now, one row each with the title on the left and the chips on the
+  right, so every row sits on one line and the cards line up. A segmented row
+  without a label also fills its cell up to its natural width, so a narrower
+  cell wraps it instead of being overflowed.
+- **Bar icons in circles are outlined rings under every style but M3.** The
+  media widget's progress circle and the Docker widget's container gauge
+  were filled discs whatever the bar style; both are outline progress rings
+  now, the resource monitor's vocabulary, with the filled ring kept for M3
+  (and for the resource monitor's own Filled option).
+- **The typing test's key sounds play.** They were silent: Qt 6.11's
+  `SoundEffect` reports itself playing while its PipeWire stream stays corked
+  and muted. The pool is `MediaPlayer`s naming the default output now.
+
+## [1.0.0-rc-6] — 2026-09-02
+
+### Added
+- **A typing test in the cheatsheet.** A Monkeytype-style test as a new
+  cheatsheet tab (ported from the p3drovfx fork): time / words / zen modes,
+  punctuation and numbers, seven Monkeytype word packs (English, Portuguese,
+  Spanish, French, German, Italian, Russian - vendored, checksummed, offline),
+  a results screen with a WPM graph and character breakdown, personal bests,
+  history and a stats page with an activity map, Monkeytype's key-press and
+  error sounds, a live keyboard preview for five layouts, and an in-page
+  settings page for all of it. Scores stay local and aggregate-only. The tab
+  is on by default and can be switched off in Settings > General > Cheatsheet.
+
+### Fixed
+- **The right sidebar's notification list stops drawing blank under a live
+  count.** A card built while the panel was closed (a notification arriving,
+  or the list restored at startup) started its entrance fade and the fade
+  never advanced, so it stayed invisible - at 0, or part way - until it took
+  a new notification. The list runs no entrance while it is off screen and
+  settles any half-faded card when it comes on.
+- **Clipboard image previews stop going blank.** The launcher's decoded
+  previews lived in one `/tmp` directory that the shell wiped on every reload
+  that rebuilt its `Directories` singleton (a deploy, an update) and that a
+  second shell process wiped on start, and every row deleted its file when
+  the launcher rebuilt its rows on a keystroke - so the `Image` behind a
+  preview lost its file and drew the placeholder. The directory is
+  per-process now, dead siblings are swept on start, and a preview is held
+  by the rows showing it and removed a few seconds after the last lets go.
+- **The cheatsheet fits a 1080p laptop screen.** Its window is fixed-size and
+  as tall as its tallest page, and the Elements page was ~800px of fixed tiles
+  on any screen - so at a fractional scale (864 or 720 logical px) the window
+  sat under the bar and the dock, or ran off both screen edges. Pages now get
+  a budget derived from the monitor's own reserved area (what `hyprctl
+  monitors` reports for the bar and the dock) instead of a hard-coded 220px
+  allowance, and the Elements page scales itself into it.
+
+## [1.0.0-rc-5] — 2026-09-02
+
+### Changed
+- **1x1 media widget icons are filled**, not outlined, so they read over the bare cover artwork.
+
+### Fixed
+- **Lyrics line transitions ease instead of snapping.** A line's colour now
+  animates over the same clock as its size/scroll (a new `colorDuration` on
+  ShimmerLabel), the line-sweep overlay fades rather than vanishing in a
+  frame, and the active emphasis dropped its discrete per-word bold snap in
+  favour of the animating size+colour. A still-singing previous line keeps its
+  size (keyed on lineHot) and stays lit through the activeIndex anticipation,
+  fixing the tail-line being dropped early. Whole-line emphasis
+  (opacity/scale) now follows the same keep-alive, font.weight tweens on the
+  variable fonts instead of snapping, and `sungEnd` scans all words for the
+  latest end - BetterLyrics appends background vocals out of time order, and
+  taking the last element dropped still-singing chorus lines seconds early.
+
+## [1.0.0-rc-4] — 2026-09-01
+
+### Fixed
+- **Space Grotesk is optional now.** It was a hard font dependency of the
+  install, so where that package is unreachable (some regions) the whole
+  install failed. It is only the Expressive display font - the shell falls
+  back without it, and it stays settable in Settings > Appearance.
+- **Glassy line-level lyrics shimmer again.** BetterLyrics renders line-synced
+  lyrics as word spans with fake ~0.05s-apart times and no per-word duration;
+  the shell took them for real karaoke and raced the sweep to the last word (or
+  never ran it). A line with no real per-word duration is now treated as
+  line-level, so the sweep walks the whole line - the read LyricsPlus gives.
+
+### Changed
+- **Lyrics text is a notch larger** in the media view.
+
+## [1.0.0-rc-3] — 2026-09-01
+
+### Fixed
+- **Glassy lyrics no longer pin at the top when the sidebar opens as a song
+  starts.** BetterLyrics renders its line elements a beat before it fills
+  their timestamps (each starts at data-time 0), and the reader accepted that
+  half-rendered snapshot - stamping a whole block of lines at 0:00, so the
+  highlight stuck there while the song played on (a play/pause forced a clean
+  re-render). The reader now waits for real, increasing stamps before it
+  accepts the DOM.
+- **The media sidebar re-tints from each song's cover, live.** The card's
+  cover-derived tint had its colour binding destroyed by an imperative write
+  on the no-art path, so it only picked up colours at startup and never
+  followed a track change. The binding is restored (it falls back to the
+  theme when there is no art), and the player-selector dropdown is now
+  transparent so it sits on the tint rather than a filled pill.
+
+## [1.0.0-rc-2] — 2026-09-01
+
+### Fixed
+- **Glassy lyrics stop losing the async-render race.** When Glassy is the
+  app playing a track, its BetterLyrics DOM renders a beat after the track
+  changes; the shell's fetch used to give up after a fixed 3s and hand the
+  song to a fallback provider that never got replaced. The Glassy reader now
+  reads Glassy's own player bar: if it shows the current track it waits out
+  the render (so the word-synced lines win), and if it shows a different one
+  it bails immediately so playback Glassy does not own is not stalled.
+- **No instrumental fillers for lyrics without per-word timing.** The
+  breathing-note fillers between lines are emitted only after a word-timed
+  line, whose sung-end is a real stamp; a line-level source (or a line-level
+  line inside a mixed one) no longer guesses an instrumental break where
+  there is none.
+- **Lyrics sync survives opening the sidebar mid-song.** The word-sweep
+  clock re-anchors on every track change, so starting a song and opening the
+  media sidebar immediately no longer runs the new track's lines far ahead
+  (interpolated from the previous song's stale position) until a play/pause
+  forced a fresh poll.
+- **The AI chat's generated-image tooltip tracks the pointer.** "Click to
+  view fullscreen" sat on a bare container with no hover state, which the
+  tooltip reads as always-on, so it hung on screen - even outside the
+  sidebar - until a click. The image now carries a real hover flag, so the
+  tooltip shows on hover and clears on leave.
+
+## [1.0.0-rc-1] — 2026-09-01
+
+### Added
+- **Lyrics track the word, in both views.** The desktop media widget now
+  shares the sidebar's word-synced lyrics view instead of its own line-
+  level one, so the two stay in step. App-independent word sync through
+  LyricsPlus/KPoe with a GlassyMusic DOM path that wins the async-render
+  race, a small source indicator, romanization and translation toggles,
+  right-to-left word order, and a fixed-speed sweep for lines that carry
+  no per-word timing.
+- **The media widget's two faces morph.** Switching the 3x2 between its
+  controls and its lyrics travels one vertical axis - the transport,
+  seeker and time lift and fade as the lyrics rise into place, no snap -
+  and the lyrics toggle's glyph morphs its shape (cookie to clover) and
+  its colour on the same clock rather than jumping.
+- **Browse is every provider now.** The browse view leads with your own
+  providers' models - each named "Provider: Model" and carrying a
+  show/hide toggle that curates what the picker surfaces - followed by
+  the OpenRouter index, one search across both. An empty curation
+  surfaces everything, so small providers need no ceremony.
+- **Browse OpenRouter, import with one click.** The picker's "Browse
+  models…" row (and a door in Providers & keys) opens a searchable index
+  of OpenRouter's catalogue - context, pricing, reasoning and vision at
+  a glance. A click imports the model, keys it to your OpenRouter key,
+  and selects it. Models now carry capability metadata; reasoning is
+  requested wherever a model declares it.
+- **Drafts survive.** The composer's unsent text persists per chat -
+  and for the chat you haven't started yet - through restarts and
+  session switches, restored whenever the composer is empty.
+- **The composer remembers, and questions get second drafts.** Up/Down
+  steps through this chat's past prompts shell-style (your unsent draft
+  survives the round trip), and any question can be taken back - the
+  edit_note action on the message, or Ctrl+Up for the last one -
+  reworded, and resent as a fresh chat; the old branch stays in Chats.
+  Ctrl+R redoes the last answer.
+- **Chats save themselves.** Every conversation persists as a session
+  the moment you send the first message - no /save needed. The tools
+  bar's new history chip opens the list: pinned first, open on the row,
+  rename in place, pin and delete on hover, and your old /save files
+  waiting at the foot to be imported. /save now names the current
+  session; /load imports the file it names.
+- **The Intelligence tab reads as an instrument.** Three surfaces - a
+  chip tools bar (model, temperature, key, tokens, new chat), the chat
+  area, the composer - with an opening choreography: the pane waves in,
+  the composer rises last through a de-blur, and reopening a
+  conversation staggers the visible messages back onto the stage. The
+  empty state greets you with a rolled hello (pin one with
+  sidebar.ai.greeting) over a keycap rail of the keys worth knowing.
+- **The Bar layout section is a draggable list.** The chip flows become
+  grouped rows - drag handle, icon, name, remove - that lift on hold and
+  part live as you drag, including across Left/Center/Right. Adding a
+  widget is a dropdown and an Add button at each group's foot.
+- **The quick toggles take pages.** The android grid becomes swipeable
+  pages with a dot rail - compose each page deliberately in edit mode,
+  add one with the + beside the dots, and empty pages sweep themselves
+  away when editing ends. A dragged tile held against the pager's edge
+  walks onto the neighbouring page. Existing layouts carry over as
+  page one.
+- **Apply a preset selectively.** Apply opens a dialog: six groups -
+  wallpaper, theming, fonts, panels, widgets, everything else - all
+  preselected so Enter still applies the whole preset, each showing how
+  many sections the preset holds. App launch commands sit apart and are
+  never preselected: a preset's apps.* strings are shell-executed, and
+  with online presets planned they only ever apply when deliberately
+  ticked.
+- **The currency widget takes a 3x2: a month of real closes.** The
+  maintainer's design grown from the 3x1: the hero corner holds still,
+  the base gains its full name and a filled 30-day chart beneath, and
+  every quote carries its own 7-day trend chart in the direction's
+  colour. The trends are fetched truth, not decoration: the rates
+  dataset publishes one snapshot per day, so the service walks the last
+  month's dated files - politely, one file per step, ~30 cached CDN hits
+  once and then one new file a day, persisted with the rest - and the
+  charts stay on their honest flat placeholder until two closes exist.
+- **The currency widget takes a 3x1, with a real day behind it.** The
+  maintainer's design: the base currency as a hero block - Rates, the
+  giant code, its flag, the payments chip - beside all four quotes in a
+  two-column grid, each with which way the day went (arrow, percent,
+  absolute), dividers between the columns and a "Last updated" stamp.
+  The chart line is dynamic now: the rates API is a daily dataset, so
+  the shell keeps its own 24-hour ring of the hourly refreshes (persisted
+  across restarts) and the line, the arrows and the deltas all read what
+  this machine actually observed. Until two samples exist the line keeps
+  its old decorative curve and the movement columns stay quiet.
+- **The world clock hands its size to the shell.** Its corner toggle is
+  gone; the resize grip, the Settings size row and the edit-menu stepper
+  walk its two shapes (the card, the row of dials), and a size chosen
+  with the old toggle carries over.
+- **The calendar takes a 3x2: today as a hero column beside the month.**
+  An icon in its Material shape, the month in small caps, the weekday and
+  the big date on the left; the whole month on its own surface to the
+  right, with today circled, and the month steppers at the column's foot
+  (the same travelling pair the 2x2 title row has). Every purpose is one element across all four sizes - the
+  month text rewrites its spelling (AUG, August 2026, AUGUST) while it
+  travels rather than being replaced by a twin, and the big date is the
+  same element at 1x1 and 3x2, fading out over today's own circled cell
+  in between. The calendar also hands its size to the shell with this:
+  the two corner handles are gone, and the resize grip, the Settings size
+  row and the edit-menu stepper - the same three faces every resizable
+  widget has - walk its four sizes. A size chosen with the old handles
+  carries over.
+- **A GPU Monitor widget: GPU, VRAM, and swap.** The system monitor's
+  missing metrics, as their own placeable widget - the host places one
+  instance per plugin, so a separate package is what lets the graphics row
+  sit beside the original three (or replace them). Same cards, same
+  liquid-shape gauges, palette cycling the same three roles; the numbers
+  come from the shell's existing resource service.
+- **The media widget takes a 1x1.** Cover art fills the tile and a small
+  transport row rides low across it - previous and next on discs, play on
+  the same scalloped cookie the other sizes morph through. No seek ring,
+  no time, no lyrics at this size; the resize grip walks to it after 2x1.
+- **The Custom Image widget plays GIFs and can drop its backing.** A
+  dropped .gif animates instead of freezing on its first frame, and a new
+  "Transparent background" option removes the container colour behind the
+  image, so a PNG's alpha shows the wallpaper through the shape.
+- **Developer mode, off by default** (Settings > General > Developer). It adds
+  one thing today: a **Components** tab in the cheatsheet showing every shared
+  widget the shell is built from, live. Three views - a gallery of them by
+  family, an audit table of every widget's height, radius, padding and font
+  size so an inconsistency shows up as a number out of line, and a detail page
+  where one widget can be put on any surface layer with its properties changed
+  by hand. Every tile is the real widget, not a picture of one.
+
+### Changed
+- **The system monitor's orientation flip travels.** Toggling between
+  the row and the column snapped every card to its new place in one
+  frame; the box and the cards ride the spatial tier now, and the
+  shadows drop for the motion like every other resize.
+- **The privacy card speaks the shell's design language.** A shield in
+  its error-toned Material shape heads the card; every section leads
+  with its glyph in a shape of its own; the app rows and notes sit on
+  tonal plates instead of floating on the card; and the controls are
+  tonal buttons - the destructive pair on the error container - rather
+  than bare glyphs.
+- **The ambient RGB loop samples the screen without spawning anything.**
+  Each sample was a `grim` process writing a downscaled JPEG to the cache
+  directory. The colour now comes off the compositor's own frame through
+  a screencopy view inside the shell - an 8x8 grab to tmpfs, quantized as
+  before - which also frees the loop of its grim dependency (grim stays
+  as a fallback). Measured: 1.3% of one core at five samples a second.
+- **A dropdown ripples.** Both combo boxes - the closed button and every row
+  of the open list - answered a press with a colour swap and nothing else,
+  the one kind of control in the shell that did. They now draw the same
+  hover, ripple and lift as a button, on a surface that paints without
+  taking the press (the popup still opens on release, a row still chooses).
+  The lift is on the button's parts rather than the button: a first cut
+  scaled the whole control, and the list opened where the shrunken button
+  was and stayed there. The list also arrives and leaves now - it fades in
+  while it unfolds down from the button and folds back faster - where its
+  old entrance animated an opacity from 1 to 1. A menu that flips above
+  its button - no room below - unfolds from its bottom edge, out of the
+  button, not away from it.
+- **Option rows draw their icon plain.** Twenty-seven rows across Capture,
+  Phone & Devices and the phone pages put their icon in a tile while the
+  other hundred and forty did not, and a row wearing one read as a second
+  control. The tile is a category title's; every option row now carries the
+  icon without a background, and the opt-in that drew it is gone.
+- **A settings row presses as a whole.** A switch row in a grouped list
+  rippled and lifted inside its own bounds while the plate around it sat
+  still, which read as pressing the label rather than the row. The plate is
+  the pressed surface now - hover lift, ripple from where the pointer landed
+  - and pressing the plate's padding presses the row.
+- **The classic quick toggles are drawn from the same models as the Android
+  ones.** Ten classic tiles re-derived their icon, state and actions from the
+  services by hand and had started to disagree with the models. Two of them
+  change on right-click as a result: Night Light opens its dialog (it used
+  to flip Auto), and Bluetooth opens the devices dialog (it used to launch
+  the external app). The Cloudflare WARP classic tile, which was hidden, is
+  gone.
+- **The cheatsheet is a window now, like Settings** - focused, moved and closed
+  by the compositor, instead of an overlay layer. The layer took no keyboard
+  input at all, which the keybind table never needed and the Components
+  workbench does: its filter, text and number knobs typed into nothing.
+- **The phone's notifications are drawn by the same card as the shell's own**,
+  so they behave the same way: the swipe, the stack's lean, the group that
+  expands and the buttons are one implementation instead of two that had
+  already started to disagree. Replying to a phone notification and its app's
+  own actions still work exactly where they did.
+
+### Fixed
+- **The privacy card names the recording source where one can be
+  known.** A portal cast - a Discord or browser share, OBS's PipeWire
+  capture - is a PipeWire video consumer carrying its app identity, and
+  the Screen section now lists those by name (with the same
+  electron-alias resolution the microphone rows use). Captures that
+  never touch PipeWire - grim, gpu-screen-recorder - are anonymous by
+  nature, so the generic line stays as the honest fallback.
+- **The Edit Mode drawer's app search works, and looks like the shell.**
+  The Dock tab's field could never be typed into: the chrome surface
+  declares no keyboard focus so the mode's Escape ladder keeps working,
+  and the field never got an exception. The surface now takes on-demand
+  focus for exactly as long as the field holds it - the field's own first
+  Escape hands the keyboard straight back - and the outlined box is the
+  filled search row every other list carries.
+- **Currency polish, three notes.** The flat 24h state draws a quiet
+  dash instead of a rightward arrow that read as a signal; the hero
+  chart line prefers the fetched 7-day series and is decorative only
+  before any data exists; and the card sits on the same darker surface
+  the weather card uses.
+- **The currency chart line is back, and the flag sits on the code.**
+  Three fixes: a chart canvas's first paint was requested before the
+  canvas could accept one and never re-asked; a day (or month) with zero
+  movement normalised to an invisible mid-band line - it keeps the
+  decorative curve now, with the movement columns saying "flat" in
+  numbers; and the base's flag rides the code's own painted end instead
+  of a guessed offset that floated it into the divider.
+- **The elastic corner pull reaches every widget.** Calendar and the
+  world clock adopted the shell-owned resize without wiring the grip's
+  rubber-band bow into their cards, and Notes - one offered size - never
+  got a grip at all. All three bow now: the pull is forwarded to the
+  cards, and the grip arms on every grid-sized widget, with a single-size
+  widget's whole drag becoming the bow (the size row still appears only
+  where there is a choice).
+- **The world clock's settings face no longer shows the front through
+  it.** The four city tiles kept drawing under the timezone pickers
+  after the flip; they yield with it now.
+- **A note row's hover fades instead of snapping.** The row flipped
+  between its two colours with no motion at all - the widget audit's G10,
+  closed with the tier every other hover already rides.
+- **RGB devices no longer blink on every colour change, and colours fade
+  instead of stepping.** Every write went through the `openrgb` CLI, and
+  every CLI call is a fresh client handshake followed by a mode command -
+  the mode command re-initialises the controller, which is the white
+  blink, once per second while a colour was being adjusted and once per
+  ambient sample. The service now keeps one client open to the SDK server
+  (its own `openrgb --server` unless one already answers), the way the
+  OpenRGB Effects plugin does: each controller is put into Direct mode
+  once, and from then on only LED frames are sent, at 30 fps, ramping to
+  each new colour. The CLI path survives only as the fallback for a server
+  that never comes up; the palette debounce drops from 1000 ms to 200 ms.
+- **Quick > Bar & Screen: the choice chips sit on one line again.** The
+  four cards there use the segmented row without a label, and on that path
+  the row's chip flow still sized itself from its own width - the circle an
+  earlier fix had broken only for labelled rows - so Top / Left / Bottom /
+  Right latched one per line when the page was built across frames. The
+  flow now hands the layout its chips' natural width on both paths.
+- **Custom AI providers see their API keys.** The keyring loads on demand,
+  and neither the AI settings page nor "Fetch Models" ever asked for it - so
+  with a local model selected the key fields read empty, typed keys were
+  silently dropped, and every fetch went out with no key at all, which the
+  provider refused. Both ask now, and the fetch waits for the keyring.
+- **Removing a custom AI provider no longer hands its neighbour's API key to
+  the one below it.** Keys are stored by the provider's position in the list,
+  and removal blanked the removed slot only, so every provider after it read
+  the slot above - a fetch with the wrong key, answered with a 401 the page
+  called "Failed to fetch". The keys move up with their providers now. If a
+  provider of yours already fetches with a 401, re-enter its key once.
+- **Fetching models from a custom AI provider works with the URL you have, and
+  says why when it does not.** A base URL pasted as `.../v1/models` had
+  `/models` appended again, a 404 with an empty body, and "Failed to fetch".
+  The base is normalised (a trailing `/models` or `/chat/completions` is
+  dropped), and a failure now names the HTTP status and what to do about it -
+  a 401 is the key, a 404 is the URL, no status is the server not answering.
+- **The overview opens above fullscreen windows** (#339). It sat on the
+  compositor's Top layer, which fullscreen windows are composited over, so in
+  a game or a video it opened behind them. It moves to the Overlay layer only
+  while it is open over a truly fullscreen window on that monitor, and stays
+  on Top otherwise - closed, it never covers a game, so the game keeps its
+  direct scanout.
+- **The Visualizer desktop widget no longer slows the sidebars.** On a wide
+  monitor it is several hundred bars, and each had its own height animation
+  restarted on every one of cava's sixty frames a second, plus four colour
+  mixes - a third of the shell's main thread, which is the thread the sidebar
+  slide runs on. The bars now follow one smoothing filter over the whole
+  array and take their colour from a palette; the widget costs a quarter of
+  what it did per frame, measured, and looks the same. Two more things fed
+  the same slowness: the wallpaper layer was being blurred by the compositor
+  on every frame the widget changed it (opaque, so for nothing - a fifth of
+  the GPU, measured), and behind a special workspace the widget kept moving
+  under a fullscreen blur nobody could see it through. The layer rule is
+  gone and the widget stands down while a special workspace is up. The rest
+  of the music-time load was in the media surfaces: the media card's wavy
+  progress slider repainted itself sixty times a second inside a sidebar
+  kept loaded but closed, and the media widget's wave and ring rebuilt
+  their geometry as hundreds of objects per frame, keeping the garbage
+  collector busy. Sampled on the live shell: the main thread while a track
+  plays went from about half a core to a quarter.
+- **The Phone tab's header is one row of one size.** The device chip is the
+  shared filter chip with a trailing arrow, and the connection and battery
+  facts beside it are plain icon-and-label metadata with no container - a
+  36px pill next to two 22px pills, all three looking clickable, is what it
+  was.
+- **The device roster's rows sit together.** A row that paints its own
+  surface no longer gets the plate's padding and inset stacked under it,
+  which was 24px of nothing between every two devices.
+- **Replying to a phone notification: the field is whole, the three chips
+  share the width, and the active Reply chip is readable.** The reply field
+  drew its text past its top edge, the action row split its width in two by
+  hand and pushed the third chip off the card, and the toggled chip used
+  the primary colour under an on-surface glyph.
+- **The cheatsheet opens on the key, not three seconds after it.** The
+  Components tab built its audit table's sixty-two off-screen widgets at
+  open whether or not the Audit was showing.
+- **Following a link in a phone notification closes the phone's sidebar, not
+  the other one.** The card closed the right sidebar whichever panel it was
+  in; which sidebar a card sits in is now the notification backend's to say.
+- **A contact's expand arrow stays where it belongs.** Opening the first
+  contact in the list used to fling its arrow into the middle of the
+  person's name and leave it there. Anything in the shell whose text
+  animates as it changes could drift the same way; none of them can now.
+- **The phone's notification buttons ripple again**, along with every
+  other button that belongs to a group - the quick toggles, the settings
+  chips, the AI chat controls. Their corners also settle into the
+  pressed shape instead of snapping to it.
+- **The phone's device list is drawn the way the rest of the shell's
+  grouped rows are** - each device on its own plate, the group's outer
+  corners rounded - instead of as a plain rectangle, and the device you
+  picked is marked with a tick and its own colour instead of looking
+  exactly like the ones you did not.
+- **A Wallpaper Engine wallpaper with sound no longer plays it once per
+  monitor.** The shell draws one live wallpaper per screen, and each was
+  playing the audio, so on two monitors you heard the track twice, slightly
+  out of phase. Sound now comes from one screen, chosen next to the volume
+  button in the wallpaper picker; if that screen is unplugged the sound moves
+  to another rather than going silent. ([#338](https://github.com/XephyLon/immaterial-impulse/issues/338))
+
 - **The phone panel's buttons behave like the rest of the shell's.** Its
   notification bar is the same one the right sidebar draws, so its two
   actions square off and swell under a press instead of sitting still;
@@ -130,6 +810,12 @@ own repo; the installer pins which revision it builds.
   shows the request as a card with Accept and Decline, so pairing no longer
   needs KDE Connect's own window — and it is answered only for the device
   that asked.
+- **`deploy-shell`, for maintainers**: copies this checkout's shell to
+  `~/.config/quickshell/imi` and refuses when the copy would take another open
+  PR's work off the running shell, naming the branches it would roll back. It
+  also records the SHA and branch it deployed in `.deployed-from`, so what is
+  live can be read rather than inferred from whichever branch you happen to be
+  on. Replaces an `rsync --delete` one-liner that had done exactly that revert.
 
 ### Changed
 - **The Phone tab's device roster unrolls instead of appearing all at once.**

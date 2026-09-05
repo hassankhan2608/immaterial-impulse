@@ -176,16 +176,16 @@ Item {
     
     property var pages: {
         let list = [
-            { name: Translation.tr("Quick"), id: "quick", icon: "instant_mix", component: Qt.resolvedUrl("pages/QuickConfig.qml"), sections: [Translation.tr("Wallpaper & Colors"), Translation.tr("Bar & Screen")] },
+            { name: Translation.tr("Quick"), id: "quick", icon: "instant_mix", component: Qt.resolvedUrl("pages/QuickConfig.qml"), sections: [Translation.tr("Wallpaper & Colors"), Translation.tr("Bar & Screen")], searchTerms: [Translation.tr("Shell opacity"), Translation.tr("Transparency")] },
             { name: Translation.tr("Appearance"), id: "appearance", icon: "palette", component: Qt.resolvedUrl("pages/AppearanceConfig.qml"), sections: [Translation.tr("Icon pack"), Translation.tr("Motion"), Translation.tr("Fonts"), Translation.tr("Terminal"), Translation.tr("Color generation")] },
             { name: Translation.tr("Cursor"), id: "cursor", icon: "arrow_selector_tool", component: Qt.resolvedUrl("pages/CursorConfig.qml"), sections: [Translation.tr("Pointer"), Translation.tr("Pointer behavior")] },
             { name: Translation.tr("Wallpaper & Desktop"), id: "wallpaper-desktop", icon: "texture", component: Qt.resolvedUrl("pages/BackgroundConfig.qml"), sections: [Translation.tr("Wallpaper"), Translation.tr("Wallpaper selector")], searchTerms: [Translation.tr("Parallax"), Translation.tr("Depth"), Translation.tr("Centered wallpaper")] },
-            { name: Translation.tr("Bar & Dock"), id: "bar-dock", icon: "toast", iconRotation: 180, component: Qt.resolvedUrl("pages/BarConfig.qml"), sections: [Translation.tr("Screens"), Translation.tr("Bar layout"), Translation.tr("Positioning & Styles"), Translation.tr("Privacy"), Translation.tr("Tray"), Translation.tr("Divider"), Translation.tr("Utility buttons"), Translation.tr("Workspaces"), Translation.tr("Resources"), Translation.tr("Media"), Translation.tr("Tooltips"), Translation.tr("Dock")], searchTerms: [Translation.tr("Show bar on"), Translation.tr("Buttons & Media")] },
+            { name: Translation.tr("Bar & Dock"), id: "bar-dock", icon: "toast", iconRotation: 180, component: Qt.resolvedUrl("pages/BarConfig.qml"), sections: [Translation.tr("Screens"), Translation.tr("Bar layout"), Translation.tr("Positioning & Styles"), Translation.tr("Privacy"), Translation.tr("Tray"), Translation.tr("Divider"), Translation.tr("Utility buttons"), Translation.tr("Workspaces"), Translation.tr("Resources"), Translation.tr("Media"), Translation.tr("Tooltips"), Translation.tr("Dock")], searchTerms: [Translation.tr("Show bar on"), Translation.tr("Buttons & Media"), Translation.tr("Center")] },
             { name: Translation.tr("Sidebars & Panels"), id: "sidebars-panels", icon: "side_navigation", component: Qt.resolvedUrl("pages/SidebarsPanelsConfig.qml"), sections: [Translation.tr("Left Sidebar"), Translation.tr("Right Sidebar"), Translation.tr("Overview"), Translation.tr("Overlay"), Translation.tr("On-screen display"), Translation.tr("Drop shelf")], searchTerms: [Translation.tr("Quick toggles"), Translation.tr("Sliders"), Translation.tr("Corner open"), Translation.tr("Default Settings"), Translation.tr("Floating Image"), Translation.tr("Crosshair")] },
             { name: Translation.tr("Notifications"), id: "notifications", icon: "notifications", component: Qt.resolvedUrl("pages/NotificationsConfig.qml"), sections: [Translation.tr("Notifications")] },
             { name: Translation.tr("Lock & Idle"), id: "lock-idle", icon: "lock", component: Qt.resolvedUrl("pages/LockIdleConfig.qml"), sections: [Translation.tr("Lock screen"), Translation.tr("Keep awake"), Translation.tr("Screensaver"), Translation.tr("Work safety")], searchTerms: [Translation.tr("Security"), Translation.tr("Style: General"), Translation.tr("Style: Blurred")] },
             { name: Translation.tr("Capture"), id: "capture", icon: "screen_record", component: Qt.resolvedUrl("pages/CaptureConfig.qml"), sections: [Translation.tr("Screen recorder"), Translation.tr("Screenshot popup"), Translation.tr("Region selector (screen snipping/Google Lens)"), Translation.tr("Save paths")], searchTerms: [Translation.tr("Instant replay"), Translation.tr("Hint target regions"), Translation.tr("Google Lens"), Translation.tr("Rectangular selection"), Translation.tr("Circle selection")] },
-            { name: Translation.tr("General"), id: "general", icon: "browse", component: Qt.resolvedUrl("pages/GeneralConfig.qml"), sections: [Translation.tr("Time"), Translation.tr("Battery"), Translation.tr("Audio"), Translation.tr("Sounds"), Translation.tr("Language")] },
+            { name: Translation.tr("General"), id: "general", icon: "browse", component: Qt.resolvedUrl("pages/GeneralConfig.qml"), sections: [Translation.tr("Time"), Translation.tr("Battery"), Translation.tr("Audio"), Translation.tr("Sounds"), Translation.tr("Cheatsheet"), Translation.tr("Developer"), Translation.tr("Language")] },
             { name: Translation.tr("Devices & Phone"), id: "devices-phone", icon: "smartphone", component: Qt.resolvedUrl("pages/PhoneConfig.qml"), sections: [Translation.tr("Phone panel"), Translation.tr("Contacts"), Translation.tr("Screen mirroring")], searchTerms: [Translation.tr("Connection"), Translation.tr("Mirror options"), Translation.tr("App Mode")] },
             { name: Translation.tr("Services"), id: "services", icon: "cloud", component: Qt.resolvedUrl("pages/ServicesConfig.qml"), sections: [Translation.tr("AI"), Translation.tr("Networking"), Translation.tr("Music Recognition"), Translation.tr("Search"), Translation.tr("System updates (Arch only)"), Translation.tr("Clight"), Translation.tr("Weather")], searchTerms: [Translation.tr("Custom OpenAI-compatible Providers"), Translation.tr("Phone Connect"), Translation.tr("Prefixes"), Translation.tr("File search"), Translation.tr("Web search")] },
             { name: Translation.tr("Widgets"), id: "widgets", icon: "widgets", component: Qt.resolvedUrl("pages/PluginsPage.qml"), sections: [Translation.tr("Placement & canvas"), Translation.tr("Widget settings"), Translation.tr("Available Widgets")], searchTerms: [Translation.tr("Show widgets on"), Translation.tr("Canvas")] },
@@ -203,6 +203,19 @@ Item {
 
     // Every page up to here has been asked for, so it is built and kept. This
     // only grows: a page built once stays built (`built` below).
+    // Where pages built ahead of the user wait until first shown (see the
+    // page host). Exposed so a harness walking the visual tree can find them.
+    readonly property Item parkedPages: pageParking
+    // The page pane's size, from values that are live BEFORE the window
+    // exists: the root's size, the rail's implicit width, the paddings, the
+    // search bar's fixed height and the column's spacing. Not `pageHost`'s
+    // size - layouts do not polish without a window (QTBUG-126704), so until
+    // the first open the host sits at whatever the column arranged before the
+    // rail expanded, and the forced polish at open moves it. Anything sized
+    // off the host is re-laid out in that move; the parked pages must not be.
+    readonly property real searchBarHeight: 46
+    readonly property real contentPaneWidth: root.width - navRailWrapper.implicitWidth - root.contentPadding * 3
+    readonly property real contentPaneHeight: root.height - root.contentPadding * 2 - root.searchBarHeight - mainColumn.spacing
     property int warmedThrough: -1
 
     // Restarted by every navigation, and never bound: `Timer.restart()` writes
@@ -298,18 +311,18 @@ Item {
     }
 
     ColumnLayout {
+        id: mainColumn
         anchors {
             fill: parent
             margins: contentPadding
         }
 
         Rectangle {
-            readonly property real contentPaneWidth: root.width - navRailWrapper.implicitWidth - (root.contentPadding * 3)
-            readonly property real searchWidth: Math.min(520, contentPaneWidth)
+            readonly property real searchWidth: Math.min(520, root.contentPaneWidth)
             Layout.preferredWidth: searchWidth
-            Layout.preferredHeight: 46
+            Layout.preferredHeight: root.searchBarHeight
             Layout.leftMargin: navRailWrapper.implicitWidth + root.contentPadding
-                + Math.max(0, (contentPaneWidth - searchWidth) / 2)
+                + Math.max(0, (root.contentPaneWidth - searchWidth) / 2)
             radius: Appearance.rounding.full
             color: Appearance.colors.colLayer1
 
@@ -364,6 +377,7 @@ Item {
                     implicitHeight: 32
                     buttonRadius: Appearance.rounding.full
                     colBackground: "transparent"
+                    colRipple: Appearance.colors.colLayer2Active
                     onClicked: settingsSearchField.text = ""
                     contentItem: MaterialSymbol {
                         horizontalAlignment: Text.AlignHCenter
@@ -425,9 +439,7 @@ Item {
                             Image {
                                 id: avatarImage
                                 anchors.fill: parent
-                                source: Config.options.profile.avatarPath !== "" 
-                                    ? "file://" + Config.options.profile.avatarPicture 
-                                    : "file:///home/" + (Quickshell.env("USER") ?? "user") + "/.face"
+                                source: UserAvatar.url
                                 sourceSize.width: avatarImage.width * 2
                                 sourceSize.height: avatarImage.height * 2
                                 fillMode: Image.PreserveAspectCrop
@@ -735,7 +747,32 @@ Item {
                 color: "transparent"
                 radius: Appearance.rounding.screenRounding - Appearance.sizes.hyprlandGapsOut
 
+                // Pages built ahead of the user wait HERE, out of the window,
+                // until the first time each is shown. The warm-up builds all
+                // fifteen (~24,500 items) while the window has never been
+                // opened, and Quickshell creates the backing window on the
+                // first `visible` - re-parenting the whole prebuilt tree into
+                // it and flushing every layout polish it queued. Measured in a
+                // nested Hyprland: that assignment blocked 92 ms and the
+                // window's first sync another ~50 ms for pages that were not
+                // even visible; with only the page on screen in the tree, 2 ms
+                // and 18 ms. Detached IMPERATIVELY, once complete: a declared
+                // `parent: null` is applied while this item is being built and
+                // is then overwritten when the enclosing item appends it to
+                // its children - measured, the parking stayed in the tree and
+                // 22,290 items were still re-parented at the open.
+                // Sized from `contentPaneWidth/Height` and NOT from the host:
+                // the host's size is stale until the open (see those
+                // properties), and pages that followed it were re-laid out in
+                // the same assignment.
                 Item {
+                    id: pageParking
+                    width: root.contentPaneWidth
+                    height: root.contentPaneHeight
+                    Component.onCompleted: parent = null
+                }
+                Item {
+                    id: pageHost
                     anchors.fill: parent
 
                     Repeater {
@@ -777,7 +814,13 @@ Item {
                             enabled: isActive
                             visible: isActive
                             anchors.topMargin: isActive ? 0 : Appearance.spacing.space150
-
+                            // Parked at creation unless it is the page on screen;
+                            // joins the window the first time it is shown and stays
+                            // (a page left behind is kept, not re-parked - the cost
+                            // this avoids is paid once, at the window's creation).
+                            Component.onCompleted: {
+                                if (!isActive) parent = pageParking;
+                            }
                             onLoaded: {
                                 pageLoader.built = true;
                                 if (pageLoader.isActive) {
@@ -787,6 +830,7 @@ Item {
                             }
 
                             onIsActiveChanged: {
+                                if (isActive && parent !== pageHost) parent = pageHost;
                                 if (isActive && item) {
                                     GlobalStates.currentPageInstance = item;
                                     root.selectedSection = item.currentSection || "";
@@ -970,6 +1014,37 @@ Item {
                 if (installDialogLoader.item && !installDialogLoader.item.visible
                         && !installDialogLoader.wanted)
                     installDialogLoader.active = false;
+            }
+        }
+    }
+    // Window-level host for the selective preset apply confirmation,
+    // mirroring the plugin hosts above: driven purely by
+    // Presets.pendingApplyName so the Profile page only has to request it.
+    Loader {
+        id: presetApplyDialogLoader
+        anchors.fill: parent
+        active: false
+        readonly property bool wanted: Presets.pendingApplyName !== ""
+
+        onWantedChanged: if (wanted) active = true
+        onActiveChanged: if (active && item) item.forceActiveFocus()
+        sourceComponent: PresetApplyDialog {}
+
+        Binding {
+            target: presetApplyDialogLoader.item
+            property: "show"
+            value: presetApplyDialogLoader.wanted
+            when: presetApplyDialogLoader.item !== null
+        }
+
+        Connections {
+            target: presetApplyDialogLoader.item
+            function onDismiss() { Presets.cancelApply(); }
+            // Keep the loader alive through the close animation, then release it.
+            function onVisibleChanged() {
+                if (presetApplyDialogLoader.item && !presetApplyDialogLoader.item.visible
+                        && !presetApplyDialogLoader.wanted)
+                    presetApplyDialogLoader.active = false;
             }
         }
     }

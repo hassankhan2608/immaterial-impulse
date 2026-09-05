@@ -62,7 +62,7 @@ def test_palette_changes_are_debounced():
 def test_color_is_argv_not_shell_spliced():
     source = _source()
     assert re.search(
-        r'applyProc\.command = \["openrgb", "--mode", root\.pendingMode, "--color", hex\]',
+        r'applyProc\.command = root\.sdkCommand\(\["openrgb", "--mode", root\.pendingMode, "--color", hex\]\)',
         source,
     ), "openrgb must be invoked as an argv array with the color as its own element"
     # The mode is one of two internal constants, never user input.
@@ -82,6 +82,88 @@ def test_color_is_argv_not_shell_spliced():
         '"command -v grim"',
         '"exec 3<>/dev/tcp/127.0.0.1/6742"',
     ], "bash -c must only carry the constant probes, never values"
+
+
+def test_every_write_goes_through_the_sdk_server():
+    """The CLI does not talk to a running server on its own. Without
+    `--client` each call is a hardware detection pass that resets every
+    device to its default colour - the lights blinked white once per
+    debounce and once per ambient sample. So: a server is wanted whenever
+    the sync is on (not only in ambient mode), writes wait for it, and every
+    openrgb argv - the apply, the per-device apply, the device scan - is
+    routed through `sdkCommand`, which splices the client flag in."""
+    source = _source()
+    assert 'readonly property list<string> sdkClientArgs: ["--client", "127.0.0.1:6742"]' in source
+    assert "return [argv[0]].concat(root.sdkClientArgs, argv.slice(1));" in source
+    assert "applyProc.command = root.sdkCommand(cmd);" in source, (
+        "the per-device apply bypasses the server"
+    )
+    assert 'command: root.sdkCommand(["openrgb", "--list-devices"])' in source, (
+        "the device scan bypasses the server - a detecting scan blinks the lights too"
+    )
+    assert "running: root.enabled && root.available && !root.serverReady" in source, (
+        "the server is only sought in ambient mode; the accent path blinks"
+    )
+    assert re.search(r"if \(root\.serverStarting\)\s*\n\s*return;", source), (
+        "a write does not wait for the server we are starting"
+    )
+    assert re.search(r"onServerReadyChanged:\s*\{\s*if \(root\.serverReady\)\s*root\.startPendingApply\(\);", source), (
+        "nothing re-dispatches the held write once the server answers"
+    )
+    debounce = re.search(r"id: debounceTimer.*?interval: (\d+)", source, re.S)
+    assert debounce and int(debounce.group(1)) <= 250, (
+        "the debounce is back to hiding a blink rather than coalescing animation steps"
+    )
+
+
+def test_colours_stream_through_one_open_client():
+    """The Effects plugin's model: connect once, Direct mode once, then
+    frames. The streamer is a Process kept open with stdin; both the accent
+    path and the ambient loop hand their colour to `pushColor` first and
+    fall through to the CLI only while no streamer is ready."""
+    source = _source()
+    assert "readonly property string streamScript: `${Directories.scriptPath}/rgb/openrgb_stream.py`" in source
+    assert (ROOT / "scripts/rgb/openrgb_stream.py").is_file()
+    proc = re.search(r"Process\s*\{\s*id: streamProc(.*?)\n    \}", source, re.S)
+    assert proc, "no streamProc"
+    assert "stdinEnabled: true" in proc.group(1)
+    assert "running: root.streamWanted" in proc.group(1)
+    assert 'data.startsWith("ready")' in proc.group(1), "the streamer's ready line gates the writes"
+    assert 'streamProc.write(hex + "\\n");' in source
+    assert 'args.push("--exclude-name", name);' in source, "name exclusions must be their own argv elements"
+    assert 'args.push("--exclude-type", type);' in source
+    # Both paths try the stream before the CLI.
+    assert source.count("if (root.pushColor(hex))\n            return;") == 2, (
+        "the accent path and the ambient loop must both hand the colour to the streamer first"
+    )
+
+
+def test_the_ambient_sample_is_a_screencopy_not_a_grim_spawn():
+    """The loop reads the compositor's frame through a ScreencopyView: no
+    process spawn, no JPEG encode. The view lives in a one-pixel
+    transparent input-masked bottom-layer window because `grabToImage`
+    refuses an item whose window is not visible (measured in
+    ScreenSampleProbe.qml), the sample lands on tmpfs, and grim survives
+    only as the fallback behind `samplerBroken`."""
+    source = _source()
+    start = source.find("id: samplerWindow")
+    end = source.find("id: ambientTimer")
+    assert 0 < start < end, "no sampler window ahead of the ambient timer"
+    body = source[start:end]
+    for line in ("implicitWidth: 1", "implicitHeight: 1", 'color: "transparent"',
+                 "WlrLayershell.layer: WlrLayer.Bottom", "mask: Region {}",
+                 "exclusionMode: ExclusionMode.Ignore"):
+        assert line in body, f"sampler window lost `{line}` - it must stay one invisible, input-free pixel"
+    assert "live: false" in body, "a live view captures every frame; the loop samples on its own clock"
+    assert "paintCursor: false" in body
+    assert "XDG_RUNTIME_DIR" in source, "the sample belongs on tmpfs, not the cache"
+    assert "if (!root.samplerBroken && samplerLoader.item !== null)" in source, (
+        "captureAmbientFrame no longer prefers the screencopy sampler"
+    )
+    assert re.search(r"running: root\.ambientActive && root\.serverReady\s*\n\s*"
+                     r"&& \(!root\.samplerBroken \|\| root\.grimAvailable\)", source), (
+        "the loop must run without grim installed unless the sampler broke"
+    )
 
 
 def _function_block(source: str, name: str) -> str:
@@ -183,15 +265,17 @@ def test_ambient_schema_defaults_to_accent():
 
 def test_ambient_loop_is_gated():
     source = _source()
-    # The sampling clock only runs while ambient mode is active, grim is
-    # known to exist AND an OpenRGB SDK server answers - serverless CLI
-    # writes do a full detection pass per call, which resets devices to
-    # their default (white) and takes seconds.
+    # The sampling clock only runs while ambient mode is active AND an
+    # OpenRGB SDK server answers - serverless CLI writes do a full
+    # detection pass per call, which resets devices to their default
+    # (white) and takes seconds. grim left the gate when the screencopy
+    # sampler arrived: it is only required once the sampler has broken.
     assert re.search(
         r"Timer \{\s*\n\s*id: ambientTimer\s*\n\s*"
-        r"running: root\.ambientActive && root\.grimAvailable && root\.serverReady",
+        r"running: root\.ambientActive && root\.serverReady\s*\n\s*"
+        r"&& \(!root\.samplerBroken \|\| root\.grimAvailable\)",
         source,
-    ), "the ambient Timer must be gated on ambientActive && grimAvailable && serverReady"
+    ), "the ambient Timer must be gated on ambientActive, serverReady, and grim only as the broken-sampler fallback"
     # The managed server is a constant argv and only spawned once per
     # activation (no crash-loop respawns from the poll timer), and the spawn
     # goes through the detector sync so an excluded device is never even

@@ -153,7 +153,14 @@ Singleton {
         property color colOnLayer0: m3colors.m3onBackground
         property color colLayer0Hover: ColorUtils.transparentize(ColorUtils.mix(colLayer0, colOnLayer0, 0.9, root.contentTransparency))
         property color colLayer0Active: ColorUtils.transparentize(ColorUtils.mix(colLayer0, colOnLayer0, 0.8, root.contentTransparency))
-        property color colLayer0Border: ColorUtils.mix(root.m3colors.m3outlineVariant, colLayer0, 0.4)
+        // Thinned by the same amount as colLayer0, not mixed with it: mixing an
+        // opaque outline with a thinned fill left the border at 0.4 + 0.6 of the
+        // fill's alpha, an opaque ring around a see-through plate as the shell
+        // opacity slider went down.
+        property color colLayer0Border: ColorUtils.transparentize(ColorUtils.mix(root.m3colors.m3outlineVariant, colLayer0Base, 0.4), root.backgroundTransparency)
+        // The edge shadow behind an unpainted bar: the shade at the screen edge,
+        // fading to nothing across the bar.
+        property color colBarEdgeShade: ColorUtils.transparentize(root.m3colors.m3shadow, 0.45)
         // The bar's own background chrome (bar/pill fills, hug corners) thins
         // colLayer0 by the user's bar opacity (Config.options.bar.backgroundOpacity,
         // 1 = fully opaque = unchanged). Kept separate from colLayer0 so only the
@@ -265,6 +272,14 @@ Singleton {
         property color colErrorContainerHover: ColorUtils.mix(m3colors.m3errorContainer, m3colors.m3onErrorContainer, 0.90)
         property color colErrorContainerActive: ColorUtils.mix(m3colors.m3errorContainer, m3colors.m3onErrorContainer, 0.70)
         property color colOnErrorContainer: m3colors.m3onErrorContainer
+        // The alarm pair: danger-red in EITHER theme. M3's error role flips
+        // saturation with the theme - dark's m3error is a pastel pink and its
+        // errorContainer the deep red, light the other way round - so a pill
+        // that must always read as an alarm (the privacy indicator) takes the
+        // saturated member and its on-colour, whichever that is.
+        property color colAlarm: m3colors.darkmode ? m3colors.m3errorContainer : m3colors.m3error
+        property color colAlarmHover: m3colors.darkmode ? colErrorContainerHover : colErrorHover
+        property color colOnAlarm: m3colors.darkmode ? m3colors.m3onErrorContainer : m3colors.m3onError
     }
 
     rounding: QtObject {
@@ -739,7 +754,9 @@ Singleton {
 
     sizes: QtObject {
         property real baseBarHeight: 40
-        property real barHeight: Config.options.bar.cornerStyle === 1 ?
+        // Float (1) and Float Islands (4) both hold their plates a gap off the
+        // edge and the windows, inside the surface.
+        property real barHeight: (Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4) ?
             (baseBarHeight + root.sizes.hyprlandGapsOut * 2) : baseBarHeight
         // M3E bar widget-pill geometry: the pill is inset from the bar by
         // barPillMargin top and bottom, giving barPillHeight. Shared by BarGroup
@@ -749,8 +766,8 @@ Singleton {
         // them so the gaps stay consistent:
         //
         //   Hug (0) is flush against the monitor edge, so it has no margin on
-        //   the edge side. Float (1), Islands (2) and M3 (3) are detached from
-        //   the edge and share one. All four share the opposite-side margin -
+        //   the edge side. Float (1), Islands (2), M3 (3) and Float Islands (4)
+        //   are detached from the edge and share one. All four share the opposite-side margin -
         //   the gap between the bar and the windows next to it.
         //
         // The names say top/bottom because that is the default case, a
@@ -897,7 +914,7 @@ Singleton {
         // band that is not its size.
         property real toolbarHeight: 56
         property real baseVerticalBarWidth: 46
-        property real verticalBarWidth: Config.options.bar.cornerStyle === 1 ? 
+        property real verticalBarWidth: (Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4) ?
             (baseVerticalBarWidth + root.sizes.hyprlandGapsOut * 2) : baseVerticalBarWidth
         property real wallpaperSelectorWidth: 1200
         property real wallpaperSelectorHeight: 690

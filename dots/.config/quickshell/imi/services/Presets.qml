@@ -73,11 +73,40 @@ Singleton {
         saveProc.running = true
     }
 
-    function apply(name) {
+    // The selective-apply popup's request, mirroring PluginStore's
+    // pendingInstallEntry: the Profile page only requests, the window-level
+    // host in SettingsContent shows the dialog, and the dialog itself calls
+    // apply() with the chosen sections.
+    property string pendingApplyName: ""
+    property var pendingApplyData: null
+
+    function requestApply(name, presetData) {
+        root.pendingApplyData = presetData ?? null
+        root.pendingApplyName = name
+    }
+
+    function cancelApply() {
+        root.pendingApplyName = ""
+        root.pendingApplyData = null
+    }
+
+    // `sections` comes from PresetGroups.sectionsFor - config keys and
+    // appearance:<sub> spellings, sanitized by construction, but still
+    // passed as ONE argv element after --only, never shell-spliced.
+    function apply(name, sections) {
         GlobalStates.settingsOpen = false
-        Wallpapers.confirmedPath = ""
-        Wallpapers.previewPath = ""
-        Quickshell.execDetached(["bash", Directories.presetsScriptPath, "--apply", name])
+        // Clearing the wallpaper preview belongs to the wallpaper group:
+        // an apply that keeps the current wallpaper must not blank it.
+        const wallpaperIncluded = !sections
+            || sections.some(s => s === "background" || s === "wallpaperSelector")
+        if (wallpaperIncluded) {
+            Wallpapers.confirmedPath = ""
+            Wallpapers.previewPath = ""
+        }
+        const argv = ["bash", Directories.presetsScriptPath, "--apply", name]
+        if (sections && sections.length > 0)
+            argv.push("--only", sections.join(","))
+        Quickshell.execDetached(argv)
     }
 
     function remove(name) {

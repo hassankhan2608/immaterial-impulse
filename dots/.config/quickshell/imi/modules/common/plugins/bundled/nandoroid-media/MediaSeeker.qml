@@ -22,8 +22,8 @@ Item {
     property real progress: 0
     property bool playing: false
 
-    // 0 = straight bar .. 1 = ring
-    property real bend: root.span === "3x2" ? 0 : 1
+    // 0 = straight bar .. 1 = ring; 1x1's compact bar is straight too.
+    property real bend: (root.span === "3x2" || root.span === "1x1") ? 0 : 1
     Behavior on bend { Expressive.SpanTravel {} }
     // 0 = circle .. 1 = cookie outline
     property real ringT: root.span === "2x1" ? 1 : 0
@@ -41,7 +41,10 @@ Item {
     // on screen - a FrameAnimation with no gate is the idle-repaint bug. At
     // 2x2 the ring is a STILL perfect circle (the review's call): no wave,
     // no travel, so no frame ticks either.
-    readonly property bool waves: root.playing && root.span !== "2x2"
+    // Not behind a special workspace: Hyprland blurs everything under one,
+    // and a wave nobody can see was still a Canvas repaint every frame.
+    property bool behindSpecial: false
+    readonly property bool waves: root.playing && root.span !== "2x2" && !root.behindSpecial
     // The wave's amplitude is a LEVEL, not a switch: pause snapped it to zero
     // in one frame and the spring visibly chopped flat (the review). It eases
     // out and back in, and the frame clock runs until the fade completes so
@@ -121,6 +124,14 @@ Item {
     Canvas {
         id: canvas
         anchors.fill: parent
+        // On an FBO, cooperatively: the paint runs on the render thread and
+        // the main thread only records the commands. The default (an Image
+        // target, painted on the GUI thread) was a software raster of this
+        // whole card on every frame the wave moved - a fifth of the shell's
+        // main thread while a track played, measured, on the thread the
+        // sidebars' slide runs on.
+        renderTarget: Canvas.FramebufferObject
+        renderStrategy: Canvas.Cooperative
 
         readonly property real bendNow: root.bend
         readonly property real waveLevelNow: root.waveLevel
@@ -144,62 +155,85 @@ Item {
         onWidthChanged: requestPaint()
         onHeightChanged: requestPaint()
 
+        // The baseline and its normals, cached: they depend on the size, the
+        // bend and the ring, not on the wave's phase - and rebuilding them
+        // as 161 point objects (plus the ring's cubics) on every frame was
+        // ~20k short-lived objects a second, which kept the QML garbage
+        // collector marking the shell's whole heap. gdb-sampled: two thirds
+        // of the main thread in the collector while a track played. Typed
+        // arrays, rebuilt only when their inputs change; the per-frame paint
+        // allocates nothing.
+        property var baseX: null
+        property var baseY: null
+        property var normX: null
+        property var normY: null
+        property string baseKey: ""
+        function rebuildBase(N) {
+            const key = `${width}|${height}|${root.bend}|${root.ringT}|${root.lineWidthPx}`;
+            if (key === canvas.baseKey && canvas.baseX) return;
+            canvas.baseKey = key;
+            const base = root.baselinePoints(N);
+            const bx = new Float64Array(N + 1), by = new Float64Array(N + 1);
+            const nx = new Float64Array(N + 1), ny = new Float64Array(N + 1);
+            for (let i = 0; i <= N; i++) { bx[i] = base[i].x; by[i] = base[i].y; }
+            for (let i = 0; i <= N; i++) {
+                const b = Math.max(0, i - 1), a = Math.min(N, i + 1);
+                let x = -(by[a] - by[b]), y = bx[a] - bx[b];
+                const len = Math.hypot(x, y) || 1;
+                nx[i] = x / len; ny[i] = y / len;
+            }
+            canvas.baseX = bx; canvas.baseY = by; canvas.normX = nx; canvas.normY = ny;
+        }
         onPaint: {
             const ctx = getContext("2d");
             ctx.clearRect(0, 0, width, height);
             const N = 160;
             const stroke = root.lineWidthPx;
-            const pad = stroke;
-            const cx = width / 2, cy = height / 2;
-            const dia = Math.min(width, height) - stroke;
-
-            // Wavelength: 6 cycles across the bar; an INTEGER count around the
-            // closed ring or the wave beats against its own seam (the spec's
-            // arc-length note). 12 matches the cookie's lobes.
+            canvas.rebuildBase(N);
+            const bx = canvas.baseX, by = canvas.baseY, nx = canvas.normX, ny = canvas.normY;
             const freq = Math.round(6 + (12 - 6) * canvas.bendNow);
             const amp = stroke * 0.6 * root.waveLevel;
-
-            const base = root.baselinePoints(N);
-            // Normals from the RAW baseline, displaced into a second array.
-            // Displacing in place fed each point's normal from an already-
-            // displaced neighbour - a feedback loop that turned the sine into
-            // a knotted scribble, and it shipped because the visual check was
-            // graded at thumbnail size.
-            const points = [];
-            for (let i = 0; i <= N; i++) {
-                const before = base[Math.max(0, i - 1)];
-                const after = base[Math.min(N, i + 1)];
-                let nx = -(after.y - before.y), ny = after.x - before.x;
-                const len = Math.hypot(nx, ny) || 1;
-                nx /= len; ny /= len;
-                const w = amp * Math.sin(freq * 2 * Math.PI * (i / N) + root.phase);
-                points.push({ x: base[i].x + nx * w, y: base[i].y + ny * w });
+            const phase = root.phase, k = freq * 2 * Math.PI / N;
+            const split = Math.round(canvas.progressNow * N);
+            // The wave lives BEHIND the handle only (the M3 grammar the
+            // review's reference shows): played waves, what is ahead lies
+            // straight - with a short taper into the handle so the wiggle
+            // dies there instead of chopping.
+            const taper = 8;
+            function waveAt(i) {
+                if (i >= split) return 0;
+                if (i >= split - taper) return (split - i) / taper;
+                return 1;
             }
-
+            function px(i) { return bx[i] + nx[i] * amp * waveAt(i) * Math.sin(k * i + phase); }
+            function py(i) { return by[i] + ny[i] * amp * waveAt(i) * Math.sin(k * i + phase); }
             function strokeRun(from, to, colour) {
                 if (to <= from) return;
                 ctx.beginPath();
-                ctx.moveTo(points[from].x, points[from].y);
-                for (let i = from + 1; i <= to; i++) ctx.lineTo(points[i].x, points[i].y);
+                ctx.moveTo(px(from), py(from));
+                for (let i = from + 1; i <= to; i++) ctx.lineTo(px(i), py(i));
                 ctx.strokeStyle = colour;
                 ctx.lineWidth = stroke;
                 ctx.lineCap = "round";
                 ctx.lineJoin = "round";
                 ctx.stroke();
             }
-
-            const split = Math.round(canvas.progressNow * N);
             strokeRun(split, N, canvas.trackColor);
             strokeRun(0, split, canvas.arcColor);
 
-            // the bar's handle dot, dissolving as the bar curls up
+            // the bar's handle - a vertical tick (the M3 reference), laid
+            // along the baseline's normal, dissolving as the bar curls up
             if (canvas.bendNow < 1) {
-                const at = points[split] ?? points[N];
+                const at = Math.min(split, N);
+                const half = 7 * Appearance.effectiveScale;
                 ctx.beginPath();
                 ctx.globalAlpha = 1 - canvas.bendNow;
-                ctx.arc(at.x, at.y, 7 * Appearance.effectiveScale, 0, Math.PI * 2);
-                ctx.fillStyle = Appearance.colors.colPrimary;
-                ctx.fill();
+                ctx.moveTo(px(at) - nx[at] * half, py(at) - ny[at] * half);
+                ctx.lineTo(px(at) + nx[at] * half, py(at) + ny[at] * half);
+                ctx.strokeStyle = Appearance.colors.colPrimary;
+                ctx.lineWidth = 4 * Appearance.effectiveScale;
+                ctx.lineCap = "round";
+                ctx.stroke();
                 ctx.globalAlpha = 1;
             }
         }

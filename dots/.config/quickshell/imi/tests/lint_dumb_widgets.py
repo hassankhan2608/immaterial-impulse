@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""A shared widget is presentational. This is the ratchet that keeps it so.
+
+`modules/common/widgets` is a promise: anything in it can be used by any
+surface. A widget that reads the user's config, writes global state, talks to a
+service or spawns a process breaks that promise silently - it keeps working, and
+the next person reaching for it inherits a dependency nobody mentioned.
+
+An audit of the folder found 23 files doing exactly that. Most were not widgets
+that grew a brain; they were feature code filed in the wrong folder, and
+seventeen of them have since moved out to the module that was their consumer,
+been inverted into a property or a signal the host answers, or turned out to
+have no consumer at all. What is left is listed below, each with the reason it
+is still here - so the list can shrink and cannot quietly grow.
+
+What counts as reaching past presentation:
+
+  - a service singleton (anything under `services/`, except `Translation`,
+    which is text and belongs everywhere);
+  - `Config.options.*`, read or written. A dumb widget takes what it draws as a
+    property; the caller reads the config;
+  - `GlobalStates.*`, likewise. A widget that asks whether a particular panel is
+    open cannot be used in another one, which is the concrete bug this rule
+    prevents;
+  - a `Process` or `execDetached`. A component that can run a command is not a
+    component.
+
+`Appearance` is deliberately NOT on that list: design tokens are what makes
+these widgets consistent, and a widget reading them is the system working.
+
+Comments are stripped before matching. The first version of this scan accused
+StaggerWave over the word `GlobalStates` inside a comment explaining why it does
+NOT read one.
+"""
+import re
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SHELL = HERE.parent
+WIDGETS = SHELL / "modules/common/widgets"
+SERVICES = SHELL / "services"
+ALLOWED_SINGLETONS = {"Translation"}
+
+# file -> why it is still allowed to reach past presentation.
+EXCLUDED = {
+    "NotificationController.qml":
+        "deliberate, and the only entry here that is not a to-do: this file IS "
+        "the seam. Its job is to name Notifications once so a subclass can "
+        "answer differently - PhoneNotificationController does - which is what "
+        "took the direct service reads out of NotificationGroup, "
+        "NotificationListView and NotificationItem entirely. The coupling is "
+        "the feature",
+    "StyledPopup.qml":
+        "the bar popup protocol. Its arbitration moved to the slot "
+        "(GlobalStates.claimBarPopup) and what remains is this object ASKING - "
+        "the inverted shape. Named here so the exception stays visible",
+}
+
+
+def strip_comments(text):
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return "\n".join(re.sub(r"//.*$", "", line) for line in text.splitlines())
+
+
+def service_names():
+    return {p.stem for p in SERVICES.glob("*.qml")} - ALLOWED_SINGLETONS
+
+
+def offences(path, services):
+    text = strip_comments(path.read_text(errors="replace"))
+    found = []
+    used = sorted({name for name in services if re.search(rf"\b{name}\.", text)})
+    if used:
+        found.append("services: " + ", ".join(used))
+    if re.search(r"\bConfig\.options\.", text):
+        found.append("reads Config.options")
+    if re.search(r"\bGlobalStates\.", text):
+        found.append("reads or writes GlobalStates")
+    if re.search(r"\bProcess\s*\{|execDetached", text):
+        found.append("spawns a process")
+    return found
+
+
+GALLERY = SHELL / "modules/imi/cheatsheet/CheatsheetComponents.qml"
+
+
+def catalogued_components():
+    """Every path the Components gallery names, wherever it lives."""
+    return sorted(set(re.findall(r'type:\s*"([^"]+)"', GALLERY.read_text())))
+
+
+class DumbWidgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.services = service_names()
+
+    def test_shared_widgets_stay_presentational(self):
+        broken = {}
+        for path in sorted(WIDGETS.glob("*.qml")):
+            if path.name in EXCLUDED:
+                continue
+            found = offences(path, self.services)
+            if found:
+                broken[path.name] = found
+        self.assertEqual(broken, {}, "\n".join([
+            "These live in modules/common/widgets but reach past presentation.",
+            "Move the file to the module that uses it, invert the dependency",
+            "into a property its caller supplies, or add it to EXCLUDED here",
+            "WITH THE REASON - a bare name teaches the next reader nothing:",
+            *(f"  {name}: {', '.join(found)}" for name, found in broken.items()),
+        ]))
+
+    def test_catalogued_components_stay_presentational(self):
+        """The gallery's own list, not only the shared folder.
+
+        The folder rule caught nothing about the two bar buttons that opened
+        the power menu and the sidebar from inside the gallery: they lived in
+        modules/imi/bar. A UI component is whatever the Components page can
+        show, and every one of those is held to the same rule - eleven were
+        inverted to get here (services and GlobalStates out of the widget,
+        into the host that builds it), and this keeps the count at zero.
+        """
+        broken = {}
+        for rel in catalogued_components():
+            path = SHELL / rel
+            if not path.exists():
+                continue
+            found = offences(path, self.services)
+            if found:
+                broken[rel] = found
+        self.assertEqual(broken, {}, "\n".join([
+            "These are shown in the Components gallery but reach past",
+            "presentation. Turn the call into a signal or the read into a",
+            "property, and let the host that builds the widget answer it:",
+            *(f"  {rel}: {', '.join(found)}" for rel, found in broken.items()),
+        ]))
+
+    def test_the_exclusion_list_only_shrinks(self):
+        """An entry that no longer offends is an entry to delete."""
+        clean = []
+        for name in sorted(EXCLUDED):
+            path = WIDGETS / name
+            if not path.exists():
+                continue
+            if not offences(path, self.services):
+                clean.append(name)
+        self.assertEqual(clean, [], "\n".join([
+            "These are excluded but no longer reach past presentation.",
+            "Delete their entries so the list keeps meaning something:",
+            *(f"  {name}" for name in clean),
+        ]))
+
+    def test_the_exclusion_list_names_real_files(self):
+        stale = sorted(name for name in EXCLUDED if not (WIDGETS / name).exists())
+        self.assertEqual(stale, [], "\n".join([
+            "EXCLUDED names files that are no longer in the shared folder -",
+            "they moved out, which is the outcome this lint wants. Delete:",
+            *(f"  {name}" for name in stale),
+        ]))
+
+
+if __name__ == "__main__":
+    unittest.main()

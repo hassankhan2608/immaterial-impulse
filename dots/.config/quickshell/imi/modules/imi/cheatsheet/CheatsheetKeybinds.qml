@@ -6,6 +6,7 @@ import qs.modules.common.widgets
 import QtQuick
 import QtQuick.Layouts
 import "../../common/functions/cheatsheetLayout.js" as CheatsheetLayout
+import "../../common/functions/cheatsheetFit.js" as CheatsheetFit
 
 Item {
     id: root
@@ -42,35 +43,27 @@ Item {
     readonly property real rowHeight: 30
     readonly property int availableRows: Math.max(
         8, Math.floor((root.maxContentHeight > 0 ? root.maxContentHeight : 900) * 0.66 / root.rowHeight))
-    // Ceiling on the column count, lowered until the laid-out row fits the
-    // width budget. Measured rather than predicted: a column is as wide as its
-    // widest section, which is not known until the text has been shaped.
+    // Ceiling on the column count. The height budget picks the count below it
+    // (columnCount), so this only bounds a long list; a short one never fans
+    // into slivers.
     readonly property int maxColumns: 4
-    property int columnCap: root.maxColumns
     readonly property var columns: CheatsheetLayout.balance(
-        root.sections, CheatsheetLayout.columnCount(root.sections, root.availableRows, root.columnCap))
+        root.sections, CheatsheetLayout.columnCount(root.sections, root.availableRows, root.maxColumns))
 
-    function fitToWidth() {
-        if (root.maxContentWidth <= 0 || root.columnCap <= 1)
-            return;
-        if (root.implicitWidth > root.maxContentWidth)
-            root.columnCap -= 1;
-    }
-
-    // Only ever shrinks, so this settles: each drop narrows the row, and the
-    // guard stops at a single column. Anything that changes what is being laid
-    // out starts the search again from the top.
-    onImplicitWidthChanged: Qt.callLater(root.fitToWidth)
-    onMaxContentWidthChanged: {
-        root.columnCap = root.maxColumns;
-        Qt.callLater(root.fitToWidth);
-    }
-    onSectionsChanged: {
-        root.columnCap = root.maxColumns;
-        Qt.callLater(root.fitToWidth);
-    }
-    implicitWidth: row.implicitWidth + padding * 2
-    implicitHeight: row.implicitHeight + padding * 2
+    // The columns are chosen to fit the HEIGHT budget, but a full keybind set
+    // in four columns can still be wider than the screen (and, on a laptop,
+    // marginally taller than the height budget once the section chips are drawn)
+    // - and trading more columns for less height just makes it wider still.
+    // So the page fits the same way the Elements page does: keep the columns and
+    // the author order, and shrink the whole thing uniformly when it exceeds
+    // either budget. fit is 1 whenever it already fits, so a roomy screen draws
+    // full size.
+    readonly property real contentWidth: row.implicitWidth + padding * 2
+    readonly property real contentHeight: row.implicitHeight + padding * 2
+    readonly property real fit: CheatsheetFit.fitScale(
+        root.contentWidth, root.contentHeight, root.maxContentWidth, root.maxContentHeight)
+    implicitWidth: root.contentWidth * root.fit
+    implicitHeight: root.contentHeight * root.fit
     // Excellent symbol explaination and source :
     // http://xahlee.info/comp/unicode_computing_symbols.html
     // https://www.nerdfonts.com/cheat-sheet
@@ -113,6 +106,29 @@ Item {
         "Page_↑/↓": "⇞/⇟",
     })
 
+    // Section glyphs, keyed on the group names keybinds.lua uses today,
+    // with a neutral fallback for any group added later. Each glyph sits in
+    // a Material shape chip, and the shape rotates per section - the design
+    // language's way of making a list of headers scannable.
+    property var sectionShapes: [
+        MaterialShape.Shape.Cookie9Sided,
+        MaterialShape.Shape.Clover4Leaf,
+        MaterialShape.Shape.Sunny,
+        MaterialShape.Shape.Gem,
+        MaterialShape.Shape.Slanted,
+        MaterialShape.Shape.Cookie6Sided,
+        MaterialShape.Shape.Ghostish
+    ]
+    property var sectionIcons: ({
+        "Utilities": "handyman",
+        "Session": "power_settings_new",
+        "Apps": "apps",
+        "Screen": "desktop_windows",
+        "Window": "select_window",
+        "Media": "music_note",
+        "Workspace": "workspaces"
+    })
+
     property var keyBlacklist: ["Super_L"]
     property var keySubstitutions: Object.assign({
         "Super": "",
@@ -124,6 +140,19 @@ Item {
         "Slash": "/",
         "Hash": "#",
         "Return": "Enter",
+        "XF86AudioRaiseVolume": Translation.tr("Volume Up"),
+        "XF86AudioLowerVolume": Translation.tr("Volume Down"),
+        "XF86AudioMute": Translation.tr("Mute"),
+        "XF86AudioMicMute": Translation.tr("Mic Mute"),
+        "XF86AudioPlay": Translation.tr("Play"),
+        "XF86AudioPause": Translation.tr("Pause"),
+        "XF86AudioNext": Translation.tr("Next Track"),
+        "XF86AudioPrev": Translation.tr("Prev Track"),
+        "XF86AudioStop": Translation.tr("Stop"),
+        "XF86MonBrightnessUp": Translation.tr("Brightness Up"),
+        "XF86MonBrightnessDown": Translation.tr("Brightness Down"),
+        "XF86KbdBrightnessUp": Translation.tr("Kbd Light Up"),
+        "XF86KbdBrightnessDown": Translation.tr("Kbd Light Down"),
         // "Shift": "",
       },
       !!Config.options.cheatsheet.superKey ? {
@@ -137,39 +166,89 @@ Item {
     Row { // Keybind columns
         id: row
         spacing: root.spacing
-        
+        // Scaled about its own centre, which centerIn holds at the page's, so
+        // the shrunk columns land exactly inside the box the page asks for -
+        // the same arrangement CheatsheetPeriodicTable uses.
+        anchors.centerIn: parent
+        scale: root.fit
+
         Repeater {
             model: root.columns
 
             delegate: Column { // One balanced column of sections
+                id: sectionsColumn
                 spacing: root.spacing
                 required property var modelData
                 anchors.top: row.top
 
+                // The widest section in this column decides the card width
+                // for all of them, so the column reads as a stack of equal
+                // cards. Computed from implicitWidth, never width: a
+                // positioner Column takes its implicitWidth from its
+                // children's WIDTH, so a card bound to parent.width is a
+                // binding loop that silently collapses the whole sheet to
+                // zero (it did).
+                readonly property real cardWidth: {
+                    let widest = 0;
+                    for (let i = 0; i < children.length; i++)
+                        widest = Math.max(widest, children[i].implicitWidth);
+                    return widest;
+                }
+
                 Repeater {
                     model: modelData
 
-                    delegate: Item { // Section with real keybinds
+                    delegate: Rectangle { // Section card
                         id: keybindSection
                         required property var modelData
-                        implicitWidth: sectionColumn.implicitWidth
-                        implicitHeight: sectionColumn.implicitHeight
+                        required property int index
+                        readonly property int sectionIndex: index
+                        // Every section is its own surface rather than a
+                        // heading floating on the sheet - the card is what
+                        // separates one group of binds from the next. Width
+                        // follows the widest sibling (see cardWidth), so a
+                        // column reads as a stack of equal cards, not a
+                        // ragged pile.
+                        readonly property real cardPadding: Appearance.spacing.space150
+                        width: sectionsColumn.cardWidth
+                        color: Appearance.colors.colLayer1
+                        radius: Appearance.rounding.normal
+                        implicitWidth: sectionColumn.implicitWidth + cardPadding * 2
+                        implicitHeight: sectionColumn.implicitHeight + cardPadding * 2
 
                         Column {
                             id: sectionColumn
-                            anchors.centerIn: parent
+                            // Left-anchored, not centered: the card is as wide
+                            // as the column's widest section, and a narrower
+                            // section centered in that width floats its title
+                            // into the middle of the card.
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.margins: keybindSection.cardPadding
                             spacing: root.titleSpacing
                             
-                            StyledText {
-                                id: sectionTitle
-                                visible: text.length > 0
-                                font {
-                                    family: Appearance.font.family.title
-                                    pixelSize: Appearance.font.pixelSize.title
-                                    variableAxes: Appearance.font.variableAxes.title
+                            Row {
+                                visible: sectionTitle.text.length > 0
+                                spacing: Appearance.spacing.space100
+                                MaterialShapeWrappedMaterialSymbol {
+                                    anchors.verticalCenter: sectionTitle.verticalCenter
+                                    wrappedShape: root.sectionShapes[keybindSection.sectionIndex % root.sectionShapes.length]
+                                    text: root.sectionIcons[keybindSection.modelData.name] ?? "keyboard"
+                                    iconSize: Appearance.font.pixelSize.normal
+                                    implicitSize: 32
+                                    color: Appearance.colors.colPrimaryContainer
+                                    colSymbol: Appearance.colors.colPrimary
                                 }
-                                color: Appearance.colors.colOnLayer0
-                                text: keybindSection.modelData.name
+                                StyledText {
+                                    id: sectionTitle
+                                    font {
+                                        family: Appearance.font.family.title
+                                        pixelSize: Appearance.font.pixelSize.title
+                                        variableAxes: Appearance.font.variableAxes.title
+                                    }
+                                    color: Appearance.colors.colOnLayer1
+                                    text: keybindSection.modelData.name
+                                }
                             }
 
                             GridLayout {

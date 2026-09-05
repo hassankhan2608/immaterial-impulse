@@ -28,6 +28,19 @@ ColumnLayout {
 
     Layout.fillWidth: true
 
+    /** Generated images arrive as plain markdown pointing into the
+        attachment store, and TextEdit renders those at native size - a
+        1246px square swallowed the sidebar. Rewritten at render time into
+        an <img> bound to the block's own width, they fit wherever the
+        message does (height follows aspect). Raw text (editing, source
+        view) stays untouched. */
+    function fitLocalImages(s, width) {
+        if (width <= 0) return s;
+        return String(s).replace(
+            /!\[([^\]]*)\]\((\/[^)\s]*\/(?:inline-|gen-)[^)\s]+)\)/g,
+            (m, alt, path) => `<img src="${path}" width="${Math.max(64, Math.floor(width - 8))}"/>`);
+    }
+
     Timer {
         id: renderTimer
         interval: 1000
@@ -73,6 +86,10 @@ ColumnLayout {
     }
     onEditingChanged: {
         if (!editing) {
+            // Leaving edit mode: fold the edits back into the display path
+            // the guards above kept frozen while typing.
+            renderedSegmentContent = segmentContent;
+            root.shownText = segmentContent;
             renderLatex()
         } else {
             // console.log("Editing mode enabled", segmentContent)
@@ -81,15 +98,20 @@ ColumnLayout {
     }
 
     onSegmentContentChanged: {
-        // console.log("Segment content changed: " + segmentContent);
+        // While EDITING, the TextArea is the source of truth and its own
+        // keystrokes land here - echoing them back into shownText replaced
+        // the Repeater's values and rebuilt the very delegate being typed
+        // in, killing the cursor after one keystroke. The echo resumes
+        // when editing ends (onEditingChanged reseeds shownText).
+        if (root.editing) return;
         renderedSegmentContent = segmentContent;
-        if (!root.editing && segmentContent) {
+        if (segmentContent) {
             root.renderLatex();
         }
     }
 
     onRenderedSegmentContentChanged: {
-        // console.log("Rendered segment content changed: " + renderedSegmentContent);
+        if (root.editing) return; // see onSegmentContentChanged
         if (renderedSegmentContent) {
             root.shownText = renderedSegmentContent;
         }
@@ -110,42 +132,59 @@ ColumnLayout {
     spacing: 0
     Repeater {
         id: textLinesRepeater
-        property list<real> textLineOpacities: []
         model: ScriptModel {
             // Split by either double newlines or single newlines in a list
             values: root.fadeChunkSplitting ? root.shownText.split(/\n\n(?= {0,2})|\n(?= {0,2}[-\*])/g).filter(line => line.trim() !== "") : [root.shownText]
-            onValuesChanged: {
-                while (textLinesRepeater.textLineOpacities.length < values.length) {
-                    textLinesRepeater.textLineOpacities.push(root.messageData.done ? 1 : 0);
-                }
-            }
         }
         delegate: TextArea {
             id: textArea
             required property int index
             required property string modelData
 
-            // Fade in animation
-            visible: opacity > 0
-            opacity: fadeChunkSplitting ? (textLinesRepeater.textLineOpacities[index] ?? (root.messageData.done ? 1 : 0)) : 1
-            Connections {
-                target: root.messageData
-                function onDoneChanged() {
-                    if (root.messageData.done) {
-                        textLinesRepeater.textLineOpacities[textArea.index] = 1
-                    }
-                }
+            // The append fade, as a ROTATING ring of snapshots. One ghost
+            // restarted per flush never finished its fade before the next
+            // flush reset it - text hung near-invisible and popped on
+            // pauses. Now each flush claims the oldest of four stacked
+            // twins: its previous snapshot (fade long done) commits into
+            // the base, and it fades its new full-text snapshot in over
+            // its own 200ms, overlapping the other ghosts' fades.
+            // Identical glyphs overlap invisibly at every layer, so only
+            // appended words read as fading.
+            readonly property bool liveTail: !root.done && index === textLinesRepeater.count - 1 && !root.editing
+            property string committedText: ""
+            property int ghostHead: 0
+            onModelDataChanged: {
+                if (!liveTail) return;
+                const g = ghostRepeater.itemAt(ghostHead % 4);
+                if (!g) return;
+                if (g.text.length > committedText.length) committedText = g.text;
+                g.launch(modelData);
+                ghostHead++;
             }
-            Connections {
-                target: textLinesRepeater.model
-                function onValuesChanged() {
-                    if (textLinesRepeater.model.values.length > textArea.index + 1) {
-                        textLinesRepeater.textLineOpacities[textArea.index] = 1
-                    }
-                }
+
+            // A NEW paragraph fades in the moment it is born. The previous
+            // scheme held each line at opacity 0 until the NEXT one arrived,
+            // so the stream rendered one paragraph behind and landed in
+            // pops; a delegate created mid-stream now announces itself and
+            // an updated one just keeps its text.
+            opacity: 1
+            // An explicit from-0 animation, not write-then-deferred-write:
+            // the start-write lint is right that a Behavior swallows the
+            // first write and animates destination-to-destination.
+            Component.onCompleted: {
+                committedText = modelData;
+                if (root.fadeChunkSplitting && !(root.messageData?.done ?? true))
+                    lineAppear.start();
             }
-            Behavior on opacity {
-                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            NumberAnimation {
+                id: lineAppear
+                target: textArea
+                property: "opacity"
+                from: 0
+                to: 1
+                duration: Appearance.animation.elementMoveFast.duration
+                easing.type: Appearance.animation.elementMoveFast.type
+                easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve
             }
 
             Layout.fillWidth: true
@@ -158,9 +197,25 @@ ColumnLayout {
             selectedTextColor: Appearance.m3colors.m3onSecondaryContainer
             selectionColor: Appearance.colors.colSecondaryContainer
             wrapMode: TextEdit.Wrap
-            color: root.messageData?.thinking ? Appearance.colors.colSubtext : Appearance.colors.colOnLayer1
+            color: root.messageData?.thinking ? Appearance.colors.colSubtext
+                : root.messageData?.role === 'user' ? Appearance.m3colors.m3onSecondaryContainer
+                : Appearance.colors.colOnLayer1
             textFormat: renderMarkdown ? TextEdit.MarkdownText : TextEdit.PlainText
-            text: modelData
+            // The width inline images are fitted to, sampled OUTSIDE the
+            // text binding and quantized to 20px steps. text reading `width`
+            // directly is a binding loop: wrapped text feeds implicitWidth
+            // back into the layout that hands the width out, and every
+            // message with an inline image logged it on transcript load.
+            property real imageFitWidth: 0
+            onWidthChanged: {
+                const quantized = Math.floor(width / 20) * 20;
+                if (quantized !== imageFitWidth)
+                    imageFitWidth = quantized;
+            }
+            text: {
+                const raw = liveTail ? committedText : modelData;
+                return (root.editing || !renderMarkdown) ? raw : root.fitLocalImages(raw, imageFitWidth);
+            }
 
             onTextChanged: {
                 if (!root.editing) return
@@ -178,6 +233,63 @@ ColumnLayout {
                 hoverEnabled: true
                 cursorShape: parent.hoveredLink !== "" ? Qt.PointingHandCursor : 
                     (enableMouseSelection || editing) ? Qt.IBeamCursor : Qt.ArrowCursor
+            }
+
+            Repeater {
+                id: ghostRepeater
+                model: 4
+                delegate: TextArea {
+                    id: ghost
+                    anchors.fill: parent
+                    visible: textArea.liveTail && opacity > 0 && text.length > 0
+                    opacity: 0
+                    enabled: false
+                    readOnly: true
+                    background: null
+                    renderType: Text.NativeRendering
+                    font: textArea.font
+                    wrapMode: textArea.wrapMode
+                    color: textArea.color
+                    textFormat: textArea.textFormat
+                    text: ""
+                    function launch(snapshot) {
+                        ghostAnim.stop();
+                        text = root.fitLocalImages(snapshot, width);
+                        opacity = 0;
+                        ghostAnim.start();
+                    }
+                    NumberAnimation {
+                        id: ghostAnim
+                        target: ghost
+                        property: "opacity"
+                        to: 1
+                        duration: 200
+                        easing.type: Easing.OutQuad
+                    }
+                }
+            }
+
+            Rectangle {
+                // The soft leading edge: while this is the growing line of a
+                // streaming message, its last stretch sits under a gradient
+                // of the message surface, so appended text EMERGES as it
+                // pushes past the veil instead of popping in fully formed.
+                // Done (or losing last place) fades the veil away, which is
+                // also what reveals the final words.
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Appearance.font.pixelSize.small * 2.4
+                opacity: (!root.done && textArea.index === textLinesRepeater.count - 1
+                    && !root.editing) ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity {
+                    animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                }
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: ColorUtils.transparentize(Appearance.colors.colLayer1, 1) }
+                    GradientStop { position: 1.0; color: ColorUtils.transparentize(Appearance.colors.colLayer1, 0.08) }
+                }
             }
 
             // Rectangle {

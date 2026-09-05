@@ -180,8 +180,20 @@ short values such as currency codes.
 `shape` takes the same `choices` array as `choice` but renders each entry as the Material shape it
 names rather than as a text chip, via `ConfigSelectionShapeArray`. Values must be `MaterialShape.Shape`
 enum names (`Cookie4Sided`, `Heart`, …); an unrecognised name falls back to `Cookie4Sided`. Use it
-whenever the value *is* a shape — a 31-entry name-chip row is unreadable, and `ConfigSelectionArray`'s
-chip `Flow` only wraps when the row has no label, so such a row cannot be labelled either.
+whenever the value *is* a shape — a 31-entry name-chip row is unreadable even wrapped.
+
+Options that belong together take a `"group": "<heading>"` and, on any of them, a `"groupIcon"`.
+Consecutive options with the same group render under one header - a hairline, then the icon and the
+name - shown only while one of its rows is, so the heading carries the shared word and the labels do
+not ("Cookie clock" over `Sides`, `Hour marks`, `Dial style`, rather than eleven labels each starting
+"Cookie:"). Inside a group the rows pack: consecutive booleans two to a line, everything else a full
+row; a choice row keeps its label beside its chips and stacks them beneath only when they cannot fit.
+Give every `choice` an `icon`: a choice whose options all carry one renders DENSE - icon-only chips
+that name themselves on hover, with the current option's name beside the row's label - which is what
+lets four or five options sit on one line with the label. One option without an icon and the whole
+row falls back to text chips. Keep a group's options together in the
+manifest: the grouping is by run, and the same name twice apart is two headers. Order booleans next
+to each other if you want them paired.
 
 An option can be shown only while another option has a given value. `"visibleWhen"` takes a
 rule — `{ "key": "style", "in": ["cookie"] }`, `{ "key": "quoteEnable", "equals": true }`, a bare

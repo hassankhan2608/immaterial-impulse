@@ -124,10 +124,48 @@ TestCase {
         fuzzyCompare(progress.width, t.play.width * 1.28, 0.01);
     }
 
+    // ---- 1x1 -------------------------------------------------------------
+
+    function test_1x1_sides_flank_the_play_flush() {
+        // The redesign (2026-08-31): half-pill prev/next STUCK to the play
+        // button's sides - round edge outward, flat edge against it - the
+        // row lifted to make room for the seek bar below.
+        const t = Geometry.transportRects("1x1", 132, 108, 1);
+        // Final form: bare icon flankers (no bodies), sitting flush
+        // beside the cookie with no tuck.
+        compare(t.prev.width, 26);
+        compare(t.prev.height, 22);
+        compare(t.play.width, 46);
+        // Tucked INTO the play rect: the cookie's scalloped body is
+        // visually narrower than its rect, so rect-flush read as a gap.
+        // The badges draw above play (z 4 over 1), so the tuck shows as
+        // the flat edge meeting the cookie.
+        compare(t.prev.x + t.prev.width, t.play.x, "prev sits flush beside play");
+        compare(t.play.x + t.play.width, t.next.x, "next sits flush beside play");
+        compare(t.prev.x, (132 - (26 + 46 + 26)) / 2, "the trio is centred");
+        compare(t.prev.y - t.play.y, (46 - 22) / 2, "sides centred on play");
+    }
+
+    function test_1x1_row_sits_above_its_seek_bar() {
+        const t = Geometry.transportRects("1x1", 132, 108, 1);
+        const seek = Geometry.progressRect("1x1", 132, 108, 1);
+        compare(seek.height, 16);
+        compare(seek.y + seek.height, 108 - 8, "seek rides 8 above the bottom");
+        compare(seek.x, 16);
+        compare(seek.width, 132 - 32);
+        compare(t.play.y + t.play.height, seek.y - 8, "the row sits 8 above the seek");
+        compare(t.play.height, 46);
+    }
+
+    function test_1x1_still_shows_no_time_no_button_artwork() {
+        compare(Geometry.timeLabelRect("1x1", 132, 108, 1), null);
+        compare(Geometry.artworkRect("1x1", 132, 108, 1), null);
+    }
+
     // ---- cross-span, and scale -------------------------------------------
 
     function test_every_span_has_the_full_transport_set() {
-        for (const span of ["3x2", "2x2", "2x1"]) {
+        for (const span of ["3x2", "2x2", "2x1", "1x1"]) {
             const t = Geometry.transportRects(span, 276, 108, 1);
             verify(t.prev && t.play && t.next,
                    span + ": a shared element exists at every span");

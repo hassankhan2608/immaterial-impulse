@@ -1,4 +1,3 @@
-import qs
 import QtQuick
 import QtQuick.Layouts
 import qs.services
@@ -21,8 +20,24 @@ GroupButton {
     property var dropIndicatorRef: null
     property bool isUnused: false 
     property var gridRef: null
+    // The pager protocol (spec 2026-08-31): the panel owning the pages, and
+    // which page this tile calls home. The drag's cross-page half lands in
+    // the follow-up commit; until then these only ride along.
+    property var pagerRef: null
+    property int pageIndex: 0
 
     signal openMenu()
+    // What a tile asks of the panel that holds the stored toggle list: to be
+    // moved onto another tile's slot after a drag, or added from the unused
+    // shelf. The list is the config's; the tile has no business writing it.
+    signal moveRequested(int fromIndex, int toIndex)
+    signal addRequested(string type)
+    signal removeRequested(int index)
+    signal resizeRequested(int index, int size)
+    signal moveAcrossRequested(int fromIndex, int toPage, int toIndex)
+    // Whether the sidebar this tile sits in is open, for the entrance: a
+    // tile built while the panel is closed appears at once.
+    property bool panelOpen: false
 
     property QuickToggleModel toggleModel
     property string name: toggleModel?.name ?? ""
@@ -38,18 +53,26 @@ GroupButton {
 
     baseWidth: root.baseCellWidth * cellSize + cellSpacing * (cellSize - 1)
     baseHeight: root.baseCellHeight
-    enableImplicitWidthAnimation: !editMode && root.mouseArea.containsMouse
-    enableImplicitHeightAnimation: !editMode && root.mouseArea.containsMouse
+    enableImplicitWidthAnimation: !editMode && root.hovered
+    enableImplicitHeightAnimation: !editMode && root.hovered
     Behavior on baseWidth {
         animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
     }
     Behavior on baseHeight {
         animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
     }
-    // The tile's arrival is the panel's convergent wave now (the panel's
-    // StaggerEntrance owns opacity/scale/translate through this): a tile
-    // added mid-session simply appears in place, which is what the old
-    // opacity: 0 + onCompleted self-fade approximated one tile at a time.
+    // The tile's arrival is the panel's convergent wave. `appear` is
+    // INHERITED - RippleButton declares it and folds it into the opacity
+    // binding that also carries the disabled dim - and this file must not
+    // declare it again. It did, back when GroupButton was rooted on Button
+    // and had no `appear` of its own, and it inherited a second one the day
+    // GroupButton moved onto RippleButton. QML then carried TWO properties
+    // of that name: the wave wrote this one while the base's opacity
+    // binding, compiled in the base's scope, read the other. Nothing
+    // errored; the tiles simply stopped fading in. StaggerEntrance had also
+    // stopped dressing them, because it leaves opacity and scale to any
+    // control exposing `interactionMotion` - which a RippleButton does - so
+    // between the two nothing drove the entrance at all.
     // No Behavior on opacity: the wave animates `appear` and opacity is a
     // binding on it, so a Behavior here is a second animation on the same
     // channel. The one left behind by the self-fade's retirement turned
@@ -59,7 +82,6 @@ GroupButton {
     // animated - b710ef731's frozen-Behavior shape - so the tile landed
     // ~200ms after its own wave slot). That was the "toggles visible, then
     // the animation begins" pause.
-    property real appear: 1
 
     // A tile born mid-session - edit mode adding it, a config change - used
     // to pop in at full strength in one frame: the dresser dresses arrivals,
@@ -77,7 +99,7 @@ GroupButton {
             const wave = root.gridRef?.entranceWave ?? null;
             if (wave && (wave.active.length > 0 || wave.pendingEnter))
                 return;
-            if (!GlobalStates.sidebarRightOpen) {
+            if (!root.panelOpen) {
                 root.appear = 1;
                 return;
             }
@@ -231,27 +253,27 @@ GroupButton {
             id: dragHandler
             target: null
 
-            // Every tile is a direct child of the one flat grid now, so this is
-            // a filter rather than a walk. The drop indicator and the Repeater
-            // itself are children too; a tile is what carries buttonData.
-            function getAllSiblings() {
+            // Every tile is a direct child of one flat page grid, so this
+            // is a filter rather than a walk - parameterised by GRID now,
+            // because a drag that crossed a page edge scores its drop
+            // against the page under the pointer, not the one it left.
+            function siblingsIn(grid) {
                 const siblings = [];
-                if (!root.gridRef) return siblings;
-                for (let i = 0; i < root.gridRef.children.length; i++) {
-                    const sib = root.gridRef.children[i];
+                if (!grid) return siblings;
+                for (let i = 0; i < grid.children.length; i++) {
+                    const sib = grid.children[i];
                     if (!sib || !sib.visible || !sib.buttonData) continue;
                     siblings.push(sib);
                 }
                 return siblings;
             }
 
-            // The dragged tile is a hole rather than a candidate: it stays
-            // where it was laid out for the whole gesture, so it would be its
-            // own nearest neighbour. Compared by id rather than by type,
-            // because a config naming one type twice would otherwise punch two
-            // holes and leave the drag unable to reach either.
-            function findNearest(sceneX, sceneY) {
-                const siblings = getAllSiblings();
+            // The dragged tile is a hole rather than a candidate on its own
+            // page; on another page it is simply absent. Compared by id
+            // rather than by type, because a config naming one type twice
+            // would otherwise punch two holes.
+            function findNearestIn(grid, sceneX, sceneY) {
+                const siblings = siblingsIn(grid);
                 const centres = siblings.map(sib =>
                     sib.buttonData.itemId === root.buttonData.itemId
                         ? null
@@ -260,55 +282,78 @@ GroupButton {
                 return nearest === -1 ? null : siblings[nearest];
             }
 
+            function crossingPages() {
+                return root.pagerRef && root.pagerRef.currentPage !== root.pageIndex;
+            }
+
             onActiveChanged: {
                 editModeInteraction.isDragging = active;
+                if (root.pagerRef) root.pagerRef.dragActive = active;
 
                 if (!active) {
                     if (root.dropIndicatorRef) root.dropIndicatorRef.visible = false;
+                    const landing = root.pagerRef?.currentIndicator() ?? null;
+                    if (landing) landing.visible = false;
                     const sceneX = centroid.scenePosition.x;
                     const sceneY = centroid.scenePosition.y;
-                    const nearest = findNearest(sceneX, sceneY);
-                    if (nearest) {
-                        const toggleList = Config.options.sidebar.quickToggles.android.toggles;
+                    if (crossingPages()) {
+                        // The drop commits an insertion index into the page
+                        // under the pointer; an empty page takes index 0.
+                        const grid = root.pagerRef.currentGrid();
+                        const nearest = grid ? findNearestIn(grid, sceneX, sceneY) : null;
+                        let insertAt = 0;
+                        if (nearest) {
+                            const centre = nearest.mapToItem(null, nearest.width / 2, 0).x;
+                            insertAt = nearest.buttonIndex + (sceneX > centre ? 1 : 0);
+                        }
+                        root.moveAcrossRequested(root.buttonIndex,
+                            root.pagerRef.currentPage, insertAt);
+                    } else {
                         // The model carries each row's index in the stored
-                        // list, so the commit addresses the entry the tile was
-                        // built from. Looking it up by type again asks a
-                        // question the list may answer twice.
-                        const myIdx = root.buttonIndex;
-                        const sibIdx = nearest.buttonIndex;
-                        // Mutated in place, deliberately: 26b625905 measured
-                        // that every mutation form notifies and reverted the
-                        // copy-and-reassign indirection added on the belief
-                        // that they do not. Only the arithmetic changes here -
-                        // the dragged toggle travels to the tile it was
-                        // dropped on and the ones it passed shift back one,
-                        // instead of the two exchanging places and the other
-                        // one landing wherever the drag began.
-                        LayoutOps.moveInPlace(toggleList, myIdx, sibIdx);
+                        // list, so the request addresses the entry the tile
+                        // was built from.
+                        const nearest = findNearestIn(root.gridRef, sceneX, sceneY);
+                        if (nearest)
+                            root.moveRequested(root.buttonIndex, nearest.buttonIndex);
                     }
+                    if (root.pagerRef) root.pagerRef.dragEnded();
                 }
             }
 
             onCentroidChanged: {
-                if (!active || !root.dropIndicatorRef || !root.gridRef) return;
+                if (!active) return;
                 const sceneX = centroid.scenePosition.x;
                 const sceneY = centroid.scenePosition.y;
-                const nearest = findNearest(sceneX, sceneY);
+                if (root.pagerRef) root.pagerRef.dragHoverAt(sceneX);
 
+                const crossing = crossingPages();
+                const grid = crossing ? root.pagerRef.currentGrid() : root.gridRef;
+                const indicator = crossing ? root.pagerRef.currentIndicator()
+                                           : root.dropIndicatorRef;
+                if (root.dropIndicatorRef && indicator !== root.dropIndicatorRef)
+                    root.dropIndicatorRef.visible = false;
+                if (!grid || !indicator) return;
+
+                const nearest = findNearestIn(grid, sceneX, sceneY);
                 if (nearest) {
-                    const nearestScene = nearest.mapToItem(null, 0, 0);
-                    const myScene = root.mapToItem(null, 0, 0);
-                    const goesAfter = nearestScene.x > myScene.x || nearestScene.y > myScene.y;
-                    const nearestLocal = nearest.mapToItem(root.gridRef, 0, 0);
-
-                    root.dropIndicatorRef.x = goesAfter
+                    const centre = nearest.mapToItem(null, nearest.width / 2, 0).x;
+                    const goesAfter = sceneX > centre;
+                    const nearestLocal = nearest.mapToItem(grid, 0, 0);
+                    indicator.x = goesAfter
                         ? nearestLocal.x + nearest.width + 1
                         : nearestLocal.x - 5;
-                    root.dropIndicatorRef.y = nearestLocal.y;
-                    root.dropIndicatorRef.height = nearest.height;
-                    root.dropIndicatorRef.visible = true;
+                    indicator.y = nearestLocal.y;
+                    indicator.height = nearest.height;
+                    indicator.visible = true;
+                } else if (crossing) {
+                    // An empty page: the indicator stands at its origin so
+                    // the drop has a visible home.
+                    indicator.x = 0;
+                    indicator.y = 0;
+                    indicator.height = root.baseCellHeight;
+                    indicator.visible = true;
                 } else {
-                    root.dropIndicatorRef.visible = false;
+                    indicator.visible = false;
                 }
             }
         }
@@ -322,15 +367,15 @@ GroupButton {
         visible: root.editMode && root.isUnused
         anchors.fill: parent
         cursorShape: Qt.PointingHandCursor
-        onClicked: {
-            const toggleList = Config.options.sidebar.quickToggles.android.toggles;
-            const buttonType = root.buttonData.type;
-            if (!toggleList.find(t => t.type === buttonType))
-                toggleList.push({ type: buttonType, size: 1 });
-        }
+        onClicked: root.addRequested(root.buttonData.type)
     }
 
-    // del
+    // Edit-mode badges sit INSIDE the tile, both on its right edge: remove at
+    // the top, resize at the bottom. They used to hang 8px outside opposite
+    // corners, and in an 8px gutter one tile's remove badge landed beside
+    // its neighbour's resize handle - a user could not tell which tile either
+    // belonged to - while the bottom row's handles fell outside the grid and
+    // were clipped. Inside, on one edge, a badge can only be its own tile's.
     Rectangle {
         id: deleteBtn
         visible: root.editMode && !root.isUnused
@@ -340,9 +385,9 @@ GroupButton {
         radius: Appearance.rounding.full
         color: deleteHover.containsMouse ? Appearance.colors.colError : ColorUtils.transparentize(Appearance.colors.colError, 0.15)
         anchors.top: parent.top
-        anchors.left: parent.left
-        anchors.topMargin: -Appearance.spacing.space100
-        anchors.leftMargin: -Appearance.spacing.space100
+        anchors.right: parent.right
+        anchors.topMargin: Appearance.spacing.space50
+        anchors.rightMargin: Appearance.spacing.space50
 
         Behavior on color {
             animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
@@ -364,11 +409,7 @@ GroupButton {
             anchors.margins: -Appearance.spacing.space50
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: {
-                const toggleList = Config.options.sidebar.quickToggles.android.toggles;
-                if (root.buttonIndex >= 0 && root.buttonIndex < toggleList.length)
-                    toggleList.splice(root.buttonIndex, 1);
-            }
+            onClicked: root.removeRequested(root.buttonIndex)
         }
     }
 
@@ -383,8 +424,8 @@ GroupButton {
         color: resizeHover.containsMouse ? Appearance.colors.colPrimary : ColorUtils.transparentize(Appearance.colors.colPrimary, 0.15)
         anchors.bottom: parent.bottom
         anchors.right: parent.right
-        anchors.bottomMargin: -Appearance.spacing.space100
-        anchors.rightMargin: -Appearance.spacing.space100
+        anchors.bottomMargin: Appearance.spacing.space50
+        anchors.rightMargin: Appearance.spacing.space50
 
         Behavior on color {
             animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
@@ -422,11 +463,8 @@ GroupButton {
                 const dx = scene.x - pressSceneX;
                 const steps = Math.round(dx / root.baseCellWidth);
                 const newSize = Math.max(1, Math.min(3, pressSize + steps));
-                if (newSize !== root.cellSize) {
-                    const toggleList = Config.options.sidebar.quickToggles.android.toggles;
-                    if (root.buttonIndex >= 0 && root.buttonIndex < toggleList.length)
-                        toggleList[root.buttonIndex].size = newSize;
-                }
+                if (newSize !== root.cellSize)
+                    root.resizeRequested(root.buttonIndex, newSize);
             }
         }
     }

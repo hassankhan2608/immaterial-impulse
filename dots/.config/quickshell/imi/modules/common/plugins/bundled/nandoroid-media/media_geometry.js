@@ -46,6 +46,19 @@ var COMPACT_CONTROL = 56;      // prev/next pills
 var COMPACT_PLAY = 72;         // the cookie play button
 var COMPACT_SPACING = 12;      // Appearance.spacing.space150
 
+// ---- 1x1 constants (designed against the maintainer's reference shot:
+// artwork fills the card, a small transport row sits low on it) -----------
+var TINY_PLAY = 46;            // the cookie play button
+// The half-pill flankers (2026-08-31 redesign): stuck flush to the play
+// button's sides, round edge outward; the row lifted, a straight seek bar
+// riding below it.
+var TINY_SIDE_W = 26;
+var TINY_SIDE_H = 22;
+var TINY_SEEK_H = 16;
+var TINY_SEEK_BOTTOM = 8;      // seek's clearance from the card's bottom
+var TINY_ROW_GAP = 8;          // between the row and the seek
+var TINY_SIDE_TUCK = 0;        // bare icons: beside the cookie, no tuck
+
 // ---- 2x2 constants -------------------------------------------------------
 var COOKIE_INSET = 12;         // cardInset = Appearance.spacing.space150
 var COOKIE_ART_RATIO = 0.72;   // artClip diameter / frame size
@@ -100,6 +113,23 @@ function transportRects(span, width, height, scale) {
                         frame.y + frame.size - badge, badge, badge)
         };
     }
+    if (span === "1x1") {
+        // The card is the artwork; the transport is a flush trio - half-pill
+        // sides against the play button - lifted above the seek bar.
+        var tinyPlay = TINY_PLAY * scale;
+        var sideW = TINY_SIDE_W * scale;
+        var sideH = TINY_SIDE_H * scale;
+        var tuck = TINY_SIDE_TUCK * scale;
+        var trioW = 2 * sideW + tinyPlay - 2 * tuck;
+        var tinyX = (width - trioW) / 2;
+        var tinyPlayY = height - (TINY_SEEK_BOTTOM + TINY_SEEK_H + TINY_ROW_GAP) * scale - tinyPlay;
+        var tinySideY = tinyPlayY + (tinyPlay - sideH) / 2;
+        return {
+            prev: _rect(tinyX, tinySideY, sideW, sideH),
+            play: _rect(tinyX + sideW - tuck, tinyPlayY, tinyPlay, tinyPlay),
+            next: _rect(tinyX + sideW - tuck + tinyPlay - tuck, tinySideY, sideW, sideH)
+        };
+    }
     if (span === "2x1") {
         var control = COMPACT_CONTROL * scale;
         var play = COMPACT_PLAY * scale;
@@ -151,6 +181,12 @@ function progressRect(span, width, height, scale) {
         var inner = frame.size * 0.76;
         return _rect(frame.x + (frame.size - inner) / 2,
                      frame.y + (frame.size - inner) / 2, inner, inner);
+    }
+    if (span === "1x1") {
+        // The straight bar under the trio (the squiggle seeker at its
+        // smallest), inset from the card's sides.
+        return _rect(16 * scale, height - (TINY_SEEK_BOTTOM + TINY_SEEK_H) * scale,
+                     width - 32 * scale, TINY_SEEK_H * scale);
     }
     return null;
 }

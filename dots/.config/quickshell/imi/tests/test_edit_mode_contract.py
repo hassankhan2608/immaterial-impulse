@@ -90,7 +90,7 @@ LOCK_PREVIEW_CONTEXT = ROOT / "modules/common/panels/lock/LockPreviewContext.qml
 RULES = ROOT.parents[1] / "hypr/hyprland/rules.lua"
 BAR_CONTROLLER = ROOT / "modules/imi/bar/BarEditController.qml"
 LOCK_REORDER = ROOT / "modules/imi/lock/LockIslandReorder.qml"
-DRAG_APPS = ROOT / "modules/common/widgets/DragApps.qml"
+DRAG_APPS = ROOT / "modules/imi/dock/DragApps.qml"
 CATALOGUE_ROW = ROOT / "modules/common/widgets/CatalogueRow.qml"
 
 # Everything that takes part in the mode. Listed rather than globbed so a new
@@ -652,7 +652,7 @@ def test_every_pixel_that_is_not_chrome_falls_through_to_the_desktop():
     mask = re.search(r"mask: Region \{(.*?)\n    \}", text, re.S)
     assert mask, "the chrome surface publishes no input mask at all"
     items = re.findall(r"item: (chrome\.\w+)", mask.group(1))
-    assert items == ["chrome.toolbarItem", "chrome.tabBarItem", "chrome.drawerItem"], \
+    assert items == ["chrome.toolbarItem", "chrome.drawerItem"], \
         f"the mask is not exactly the three chrome rects: {items}"
     # ...and nothing else on the surface may take a press. A screen-sized
     # MouseArea would be inside the mask's own hole and eat nothing, which is
@@ -720,7 +720,8 @@ def test_the_chrome_surface_leaves_the_keyboard_to_the_desktop():
     # edit_mode.js's ladder. A chrome surface on Overlay taking OnDemand focus
     # sits in front of it and swallows the key - and the mode's own exit is
     # what stops working.
-    assert re.search(r"WlrLayershell\.keyboardFocus:\s*WlrKeyboardFocus\.None",
+    assert re.search(r"WlrLayershell\.keyboardFocus:\s*chrome\.searchTakesKeys\s*\n\s*"
+                     r"\? WlrKeyboardFocus\.OnDemand : WlrKeyboardFocus\.None",
                      read(CHROME_SURFACE)), \
         "the chrome surface must not take keyboard focus"
 
@@ -850,22 +851,17 @@ def test_the_drawer_is_the_modules_rect_and_the_drop_is_the_modules_arithmetic()
 
 
 def test_the_mode_has_one_way_in_and_the_toolbar_owns_the_way_out():
-    # Two controls that disagree about what they do is the failure; two that
-    # agree is merely redundant. This picks the first: the desktop menu enters,
-    # the toolbar's Done leaves, and neither is the other's second opinion.
+    # The desktop menu's one row is the way in and, flipped while the mode is
+    # on, a way out beside the toolbar's Done (maintainer, 2026-09-03: "Exit
+    # editing"). One row with two states, never two rows that could disagree.
     menu = read(DESKTOP_MENU)
     writes = re.findall(r"GlobalStates\.editMode = ([^\n]+)", menu)
-    assert writes == ["true"], \
-        f"the desktop menu is no longer only the way in: {writes}"
-    # `rowVisible`, not `visible`. A GroupedList row hidden the second way keeps
-    # its plate - a row-height band of the group's own background with nothing
-    # in it, which is what this menu grew between Widgets and DropShelf for the
-    # whole life of the mode. GroupedList.qml says why the widget cannot simply
-    # mirror `visible`; this pins the call site that reported it.
-    assert re.search(r"property bool rowVisible:\s*!GlobalStates\.editMode", menu), \
-        "the Edit layout row must not sit in the menu doing nothing while the mode is on"
-    assert not re.search(r"^\s*visible:\s*!GlobalStates\.editMode", menu, re.M), \
-        "a GroupedList row hidden with `visible` leaves an empty plate behind"
+    assert writes == ["!GlobalStates.editMode"], \
+        f"the desktop menu's row must toggle the mode, once: {writes}"
+    assert re.search(r'text:\s*GlobalStates\.editMode \? Translation\.tr\("Exit editing"\) : Translation\.tr\("Edit layout"\)', menu), \
+        "the row must read Exit editing while the mode is on and Edit layout otherwise"
+    assert not re.search(r"rowVisible:\s*!GlobalStates\.editMode", menu), \
+        "the row hides while the mode is on; it is meant to read Exit editing then"
     assert re.search(r"GlobalStates\.editMode = false", read(CHROME_SURFACE)), \
         "the toolbar's Done is the mode's exit"
     # Leaving takes the gesture and the selection with it: Done means stop, and
@@ -955,11 +951,12 @@ def test_the_chrome_is_placed_between_the_card_and_the_usable_area():
     content = code(CHROME_CONTENT)
     assert re.search(r"property rect area:", content), \
         "the chrome content takes the usable area as well as the card"
-    for term in ("root.area.y", "root.area.height"):
-        assert term in content, f"the chrome does not place itself off {term}"
+    # Only the top band since the tab bar moved into the toolbar: the one piece
+    # is placed off the usable area's top edge, and nothing off its bottom.
+    assert "root.area.y" in content, "the chrome does not place itself off root.area.y"
     # The screen's own edges are exactly what it may no longer measure from.
     assert not re.search(r"\(root\.height\s*-\s*root\.card", content), \
-        "the tab bar is placed against the screen's bottom edge, not the usable area's"
+        "a piece is placed against the screen's bottom edge"
     assert "EditMode.areaRect(" in code(CHROME_SURFACE), \
         "the usable area must come from the module, not be rebuilt on the surface"
 

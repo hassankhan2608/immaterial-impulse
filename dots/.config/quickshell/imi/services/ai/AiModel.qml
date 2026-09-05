@@ -17,6 +17,9 @@ import QtQuick;
 
 QtObject {
     property string name
+    // Which custom provider fetched this model - the parser stamps it so
+    // browse rows and headers can say "CLIP: ..." without re-deriving.
+    property string providerName: ""
     property string icon
     property string description
     property string homepage
@@ -29,4 +32,16 @@ QtObject {
     property string api_format: "openai"
     property var tools
     property var extraParams: ({})
+    // Capability metadata (spec 2026-08-31): `thinking` is what the
+    // reasoning ask reads; `vision` and `contextWindow` are stored and
+    // shown (browse rows) but not enforced yet - provider-fetched models
+    // cannot declare them, and a false "can't see images" is worse than
+    // no gate. `tools` above is the request schema list, not a capability.
+    property bool thinking: false
+    // An image GENERATOR: served on /images/generations|edits, never
+    // /chat/completions - the parser marks these by id, and the requester
+    // routes them to their own endpoint and response shape.
+    property bool imageGeneration: false
+    property bool vision: false
+    property int contextWindow: 0
 }

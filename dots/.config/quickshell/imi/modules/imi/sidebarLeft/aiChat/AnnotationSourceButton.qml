@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 
-import qs
 import qs.modules.common
 import qs.modules.common.widgets
 
@@ -11,6 +10,10 @@ RippleButton {
     property string url
 
     property real faviconSize: 20
+    // Where the site's icon is on disk and whether it has arrived - both from
+    // the message, which asks the Favicons service; this chip cannot fetch.
+    property string faviconPath: ""
+    property bool faviconReady: false
     implicitHeight: 30
     leftPadding: (implicitHeight - faviconSize) / 2
     rightPadding: Appearance.spacing.space150
@@ -20,12 +23,9 @@ RippleButton {
     colRipple: Appearance.colors.colSurfaceContainerHighestActive
 
     PointingHandInteraction {}
-    onClicked: {
-        if (url) {
-            Qt.openUrlExternally(url)
-            GlobalStates.sidebarLeftOpen = false
-        }
-    }
+    // Opening the link and closing the sidebar are the chat's decisions.
+    signal followed(string url)
+    onClicked: if (root.url) root.followed(root.url)
 
     contentItem: Item {
         anchors.centerIn: parent
@@ -36,9 +36,9 @@ RippleButton {
             anchors.fill: parent
             spacing: Appearance.spacing.space100
             Favicon {
-                url: root.url
+                iconPath: root.faviconPath
+                ready: root.faviconReady
                 size: root.faviconSize
-                displayText: root.displayText
             }
             StyledText {
                 id: text

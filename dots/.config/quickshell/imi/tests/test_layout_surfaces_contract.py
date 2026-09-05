@@ -71,9 +71,12 @@ def test_every_undoable_position_write_captures_its_surface_at_push_time():
     drag = re.search(r"const surface = PluginState\.currentSurface;(.*?)PluginState\.setPosition\(id, screenName,",
                      widget, re.S)
     assert drag, "PluginWidget's drag commit must capture `surface` before pushing its undo"
-    assert re.search(r"editUndoPush\(\(\) => PluginState\.setPosition\(id, screen, before, surface\)\)",
+    # The entry is edit_mode.js's swap now (undo AND redo from one closure);
+    # its write lambda is where the captured surface must appear.
+    assert re.search(r"editUndoPush\(EditMode\.swap\(\s*\(\) => PluginState\.position\(id, screen, surface\),"
+                     r"\s*\(value\) => PluginState\.setPosition\(id, screen, value, surface\),\s*before\)\)",
                      drag.group(1)), \
-        ("PluginWidget's undo closure must pass the CAPTURED surface - resolving it at "
+        ("PluginWidget's undo entry must read and write the CAPTURED surface - resolving it at "
          "pop time writes a lock position into the desktop store from the other tab")
     assert re.search(r"placementStrategy: rootWidget\.placementStrategy\s*\}, surface\);", widget), \
         "PluginWidget's forward write must land on the captured surface too"
@@ -83,8 +86,9 @@ def test_every_undoable_position_write_captures_its_surface_at_push_time():
     drop = re.search(r"const surface = PluginState\.currentSurface;(.*?)root\.enablePlugin\(manifest\.id\);",
                      chrome, re.S)
     assert drop, "the drawer drop must capture `surface` before pushing its undo"
-    assert "PluginState.setPosition(id, screen, beforePosition, surface)" in drop.group(1), \
-        "the drop's undo closure must pass the captured surface"
+    assert "PluginState.setPosition(id, screen, value.position, surface)" in drop.group(1) \
+        and "position: beforePosition" in drop.group(1), \
+        "the drop's undo entry must write the captured position back on the captured surface"
     assert re.search(r"placementStrategy: \"free\" \}, surface\);", drop.group(1)), \
         "the drop's forward write must land on the captured surface"
     assert "PluginState.rawPosition(id, screen, surface)" in drop.group(1), \
@@ -97,6 +101,51 @@ def test_every_undoable_position_write_captures_its_surface_at_push_time():
     reset = re.search(r"function resetLockLayout\(\)(.*?)\n    \}", chrome, re.S)
     assert reset and "GlobalStates.editUndoPush" in reset.group(1), \
         "the re-link must be undoable"
+
+
+def test_every_widget_option_read_and_write_names_its_surface():
+    # A widget's own settings fork per surface too (2026-09-03: the resource
+    # monitor rotated for the lock screen was rotated on the desktop). The
+    # store's accessors take a trailing surface with the position API's
+    # default, so a widget's own knobs write the surface on screen; Settings
+    # names the desktop on EVERY call - its rows are desktop-only by
+    # construction, and the surface is Edit Mode's tab, not a card switch.
+    state = code(STATE)
+    for fn in ("option", "setOption"):
+        sig = re.search(rf"function {fn}\(([^)]*)\)", state)
+        assert sig and "surface" in sig.group(1), \
+            f"PluginState.{fn} must take an explicit surface parameter"
+    assert "Surfaces.rawOption(root.state, surface ?? root.currentSurface" in state, \
+        "option() must read through layout_surfaces.rawOption on the default surface"
+    assert "Surfaces.withOption(root.state, surface ?? root.currentSurface" in state, \
+        "setOption() must write through layout_surfaces.withOption on the default surface"
+    assert re.search(r"lockOptions: parsed\.lockOptions", state), \
+        "loadText must carry lockOptions, or a restart forgets every lock setting"
+
+    options = code(ROOT / "modules/common/plugins/PluginOptions.qml")
+    assert 'readonly property string surface: PluginState.desktopSurface' in options, \
+        ("PluginOptions edits the DESKTOP by construction - the surface is Edit Mode's tab, not "
+         "a per-card selector (the maintainer's rule, 2026-09-03)")
+    assert '"Lock screen"' not in options and "lockOptionsForked" not in options, \
+        "no surface switch and no lock-side affordance on the widget's card"
+    calls = re.findall(r"PluginState\.(?:option|setOption)\([^;]*?\)", options, re.S)
+    assert len(calls) >= 15, f"expected the card's reads and writes, found {len(calls)}"
+    naked = [call for call in calls if "root.surface" not in call]
+    assert naked == [], \
+        "every PluginOptions read and write must pass root.surface:\n" + "\n".join(naked)
+
+    presets = read(ROOT / "scripts/presets.sh")
+    assert presets.count("lockOptions: (.lockOptions // {})") == 3, \
+        "presets.sh must capture lockOptions in every state shape it builds"
+    assert 'if ($preset | has("lockOptions"))' in presets, \
+        "presets.sh must apply lockOptions under the has() rule lockPositions follows"
+    assert ".lockOptions[$id] = $current.lockOptions[$id]" in presets, \
+        "the presetPersist carve-out must shield a plugin's lock settings too"
+
+    widget = code(WIDGET)
+    for key in ("positionLocked", "clickThrough"):
+        assert re.search(rf'PluginState\.option\(manifest\.id, "{key}", [^)]*\)\n', widget), \
+            f"PluginWidget reads {key} with no surface - it is a shared key and must stay so"
 
 
 def test_every_span_read_and_write_goes_through_the_surface_api():
@@ -119,11 +168,12 @@ def test_every_span_read_and_write_goes_through_the_surface_api():
     grip = re.search(r"const surface = PluginState\.currentSurface;\s*const next = GridSizes\.formatSize\(size\);(.*?)PluginState\.setGridSize\(id, screen, next, surface\);",
                      widget, re.S)
     assert grip, "PluginWidget's span commit must capture the surface and write through setGridSize on it"
-    assert "PluginState.setGridSize(id, screen, before, surface)" in grip.group(1), \
-        "the span commit's undo must pass the captured surface"
+    assert "PluginState.setGridSize(id, screen, value, surface)" in grip.group(1) \
+        and re.search(r"\bbefore\)\);", grip.group(1)), \
+        "the span commit's undo entry must write the captured span back on the captured surface"
     menu = code(ROOT / "modules/imi/editMode/EditWidgetMenuContent.qml")
-    assert "PluginState.setGridSize(id, screen, before, surface)" in menu, \
-        "the Size stepper's undo must pass the captured surface"
+    assert "PluginState.setGridSize(id, screen, value, surface)" in menu, \
+        "the Size stepper's undo entry must write on the captured surface"
     assert 'property string screenName' in menu, \
         "EditWidgetMenuContent must be told its screen - a span is per screen once forked"
     state = code(STATE)
@@ -133,7 +183,8 @@ def test_every_span_read_and_write_goes_through_the_surface_api():
     # position-only re-write that would drop every forked span.
     chrome = code(CHROME_SURFACE)
     reset = re.search(r"function resetLockLayout\(\)(.*?)\n    \}", chrome, re.S)
-    assert reset and "PluginState.restoreLockRecords(screen, forked)" in reset.group(1), \
+    assert reset and "PluginState.restoreLockRecords(screen, value)" in reset.group(1) \
+        and re.search(r"\bforked\)\);", reset.group(1)), \
         "the re-link's undo must restore the whole lock records, or forked spans are lost on undo"
 
 

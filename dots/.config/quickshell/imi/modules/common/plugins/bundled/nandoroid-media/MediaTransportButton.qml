@@ -38,7 +38,7 @@ Item {
 
     // "prev" | "play" | "next"
     required property string role
-    // "3x2" | "2x2" | "2x1"
+    // "3x2" | "2x2" | "2x1" | "1x1"
     required property string span
 
     // 2x1 play only: the seek ring's fill.
@@ -127,8 +127,12 @@ Item {
             // had. `scale` is centred by default and cannot miss.
             scale: root.motion.scale
 
+            // 1x1: NO body at all - pure icon over the scrim (the
+            // half-pill experiment ended 2026-08-31; the shape war with
+            // the cookie's scallops was unwinnable).
             Expressive.MaterialShape {
                 id: reelShape
+                visible: root.span !== "1x1"
                 anchors.fill: parent
                 shape: root.span === "3x2"
                     ? Expressive.MaterialShape.Shape.Cookie12Sided
@@ -157,12 +161,18 @@ Item {
                 text: root.role === "prev" ? "skip_previous" : "skip_next"
                 iconSize: root.span === "3x2" ? 28 * Appearance.effectiveScale
                     : root.span === "2x2" ? parent.height * 0.46
+                    : root.span === "1x1" ? 20 * Appearance.effectiveScale
                     : 26 * Appearance.effectiveScale
-                fill: 0
+                // Filled at 1x1: the bare glyph sits on busy artwork with no
+                // body behind it, so a solid icon reads where an outline is lost.
+                fill: root.span === "1x1" ? 1 : 0
+                // Bare over the artwork at 1x1, the glyph borrows the
+                // cookie body's own light tone so the trio stays one family.
                 color: root.hoveredNow
                     ? (root.span === "3x2" && Appearance.m3colors.darkmode
                         ? Appearance.colors.colTertiaryContainer
                         : Appearance.colors.colPrimary)
+                    : root.span === "1x1" ? root.controlColor
                     : root.controlIconColor
                 Behavior on color { animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this) }
             }
@@ -200,6 +210,14 @@ Item {
             Canvas {
                 id: body
                 anchors.fill: parent
+                // On an FBO, cooperatively: this canvas repaints on every
+                // cava frame and every ring-wave frame while a track plays,
+                // and on an Image target that was a software raster on the
+                // GUI thread each time - gdb-sampled as QRasterPaintEngine
+                // on the shell's main thread. The paint runs on the render
+                // thread now; the main thread only records the commands.
+                renderTarget: Canvas.FramebufferObject
+                renderStrategy: Canvas.Cooperative
                 // ONE painter owns the body at every span - handing the face
                 // to a second canvas at any settle has now blanked it twice
                 // (the visualizer crossfade, then a seeker-fill handoff), so
@@ -222,7 +240,11 @@ Item {
                 // ---- the breath: the lobe envelope, tuned in visualizer_bands.js ----
                 readonly property bool visualizing: root.span === "2x2"
                     && Math.abs(morphT - 1) < 0.01 && MprisController.isPlaying && root.visible
-                property list<real> levels: []
+                // A JS array, not `list<real>`: a QML sequence indexed from
+                // JS turns every index into a property-key string first
+                // (gdb-sampled as numberToString under toPropertyKey), twelve
+                // times per 16ms tick.
+                property var levels: []
                 property bool settlingLevels: false
                 readonly property var cavaClaim: CavaRef { active: body.visualizing }
                 function stepLevels() {
@@ -270,7 +292,36 @@ Item {
                 onWidthChanged: requestPaint()
                 onHeightChanged: requestPaint()
                 onAvailableChanged: if (available) requestPaint()
-
+                property var ringX: null
+                property var ringY: null
+                property var ringNX: null
+                property var ringNY: null
+                property string ringKey: ""
+                function rebuildRing(N, w, h, dia) {
+                    const key = `${w}|${h}|${dia}`;
+                    if (key === body.ringKey && body.ringX) return;
+                    body.ringKey = key;
+                    const ring = MediaShapes.ringMeasuredAt(1, PathLength.measureCubics);
+                    const cubics = ring.cubics, measure = ring.measure;
+                    const bx = new Float64Array(N + 1), by = new Float64Array(N + 1);
+                    const nx = new Float64Array(N + 1), ny = new Float64Array(N + 1);
+                    for (let i = 0; i <= N; i++) {
+                        const target = (i / N) * measure.total;
+                        let index = 0;
+                        while (index < cubics.length - 1 && measure.lengths[index + 1] < target) index++;
+                        const span = measure.lengths[index + 1] - measure.lengths[index];
+                        const tt = span > 0 ? (target - measure.lengths[index]) / span : 0;
+                        const point = PathLength.pointOnCubic(cubics[index], tt);
+                        bx[i] = w / 2 + point.x * dia; by[i] = h / 2 + point.y * dia;
+                    }
+                    for (let i = 0; i <= N; i++) {
+                        const b = Math.max(0, i - 1), a = Math.min(N, i + 1);
+                        let x = -(by[a] - by[b]), y = bx[a] - bx[b];
+                        const len = Math.hypot(x, y) || 1;
+                        nx[i] = x / len; ny[i] = y / len;
+                    }
+                    body.ringX = bx; body.ringY = by; body.ringNX = nx; body.ringNY = ny;
+                }
                 onPaint: {
                     const ctx = getContext("2d");
                     ctx.clearRect(0, 0, width, height);
@@ -283,36 +334,22 @@ Item {
                         // Same cache the seeker uses - this canvas was
                         // rebuilding and re-measuring the identical constant
                         // shape (ringAt(1)) once per frame beside it.
-                        const ring = MediaShapes.ringMeasuredAt(1, PathLength.measureCubics);
-                        const cubics = ring.cubics;
-                        const measure = ring.measure;
                         const amp = stroke * 0.6 * root.ringWaveLevel;
                         // VERBATIM the seeker's construction - arc-length
                         // samples, normals from RAW neighbours, sine along the
                         // normal - so the filled contour and the stroked ring
                         // are the same curve at the same phase, crest for
-                        // crest. The first version improvised a radial-scale
-                        // wobble and the two visibly disagreed.
-                        const base = [];
-                        for (let i = 0; i <= N; i++) {
-                            const u = i / N;
-                            const target = u * measure.total;
-                            let index = 0;
-                            while (index < cubics.length - 1 && measure.lengths[index + 1] < target) index++;
-                            const span = measure.lengths[index + 1] - measure.lengths[index];
-                            const t = span > 0 ? (target - measure.lengths[index]) / span : 0;
-                            const point = PathLength.pointOnCubic(cubics[index], t);
-                            base.push({ x: width / 2 + point.x * dia, y: height / 2 + point.y * dia });
-                        }
+                        // crest. The samples and normals are cached (see
+                        // rebuildRing): they depend on the size, not on the
+                        // phase, and rebuilding 161 point objects a frame kept
+                        // the garbage collector marking the whole shell.
+                        body.rebuildRing(N, width, height, dia);
+                        const bx = body.ringX, by = body.ringY, nx = body.ringNX, ny = body.ringNY;
+                        const k = 12 * 2 * Math.PI / N, phase = root.ringPhase;
                         ctx.beginPath();
                         for (let i = 0; i <= N; i++) {
-                            const before = base[Math.max(0, i - 1)];
-                            const after = base[Math.min(N, i + 1)];
-                            let nx = -(after.y - before.y), ny = after.x - before.x;
-                            const len = Math.hypot(nx, ny) || 1;
-                            nx /= len; ny /= len;
-                            const w = amp * Math.sin(12 * 2 * Math.PI * (i / N) + root.ringPhase);
-                            const x = base[i].x + nx * w, y = base[i].y + ny * w;
+                            const w = amp * Math.sin(k * i + phase);
+                            const x = bx[i] + nx[i] * w, y = by[i] + ny[i] * w;
                             if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
                         }
                         ctx.closePath();
@@ -399,6 +436,10 @@ Item {
                         requestPaint();
                     }
                     Component.onCompleted: if (artSource !== "") loadImage(artSource)
+                    Connections {
+                        target: MediaArtTrim
+                        function onClipsChanged() { artCanvas.requestPaint() }
+                    }
                     onImageLoaded: {
                         artClip.artLoaded = artSource !== "" && isImageLoaded(artSource);
                         requestPaint();
@@ -411,7 +452,12 @@ Item {
                         ctx.beginPath();
                         ctx.arc(width / 2, height / 2, Math.min(width, height) / 2, 0, Math.PI * 2);
                         ctx.clip();
-                        ctx.drawImage(artCanvas.artSource, 0, 0, width, height);
+                        const artTrim = MediaArtTrim.clipFor(root.artUrl);
+                        if (artTrim !== null)
+                            ctx.drawImage(artCanvas.artSource, artTrim.x, artTrim.y,
+                                artTrim.width, artTrim.height, 0, 0, width, height);
+                        else
+                            ctx.drawImage(artCanvas.artSource, 0, 0, width, height);
                         ctx.restore();
                     }
                 }
@@ -430,8 +476,10 @@ Item {
                 anchors.centerIn: parent
                 visible: !artClip.visible || !artClip.artLoaded || root.hoveredNow
                 text: MprisController.isPlaying ? "pause" : "play_arrow"
-                iconSize: (root.span === "3x2" ? 40 : root.span === "2x2" ? 34 : 30) * Appearance.effectiveScale
-                fill: 0
+                iconSize: (root.span === "3x2" ? 40 : root.span === "2x2" ? 34
+                    : root.span === "1x1" ? 22 : 30) * Appearance.effectiveScale
+                // Filled at 1x1 to read over bare artwork (see prev/next above).
+                fill: root.span === "1x1" ? 1 : 0
                 color: hitArea.pressed
                     ? Functions.ColorUtils.applyAlpha(Appearance.colors.colOnPrimary, 0.7)
                     : (artClip.visible && artClip.artLoaded ? Appearance.colors.colPrimary : Appearance.colors.colOnPrimary)

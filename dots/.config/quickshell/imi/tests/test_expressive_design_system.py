@@ -13,12 +13,14 @@ PLUGIN_ROOT = ROOT / "modules/common/plugins/bundled"
 PLUGIN_DIRS = (
     "nandoroid-media",
     "nandoroid-system-monitor",
+    "nandoroid-system-monitor-gpu",
     "nandoroid-weather",
     "nandoroid-currency",
 )
 EXPECTED_OPTIONS = {
-    "nandoroid-media": {"showLyrics", "useRomaji"},
+    "nandoroid-media": {"showLyrics"},
     "nandoroid-system-monitor": {"vertical", "showBattery"},
+    "nandoroid-system-monitor-gpu": {"vertical"},
     # Both widgets declared a `sizeMode` choice option until the host's
     # `__gridSize` took the concept over; their spans are `grid.sizes` now.
     "nandoroid-weather": set(),
@@ -27,6 +29,7 @@ EXPECTED_OPTIONS = {
 EXPECTED_ENTRY_TYPES = {
     "nandoroid-media": "Expressive.DesktopMediaWidget",
     "nandoroid-system-monitor": "Expressive.DesktopSystemMonitorWidget",
+    "nandoroid-system-monitor-gpu": "Expressive.DesktopSystemMonitorWidget",
     "nandoroid-weather": "Expressive.DesktopWeatherWidget",
     "nandoroid-currency": "Expressive.DesktopCurrencyWidget",
 }
@@ -44,7 +47,8 @@ SIZED_BY_THE_HOST_GRID = {"nandoroid-media", "nandoroid-weather", "nandoroid-cur
 # host's drag. `calendar` is not in PLUGIN_DIRS above - it is a first-party
 # bundled widget with no upstream to attribute - but its card lifts like the
 # rest of them.
-TOLD_ABOUT_THE_DRAG = SIZED_BY_THE_HOST_GRID | {"nandoroid-system-monitor", "calendar"}
+TOLD_ABOUT_THE_DRAG = SIZED_BY_THE_HOST_GRID | {
+    "nandoroid-system-monitor", "nandoroid-system-monitor-gpu", "calendar"}
 
 
 def entry_file(directory):
@@ -265,8 +269,12 @@ class ExpressiveDesignSystemTest(unittest.TestCase):
                     f"the span, so the span destroys and rebuilds the content:"
                     f"\n{binding.strip()}")
 
-        self.assertEqual(sorted(swept), ["calendar", "world-clock"],
-                         "the sweep stopped seeing a widget that owns its span")
+        # calendar and world-clock owned their spans until both adopted
+        # `grid.sizes`; the sweep stays armed for the next widget that
+        # declares a sizeMode of its own.
+        self.assertEqual(sorted(swept), [],
+                         "a widget owns its span again - its dispatches are "
+                         "held to the one-tree rule above")
 
     def test_every_card_is_told_when_its_widget_is_handled(self):
         """A card that never receives `dragging` silently never lifts.
@@ -334,21 +342,23 @@ class ExpressiveDesignSystemTest(unittest.TestCase):
         self.assertNotIn("rounding?.verylarge", widget,
                          "the card owns the rounding")
 
-        # The wrapper contract, from the other side. calendar's two handles
-        # choose its size, so its manifest deliberately declares no `grid`:
-        # a span is a pixel size the host assigns on every load and would
-        # overwrite whichever size the handles last chose. A widget sized by
-        # the host reads `hostGridSize`; this one must not.
-        self.assertNotIn("grid", manifest)
-        self.assertNotIn("hostGridSize", widget)
-        # The box used to be read back off the card (`implicitWidth:
-        # card.implicitWidth`), which was right while the card held a per-span
-        # Loader and was the only thing that knew how big a mode was. It is the
-        # wrong direction for one tree: the span decides the box, the box
-        # animates towards it, and the card fills whatever the box currently is
-        # - so the card cannot also be the thing that reports it.
-        self.assertIn("implicitWidth: root.widgetWidth", widget)
-        self.assertIn("implicitHeight: root.widgetHeight", widget)
+        # The wrapper contract, from the other side. calendar's size is the
+        # HOST's now: the manifest offers four spans, the widget reads the
+        # resolved one back as `hostGridSize`, and its own two corner handles
+        # went with the option they wrote (the grip, the Size row and the
+        # edit stepper are the three faces of `__gridSize`).
+        self.assertIn("grid", manifest)
+        self.assertEqual(
+            [(size["cols"], size["rows"]) for size in manifest["grid"]["sizes"]],
+            [(1, 1), (2, 1), (2, 2), (3, 2)])
+        self.assertIn("hostGridSize", widget)
+        self.assertIn("handlesSpanTransition: true", widget,
+                      "every element travels or fades on its own Behaviors; "
+                      "the host's midpoint dissolve would sit on top of that")
+        # The implicit size is the settled span - the probe fallback; the
+        # host sizes the node to its own animating box.
+        self.assertIn("implicitWidth: root.spanW", widget)
+        self.assertIn("implicitHeight: root.spanH", widget)
 
     def test_the_five_folded_widgets_are_told_when_they_are_handled(self):
         """The same chain, for the widgets that were never cards.

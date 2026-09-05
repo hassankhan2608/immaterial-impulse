@@ -28,7 +28,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTENT = ROOT / "modules" / "imi" / "sidebarLeft" / "SidebarLeftContent.qml"
-BAR_BUTTON = ROOT / "modules" / "imi" / "bar" / "LeftSidebarButton.qml"
 GLOBAL_STATES = ROOT / "GlobalStates.qml"
 
 # Every tab, in order: the gate it is drawn behind, the label the tab bar
@@ -144,11 +143,19 @@ def test_a_tab_request_is_resolved_against_the_ids_and_then_cleared():
     )
 
 
+BAR_BUTTON = ROOT / "modules" / "imi" / "bar" / "LeftSidebarButton.qml"
+
+
 def test_the_bar_button_is_hidden_only_when_every_tab_is_off():
     """A user who has switched everything off but one tab must still have a
     way into the sidebar from the bar. The button already omits
     `mediaEnabled` - a known hole, kept rather than widened here - so this
-    pins the tabs the button does claim to cover, Phone included."""
+    pins the tabs the button does claim to cover, Phone included.
+
+    Deleted once (e2f25db06) with the button, on the claim that nothing
+    consumed it: the bar's layout names widgets by id, and `leftSidebarButton`
+    was the first entry in the maintainer's own. The button is back, and
+    test_bar_widget_parity.py now holds every palette id to a file."""
     text = BAR_BUTTON.read_text()
     visible = re.search(r"^\s*visible: (.+)$", text, re.M)
     assert visible, "the bar button declares no visibility"
@@ -158,7 +165,6 @@ def test_the_bar_button_is_hidden_only_when_every_tab_is_off():
         assert re.search(rf"^\s*property bool {flag}:", text, re.M), (
             f"{flag} is not declared on the bar button"
         )
-
 
 if __name__ == "__main__":
     import sys

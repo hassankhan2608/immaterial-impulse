@@ -14,6 +14,15 @@ ColumnLayout {
     required property var manifest
     spacing: Appearance.spacing.space25
 
+    // These rows edit the DESKTOP, by construction - the same rule the size
+    // row has always had. The surface is a mode the user is already in (Edit
+    // Mode's Lockscreen tab, or the real lock), not a per-widget property:
+    // a widget's own knobs write the surface on screen through PluginState's
+    // default, and a second selector on every card would duplicate the tab.
+    // Named on every read and write below all the same, so a card open while
+    // the lock look is showing still edits the desktop.
+    readonly property string surface: PluginState.desktopSurface
+
     // The widget's own options come first, because they are what the user
     // opened this page for. The host's rows used to be concatenated in FRONT of
     // them - four identical switches before a widget's two or three real
@@ -32,7 +41,64 @@ ColumnLayout {
         return defaults;
     }
     function readOption(key) {
-        return PluginState.option(root.manifest.id, key, root.optionDefaults[key]);
+        return PluginState.option(root.manifest.id, key, root.optionDefaults[key], root.surface, root.surface);
+    }
+
+    // Options declared with the same `group`, consecutively, render under one
+    // subsection heading that names the group, so the manifest does not have
+    // to spell it into every label ("Cookie: sides", "Cookie: hour marks" ...
+    // eleven rows deep - the maintainer's complaint). A run without a group
+    // renders as plain rows. A heading shows only while one of its rows does,
+    // so a digital clock carries no "Cookie clock" heading over nothing.
+    readonly property var optionRuns: {
+        const runs = [];
+        let current = null;
+        for (const option of root.widgetOptions) {
+            const group = option.group || "";
+            if (current === null || current.group !== group) {
+                current = { group: group, options: [] };
+                runs.push(current);
+            }
+            current.options.push(option);
+        }
+        return runs;
+    }
+    function visibleOptions(run) {
+        const shown = [];
+        for (const option of run.options)
+            if (OptionVisibility.visible(option, key => root.readOption(key)))
+                shown.push(option);
+        return shown;
+    }
+    function runVisible(run) {
+        return root.visibleOptions(run).length > 0;
+    }
+    // How a group's rows pack. Consecutive booleans go two to a line - the
+    // Bar page's switch pairs - since a switch is narrow and five of them
+    // one under the other were most of the cookie clock's height; anything
+    // else is a line of its own, in manifest order. (Forcing every choice row
+    // to stack was tried: five labels sitting top-left over their chips read
+    // as uncentred; a row stacks only when its chips cannot fit beside it.)
+    function packLines(options) {
+        const lines = [];
+        for (let index = 0; index < options.length; index++) {
+            const option = options[index];
+            const next = options[index + 1];
+            if (option.type === "boolean" && next && next.type === "boolean") {
+                lines.push({ kind: "pair", options: [option, next] });
+                index++;
+            } else {
+                lines.push({ kind: "single", options: [option] });
+            }
+        }
+        return lines;
+    }
+    // The heading's glyph: the first `groupIcon` any option of the run
+    // declares (the clock reuses its style chips' icons), else the generic one.
+    function runIcon(run) {
+        for (const option of run.options)
+            if (option.groupIcon) return option.groupIcon;
+        return "tune";
     }
 
     // Host blur is a desktop-widget mechanism (PluginWidget frost); bar/
@@ -108,8 +174,77 @@ ColumnLayout {
     }] : []
 
     Repeater {
-        model: root.widgetOptions
-        delegate: optionRow
+        model: root.optionRuns
+        delegate: Loader {
+            id: runLoader
+            required property var modelData
+            Layout.fillWidth: true
+            readonly property bool shown: root.runVisible(modelData)
+            visible: shown
+            Layout.preferredHeight: shown ? implicitHeight : 0
+            sourceComponent: modelData.group === "" ? plainRun : groupedRun
+
+            // An ungrouped run is plain rows, as the card always drew them.
+            Component {
+                id: plainRun
+                ColumnLayout {
+                    spacing: root.spacing
+                    Repeater {
+                        model: runLoader.modelData.options
+                        delegate: optionRow
+                    }
+                }
+            }
+            // A group is a header with a hairline above it - the way "Widget
+            // behaviour" below separates itself - and its rows packed under
+            // it: consecutive switches two to a line, everything else a full
+            // row - a choice row keeps its label centred beside its chips and
+            // stacks only when the chips cannot fit beside it. Not a card and not plates: surfaces
+            // around rows that are already controls read as one more list,
+            // and their padding cost the height the packing exists to save.
+            Component {
+                id: groupedRun
+                ColumnLayout {
+                    spacing: root.spacing
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Appearance.spacing.space100
+                        implicitHeight: 1
+                        color: Appearance.colors.colOutlineVariant
+                    }
+                    ContentSubsection {
+                        icon: root.runIcon(runLoader.modelData)
+                        title: runLoader.modelData.group
+                        Repeater {
+                            model: root.packLines(root.visibleOptions(runLoader.modelData))
+                            delegate: Loader {
+                                id: lineLoader
+                                required property var modelData
+                                Layout.fillWidth: true
+                                sourceComponent: modelData.kind === "pair" ? pairLine : singleLine
+                                Component {
+                                    id: pairLine
+                                    ConfigRow {
+                                        uniform: true
+                                        // A gutter between the halves: the rows
+                                        // here carry no side padding of their own,
+                                        // so at ConfigRow's 4px the first switch's
+                                        // track touched the second row's icon.
+                                        spacing: Appearance.spacing.space300
+                                        OptionRowItem { optionData: lineLoader.modelData.options[0] }
+                                        OptionRowItem { optionData: lineLoader.modelData.options[1] }
+                                    }
+                                }
+                                Component {
+                                    id: singleLine
+                                    OptionRowItem { optionData: lineLoader.modelData.options[0] }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Every host row reads as one group rather than as more of the widget's own
@@ -145,7 +280,7 @@ ColumnLayout {
                 on.push(behaviourSection.presetPersistLabel);
             for (let index = 0; index < root.behaviourRows.length; ++index) {
                 const behaviourRow = root.behaviourRows[index];
-                if (PluginState.option(root.manifest.id, behaviourRow.key, behaviourRow.default))
+                if (PluginState.option(root.manifest.id, behaviourRow.key, behaviourRow.default, root.surface))
                     on.push(behaviourRow.label);
             }
             return on.join("  ·  ");
@@ -175,9 +310,9 @@ ColumnLayout {
                     required property var modelData
                     label: modelData.label
                     buttonIcon: modelData.icon
-                    toggled: PluginState.option(root.manifest.id, modelData.key, modelData.default)
+                    toggled: PluginState.option(root.manifest.id, modelData.key, modelData.default, root.surface)
                     onClicked: PluginState.setOption(root.manifest.id, modelData.key,
-                        !PluginState.option(root.manifest.id, modelData.key, modelData.default))
+                        !PluginState.option(root.manifest.id, modelData.key, modelData.default, root.surface), root.surface)
                 }
             }
         }
@@ -235,133 +370,148 @@ ColumnLayout {
         }
     }
 
-    // One delegate for both groups: they differ in where they come from and
-    // where they are drawn, never in how a row of a given type behaves.
+    // One row item for every group of rows: they differ in where they come
+    // from and where they are drawn, never in how a row of a given type
+    // behaves. A Repeater hands it its option as `modelData` through the
+    // `optionRow` delegate; a GroupedList plate hands the same through its
+    // own rowDelegate after load - which is why the item itself has no
+    // required property.
     Component {
         id: optionRow
-
-        Loader {
-            id: optionLoader
+        OptionRowItem {
             required property var modelData
-            Layout.fillWidth: true
-            property var optionData: modelData
-            // `enabledWhen` and `visibleWhen`, one evaluator - see
-            // option_visibility.js for what each spells.
-            visible: OptionVisibility.visible(optionData, key => root.readOption(key))
-            enabled: visible
-            Layout.preferredHeight: visible ? implicitHeight : 0
+            optionData: modelData
+        }
+    }
 
-            sourceComponent: {
-                switch (optionData.type) {
-                case "boolean": return booleanOption;
-                case "choice": return choiceOption;
-                case "shape": return shapeOption;
-                case "color": return colorOption;
-                case "number": return numberOption;
-                case "text": return textOption;
-                default: return null;
+    component OptionRowItem: Loader {
+        id: optionLoader
+        Layout.fillWidth: true
+        property var optionData: null
+        // `enabledWhen` and `visibleWhen`, one evaluator - see
+        // option_visibility.js for what each spells.
+        visible: OptionVisibility.visible(optionData, key => root.readOption(key))
+        enabled: visible
+        Layout.preferredHeight: visible ? implicitHeight : 0
+
+        sourceComponent: {
+            switch (optionData.type) {
+            case "boolean": return booleanOption;
+            case "choice": return choiceOption;
+            case "shape": return shapeOption;
+            case "color": return colorOption;
+            case "number": return numberOption;
+            case "text": return textOption;
+            default: return null;
+            }
+        }
+
+        Component {
+            id: booleanOption
+            ConfigSwitch {
+                Layout.fillWidth: true
+                leftPadding: 0
+                rightPadding: 0
+                buttonIcon: optionLoader.optionData.icon || "tune"
+                text: optionLoader.optionData.label
+                checked: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface)
+                onToggleRequested: PluginState.setOption(root.manifest.id, optionLoader.optionData.key,
+                    !PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface), root.surface)
+            }
+        }
+
+        Component {
+            id: choiceOption
+            ConfigSelectionArray {
+                Layout.fillWidth: true
+                // Dense chips when every choice has an icon (the clock's all
+                // do): icon-only, named on hover, the current one named in
+                // the label - the text chips did not fit beside their labels.
+                compact: true
+                text: optionLoader.optionData.label
+                icon: optionLoader.optionData.icon || "tune"
+                options: optionLoader.optionData.choices || []
+                currentValue: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface)
+                onSelected: value => PluginState.setOption(root.manifest.id, optionLoader.optionData.key, value, root.surface)
+            }
+        }
+
+        // Material shapes are their own preview: a name-chip row for 31
+        // shapes is unreadable even wrapped. Draw the shape.
+        Component {
+            id: shapeOption
+            ConfigSelectionShapeArray {
+                options: (optionLoader.optionData.choices || [])
+                    .map(choice => choice.value ?? choice)
+                // A choice may carry its own enabledWhen (the same rule
+                // spelling option_visibility.js evaluates for rows):
+                // offered always, pickable only while the rule holds.
+                disabledOptions: (optionLoader.optionData.choices || [])
+                    .filter(choice => choice && choice.enabledWhen !== undefined
+                        && !OptionVisibility.rule(choice.enabledWhen, key => root.readOption(key)))
+                    .map(choice => choice.value)
+                currentValue: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface)
+                onSelected: value => PluginState.setOption(root.manifest.id, optionLoader.optionData.key, value, root.surface)
+            }
+        }
+
+        // A palette role is its own preview too, and the roles are fixed by
+        // the theme rather than by the plugin - so there are no `choices`,
+        // only the swatch row ColorSelectionArray already draws. The empty
+        // string is a real value here: "no override, follow the widget's
+        // own colour", which is why the row pairs with a boolean.
+        Component {
+            id: colorOption
+            ColorSelectionArray {
+                icon: optionLoader.optionData.icon || "palette"
+                text: optionLoader.optionData.label
+                options: (optionLoader.optionData.choices || [])
+                    .map(choice => choice.value ?? choice)
+                currentValue: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface)
+                onSelected: value => PluginState.setOption(root.manifest.id, optionLoader.optionData.key, value, root.surface)
+            }
+        }
+
+        Component {
+            id: numberOption
+            ConfigSlider {
+                Layout.fillWidth: true
+                text: optionLoader.optionData.label
+                textWidth: optionLoader.optionData.labelWidth ?? 176
+                buttonIcon: optionLoader.optionData.icon || "tune"
+                // A 0..1 (or smaller) range is a fraction; show it as a
+                // percent so the tooltip isn't int-rounded to 0/1.
+                usePercentTooltip: optionLoader.optionData.usePercentTooltip === true
+                    || (optionLoader.optionData.to ?? 100) <= 1
+                from: optionLoader.optionData.from ?? 0
+                to: optionLoader.optionData.to ?? 100
+                value: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface)
+                onValueModified: {
+                    const step = optionLoader.optionData.step ?? 1;
+                    const rounded = Math.round(newValue / step) * step;
+                    if (rounded !== PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface))
+                        PluginState.setOption(root.manifest.id, optionLoader.optionData.key, rounded, root.surface);
                 }
             }
+        }
 
-            Component {
-                id: booleanOption
-                ConfigSwitch {
-                    Layout.fillWidth: true
-                    leftPadding: 0
-                    rightPadding: 0
-                    buttonIcon: optionLoader.optionData.icon || "tune"
-                    text: optionLoader.optionData.label
-                    checked: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default)
-                    onToggleRequested: PluginState.setOption(root.manifest.id, optionLoader.optionData.key,
-                        !PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default))
-                }
-            }
-
-            Component {
-                id: choiceOption
-                ConfigSelectionArray {
-                    Layout.fillWidth: true
-                    text: optionLoader.optionData.label
-                    icon: optionLoader.optionData.icon || "tune"
-                    options: optionLoader.optionData.choices || []
-                    currentValue: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default)
-                    onSelected: value => PluginState.setOption(root.manifest.id, optionLoader.optionData.key, value)
-                }
-            }
-
-            // Material shapes are their own preview: a name-chip row for 31
-            // shapes is both unreadable and unlabelable (ConfigSelectionArray's
-            // chip Flow only wraps when it has no label). Draw the shape.
-            Component {
-                id: shapeOption
-                ConfigSelectionShapeArray {
-                    options: (optionLoader.optionData.choices || [])
-                        .map(choice => choice.value ?? choice)
-                    currentValue: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default)
-                    onSelected: value => PluginState.setOption(root.manifest.id, optionLoader.optionData.key, value)
-                }
-            }
-
-            // A palette role is its own preview too, and the roles are fixed by
-            // the theme rather than by the plugin - so there are no `choices`,
-            // only the swatch row ColorSelectionArray already draws. The empty
-            // string is a real value here: "no override, follow the widget's
-            // own colour", which is why the row pairs with a boolean.
-            Component {
-                id: colorOption
-                ColorSelectionArray {
-                    icon: optionLoader.optionData.icon || "palette"
-                    text: optionLoader.optionData.label
-                    options: (optionLoader.optionData.choices || [])
-                        .map(choice => choice.value ?? choice)
-                    currentValue: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default)
-                    onSelected: value => PluginState.setOption(root.manifest.id, optionLoader.optionData.key, value)
-                }
-            }
-
-            Component {
-                id: numberOption
-                ConfigSlider {
-                    Layout.fillWidth: true
-                    text: optionLoader.optionData.label
-                    textWidth: optionLoader.optionData.labelWidth ?? 176
-                    buttonIcon: optionLoader.optionData.icon || "tune"
-                    // A 0..1 (or smaller) range is a fraction; show it as a
-                    // percent so the tooltip isn't int-rounded to 0/1.
-                    usePercentTooltip: optionLoader.optionData.usePercentTooltip === true
-                        || (optionLoader.optionData.to ?? 100) <= 1
-                    from: optionLoader.optionData.from ?? 0
-                    to: optionLoader.optionData.to ?? 100
-                    value: PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default)
-                    onValueModified: {
-                        const step = optionLoader.optionData.step ?? 1;
-                        const rounded = Math.round(newValue / step) * step;
-                        if (rounded !== PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default))
-                            PluginState.setOption(root.manifest.id, optionLoader.optionData.key, rounded);
-                    }
-                }
-            }
-
-            Component {
-                id: textOption
-                ConfigTextArea {
-                    Layout.fillWidth: true
-                    buttonIcon: optionLoader.optionData.icon || "text_fields"
-                    text: optionLoader.optionData.label
-                    placeholderText: optionLoader.optionData.placeholder || ""
-                    fieldWidth: 160
-                    value: String(PluginState.option(root.manifest.id,
-                        optionLoader.optionData.key, optionLoader.optionData.default))
-                    onValueChanged: {
-                        const trimmed = value.trim();
-                        if (trimmed.length === 0) return;
-                        const transformed = optionLoader.optionData.uppercase === true
-                            ? trimmed.toUpperCase() : trimmed;
-                        const normalized = transformed.slice(0, optionLoader.optionData.maxLength ?? 64);
-                        if (normalized !== PluginState.option(root.manifest.id,
-                                optionLoader.optionData.key, optionLoader.optionData.default))
-                            PluginState.setOption(root.manifest.id, optionLoader.optionData.key, normalized);
-                    }
+        Component {
+            id: textOption
+            ConfigTextArea {
+                Layout.fillWidth: true
+                buttonIcon: optionLoader.optionData.icon || "text_fields"
+                text: optionLoader.optionData.label
+                placeholderText: optionLoader.optionData.placeholder || ""
+                fieldWidth: 160
+                value: String(PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface))
+                onValueChanged: {
+                    const trimmed = value.trim();
+                    if (trimmed.length === 0) return;
+                    const transformed = optionLoader.optionData.uppercase === true
+                        ? trimmed.toUpperCase() : trimmed;
+                    const normalized = transformed.slice(0, optionLoader.optionData.maxLength ?? 64);
+                    if (normalized !== PluginState.option(root.manifest.id, optionLoader.optionData.key, optionLoader.optionData.default, root.surface))
+                        PluginState.setOption(root.manifest.id, optionLoader.optionData.key, normalized, root.surface);
                 }
             }
         }

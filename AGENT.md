@@ -124,6 +124,23 @@ or use a worktree, validate headlessly, then perform one controlled live load.
   reactive, it just had nothing to observe yet. (feat(search): launch Minecraft modpacks from the
   search bar.)
 
+**The live shell is a copy of this checkout, not the checkout itself.** `qs -c imi` loads
+`~/.config/quickshell/imi`, and nothing under that directory is version controlled — it is filled by
+an `rsync --delete` from `dots/.config/quickshell/imi/`. Two things follow. Editing a file in the
+checkout changes nothing that is running until a deploy; and a deploy from the wrong branch removes
+whatever the live shell had that the branch does not. Deploy with `./deploy-shell` at the repo root
+rather than by hand: it names every open PR branch the deploy would roll back and stops, and it
+writes `.deployed-from` (sha, ref, timestamp) into the target so "what is actually running?" is
+answered by reading one file instead of by inferring from whichever branch you are standing on.
+`tests/test_deploy_guard.py` drives it. 12cf54d00 ("tools: deploy the shell through a guard, not an
+ad-hoc rsync").
+
+**A clean log is not evidence that the code you think is running is running.** The deploy above was
+written after a branch cut off main reverted three fixes that were live on the maintainer's machine,
+and the check that "confirmed" the deploy was a grep of the live log for errors — which was clean,
+because main is clean. A log tells you the shell loaded *something* without complaining. To find out
+*what*, read `.deployed-from`, or grep the live tree for a line only the code you expect contains.
+
 ### Where to look when something goes wrong
 
 The running `qs` process writes two logs per instance, found under
@@ -194,6 +211,11 @@ must not declare `horizontalPadding`, `verticalPadding`, `padding`, `spacing`, `
 `icon` as its own property; those are `FINAL` and overriding one is a hard compile failure. Pick a
 distinct name (`labelInset`, not `horizontalPadding`). A plain `Item`/`Rectangle` has no such
 restriction, which is why `property real padding` is fine in the many non-`Control` widgets here.
+This note did not stop the second hit - the Docker bar widget shipped a `readonly property real
+horizontalPadding` the day it became a `RippleButton`, and the bar lost the widget - so it is a
+check now: `tests/lint_final_properties.py` follows the repo's own types to every Control-derived
+root and fails the suite on a root-level declaration of a FINAL name
+("test: a Control-derived widget must not redeclare a FINAL property, mechanised").
 
 **A `qml6` probe's `console.log` goes to the journal, not to your terminal.** Qt is built with
 journald support here, so `qml6 probe.qml` prints *nothing at all* — which reads as "the probe never
@@ -208,7 +230,20 @@ wait and re-check before concluding the code is broken.
 
 ## External binaries the shell drives
 
-Two non-obvious traps live here, both found the expensive way.
+**WE_REF pins the renderer, so a `WallpaperEngineSurface` property the shell reads may not exist in
+the binary a user is running.** The embedded Wallpaper Engine renderer is a patched Quickshell built
+by the satellite repo `XephyLon/qs-wallpaperengine`; the hub pins which revision in
+`sdata/subcmd-install/4.wallpaperengine.sh` as `WE_REF`, and a feature added to the module ships to
+nobody until that pin moves to a tag that has it. So a shell reading `surface.volume` or
+`surface.properties` can be running a binary from before those existed. Two mechanisms keep that from
+being a load-breaking assignment: `WallpaperEngineLayer.qml` binds every extended property inside an
+`"x" in root` guard (an absent one is a silent no-op, exactly as `audioEnabled`/`occluded` already
+were), and `services/WallpaperEngineFeatures.qml` probes the same way once and gates the selector
+sidebar's controls, so an older binary shows only the knobs it answers rather than dead ones. When
+adding a renderer property: extend the module in that repo, tag it, move `WE_REF`, AND gate every
+shell-side read - the last step is what makes the intervening versions safe.
+
+Beyond that, two non-obvious traps live here, both found the expensive way.
 
 **`DT_RUNPATH` is not transitive, and `LD_LIBRARY_PATH` is.** The Wallpaper Engine build the shell
 loads (`~/.cache/immaterial-impulse/prebuilt/<ver>/`) bundles its own libraries. Setting a correct
@@ -310,6 +345,35 @@ Four things around that are worth not re-deriving:
   both *and* whose 3×3 neighbourhood is uniform (which kills subpixel edges), and report RMSE plus
   what code 255 became.
 
+**`nvidia-smi` powers up a runtime-suspended dGPU on every invocation, so a periodic poll of it
+IS the thing that keeps a hybrid laptop's dGPU awake.** On this machine (AMD iGPU driving the
+display, RTX 3060 with fine-grained runtime D3) the resource monitor's 3s `nvidia-smi` poll held
+the dGPU's `runtime_status` at `active` for an entire 18h session — the wake it costs per query is
+longer than the idle window the driver needs to gate, so the GPU never sleeps and the poll always
+reads "awake". Nothing errors and the numbers look right, which is what hid it. There is no
+wake-free NVIDIA query (no sysfs busy counter; every `nvidia-smi`/NVML call wakes the device), so
+`ResourceUsage.qml` reads the dGPU's `power/runtime_status` (a plain PCI sysfs file, free) each
+tick and spawns `nvidia-smi` only while it says the GPU is already awake — a suspended GPU is 0%
+busy by definition. The same change moved every reading the kernel exposes as a file (hwmon CPU
+temperature, amdgpu busy/temp/VRAM) onto FileViews resolved once by a startup probe, and df onto
+its own 30s clock: a tick used to spawn ~9 processes and now spawns none on this machine.
+`tests/test_resource_usage_polling.py` pins the gate, the df cadence and the sysfs reads.
+7ef4e762 ("perf(resources): poll through files, and stop waking a sleeping dGPU").
+
+The other holder is Qt itself, and it is not reachable from this repo: **constructing the first
+QtMultimedia object of any kind — a `MediaPlayer`, even a `SoundEffect` — makes the ffmpeg media
+backend probe every hardware context on the machine** (`qt.multimedia.ffmpeg.hwaccel: Check device
+types`: vdpau, cuda, vaapi, qsv, vulkan), measured at **856ms** on this machine, on the thread that
+constructs it. The cuda probe loads `libnvcuvid`/`libcuda` and leaves eight `/dev/nvidia*` file
+descriptors and a CUDA context in the process for its remaining life — this is why the running
+shell maps `libcuda` once the typing test has been opened (TypingSounds' MediaPlayer pool is the
+shell's only QtMultimedia user, and it is gated on the feature precisely so none of this happens
+at startup). None of the documented env vars stops the probe
+(`QT_FFMPEG_DECODING_HW_DEVICE_TYPES` filters codec selection, not this enumeration). Before
+adding a QtMultimedia object anywhere, know that its first construction costs a near-second stall
+and permanently attaches the process to the dGPU.
+417e9819 ("docs(agent): the first QtMultimedia object probes every hw context, cuda included").
+
 **A sound event is one `pw-play` on a path the shell resolved, and neither half of that sentence
 was true before.** `Audio.playSystemSound()` built
 `/usr/share/sounds/<theme>/stereo/<event>.oga` and the same with `.ogg`, spawned an `ffplay` at
@@ -326,6 +390,21 @@ was **entirely silent**; and with no `Inherits=` walk, `oxygen` — which ships 
 
 Three things about the replacement generalise past sound.
 
+- **`SoundEffect` is silent on Qt 6.11's PipeWire backend, and says it is playing.** The typing
+  test's key clicks shipped on `SoundEffect { source; volume }` and nothing was heard; naming the
+  device (`audioDevice: MediaDevices.defaultAudioOutput`) did not change it. Measured against the
+  live session: a `SoundEffect` reports `status` Ready and `playing: true` with no warning, and
+  `pactl list sink-inputs` shows its one stream `Corked: yes, Mute: yes` while `play()` is being
+  called every 150ms - or no stream at all. A `MediaPlayer` + `AudioOutput` on the same file and
+  the same device puts 7.8k peak on the default sink's monitor (recorded with `parec -d
+  <sink>.monitor`, idle 0) and opens a real output stream per play (a 20ms poll of `pw-dump`
+  catches it in 13 of 100 samples; the clips are 18ms). `TypingSounds` is a pool of MediaPlayers,
+  each naming the default output, `stop()`+`play()` per keystroke; the contract test refuses a
+  `SoundEffect` in that file. Two things about measuring it: `parec --monitor-stream=<index>`
+  returned nothing here even for `pw-play`, so it is not a meter on this machine, and a probe that
+  imports the shell's singletons starts its timers seconds after launch, so a recording window
+  aligned to the launch misses the plays - log `Date.now()` from the probe and bucket the recording.
+  ("fix(typing): the key sounds play through MediaPlayer, not SoundEffect").
 - **Playback stays a process spawn even though QtMultimedia works here.** Probed with `qml6`: it
   decodes and plays a `.oga` fine. It also takes a bare QtQuick process from 65 MiB / 133 mapped
   shared objects to **113 MiB / 238** and keeps it there for the life of the shell whether or not a
@@ -377,6 +456,31 @@ half: a config path under `~/.config` can be a file, a foreign symlink or
 read-only, and "the run printed nothing" is what a swallowed traceback also
 looks like. (fix(colors): one app's broken config no longer starves the rest
 of their themes.)
+
+- **A tmux pane never receives the terminal's default colours.** `scripts/colors/applycolor.sh`
+  pushes the generated OSC sequences into every interactive pty so open terminals recolour live. A
+  tmux pane's pty is one of those, and tmux (3.4+) adopts an OSC 10/11/12 it is sent as the pane's
+  OWN default foreground/background/cursor — and from then on paints the pane's background
+  explicitly, every cell, instead of leaving it to the terminal. kitty applies `background_opacity`
+  only to its default background colour, so the pane became a solid slab while the padding around it
+  stayed blurred. Measured on the live shell: `tmux list-panes -a -F '#{pane_bg}'` read `#1b1b17` on
+  every pane; a plain tmux with `sleep` inside was as translucent as kitty alone (cell-area
+  correlation with the blurred backdrop 0.69 against 0.67 — the first three "opaque" verdicts were a
+  flat patch of wallpaper under the tiling slot, so measure against the backdrop, not by eye); an
+  OSC 111 written to the pane's tty brought `default` and the blur back. Pane ttys are collected
+  from every server socket under `/tmp/tmux-<uid>/` and get `terminal/pane_safe.sh`'s output — the
+  palette (OSC 4) plus OSC 110/111/112 resets so a pane coloured by an earlier push recovers — while
+  the tmux client's own pty still gets the full set and the panes inherit from it.
+  `tests/test_applycolor_tmux_panes.py` runs the filter and pins the routing.
+  c7dbe2340 ("fix(colors): a tmux pane never receives the terminal's default colours").
+  The push is one of TWO roads into a pane: the shell rc is the other. `dots/.config/zshrc.d/
+  dots-hyprland.zsh` and `dots/.config/fish/config.fish` `cat` the generated file on every shell
+  start, tmux starts a shell in every new pane (its `default-command` here is fish), so the panes
+  came back opaque the day after the push was fixed — `#{pane_bg}` #1b1b17 on both panes of a fresh
+  session. Under `$TMUX` the rc files send `sequences-pane.txt` and never the full file; the same
+  test pins both rc files. A fix that closes one road into a state and leaves the other open is
+  half a fix: when a sequence is filtered on its way somewhere, list every writer of that sequence
+  first. ("fix(shell-rc): a shell inside tmux sends the pane-safe sequences")
 
 ## The suite checkout, and why the updater cannot just reset it
 
@@ -553,7 +657,11 @@ modules/imi/                 The "imi" (Immaterial Impulse) panel family - one d
                               is the one static layer surface per screen that hosts every bar
                               popup's content on a single morphing card - it serves the vertical
                               bar too, which loads the same widget files
-                              (d29cd6e45 ("feat(bar): add the static overlay surface the popup card will live on"))
+                              (d29cd6e45 ("feat(bar): add the static overlay surface the popup card will live on")).
+                              BluetoothBattery.qml (+Popup) is the Bluetooth device battery widget:
+                              one ring per connected device with a known level, hover popup, click
+                              deep-links to the Bluetooth dialog - see "A Bluetooth device's battery
+                              has one lookup and three readers"
   sidebarLeft/, sidebarRight/ Slide-out panels (AI chat, translator, media, the Phone tab;
                               quick settings, notifications, volume mixer). sidebarLeft/phone/ is
                               the Phone tab - the paired phone's chip, six actions, two navigation
@@ -601,6 +709,14 @@ modules/imi/                 The "imi" (Immaterial Impulse) panel family - one d
                               the mode may work out where either panel is
   overview/                   Workspace/window overview (like GNOME Activities)
   notificationPopup/          Desktop notification popups
+  cheatsheet/                 The Super+/ window: a fixed-size FloatingWindow whose tab bar and
+                              SwipeView are drawn from ONE page list (keybinds, Elements, the
+                              typing test, and Components under developer mode). typing/ is the
+                              Monkeytype-style test - engine, surface, toolbar, word viewport,
+                              results, history, stats, settings, sounds, keyboard preview - hosted
+                              by CheatsheetTypingTest.qml; every page takes the window's width and
+                              height budgets (see the fixed-size-window note under Hyprland
+                              integration)
   settings/                   The in-shell settings UI (pages/ = one file per settings category)
   dock/, lock/, mediaControls/, overlay/, polkit/, regionSelector/, screenTranslator/,
   sessionScreen/, onScreenKeyboard/, wallpaperSelector/, verticalBar/, desktopMenu/
@@ -615,7 +731,11 @@ services/                  Singletons wrapping external state/processes - one pe
                               subdirectory and extension rules, the .disabled marker), and this
                               singleton owns the process lifetimes. Playback is a spawned
                               `pw-play` - see "External binaries the shell drives"
-  ResourceUsage.qml           Polls /proc/meminfo, /proc/stat, df, nvidia-smi on a timer
+  ResourceUsage.qml           Polls /proc/meminfo, /proc/stat and the hwmon/amdgpu sysfs files a
+                              startup probe resolves, all through FileViews; subprocesses only
+                              where no file exists (nvidia-smi behind a runtime-status gate, df on
+                              its own 30s clock, sensors as the no-hwmon fallback) - see the
+                              nvidia-smi entry under "External binaries the shell drives"
   HyprlandData.qml            Polls `hyprctl clients/monitors/layers/workspaces -j` on Hyprland IPC
                               events - the source of truth for "what does hyprctl currently see",
                               since Quickshell's own Hyprland IPC bindings don't expose everything
@@ -631,6 +751,12 @@ services/                  Singletons wrapping external state/processes - one pe
                               scripts/hyprland/keybind_overrides.py. Never edits user keybind
                               files; refuses to touch a hand-edited shim (content hash). See
                               docs/proposals/keyboard-shortcuts-editor.md
+  TypingLanguages.qml          The typing test's word packs: reads assets/typing/languages-manifest.json
+                              and loads one pack on request (FileView, read in onLoaded). Local and
+                              manifest-driven - the language list is what the assets ship
+  TypingSoundPacks.qml         Its key-press and error sound packs, from sounds-manifest.json; answers a
+                              pack's variant URLs for the SoundEffect pool the surface keeps while
+                              sounds are on. Both ported from the p3drovfx fork with the test
   PrismLauncher.qml            Prism Launcher modpacks for the launcher search, enumerated by
                               scripts/prism/list_instances.py. Feature-detected (native binary or
                               flatpak): without Prism the script never runs, `available` stays
@@ -763,6 +889,68 @@ services/                  Singletons wrapping external state/processes - one pe
                               takes to appear, the original persisted in Persistent so a
                               restart mid-swap still undoes it - see the entry under
                               "External binaries the shell drives"
+  WallpaperEngineOverrides.qml Per-project Wallpaper Engine settings (fps, scaling, audio on/off
+                              + volume, audio-reactive, mouse/parallax/particles) AND each
+                              wallpaper's own project.json properties, keyed by runtime project
+                              ids so it is a raw FileView over wallpaper-engine-overrides.json on
+                              the PluginState pattern - never a JsonAdapter. services/
+                              we_overrides.js is the resolution: per-key fallback to the globals
+                              for the ENGINE flags, and a separate `properties` map with no
+                              global side (hasOverride/clearEngineOverrides leave it alone, so
+                              turning the Custom settings switch off never eats a property
+                              edit). `active` is THE one live derivation, read by
+                              WallpaperEngineLayer's dynamic bindings, Background's audio routing
+                              and the sidebar - tests/test_we_overrides_wiring.py refuses a
+                              raw-config read beside it. The sidebar
+                              (modules/imi/wallpaperSelector/WallpaperSelectorSidebar.qml) is the
+                              editor: a places rail over local files (selector_places.js), the
+                              engine's whole flag set + the wallpaper's own properties
+                              (WallpaperPropertyControl, one control per project.json type) over
+                              Wallpaper Engine, gated on WallpaperEngineFeatures so an older
+                              renderer binary shows only what it answers - a control for a flag
+                              the renderer does not read would be a fake action
+                              c0c05d3f ("feat(wallpaperSelector): a sidebar - places over files, engine config over WE")
+  WallpaperEngineFeatures.qml  Which properties THIS binary's embedded renderer has, probed once
+                              by building a bare WallpaperEngineSurface (no project, so no thread
+                              or GL) and asking `"x" in surface`. The extended controls (the
+                              qs-wallpaperengine 0.3 flag set, per-project properties, the live
+                              crop focus) gate on it; WallpaperEngineLayer binds the same
+                              properties dynamically for the same reason. See "WE_REF pins the
+                              renderer" below. The Fill crop picker
+                              (modules/imi/wallpaperSelector/crop_picker.js +
+                              WallpaperSelectorSidebar's active card) reads
+                              GlobalStates.weContentAspect - the LIVE scene's real authored
+                              aspect, published by Background from the surface's contentWidth/
+                              Height, because a 32:9 wallpaper's portrait preview would pick the
+                              wrong overflow axis - and drives focusX/focusY, which pan the
+                              wallpaper live (scene only; a video is centre-cropped by WE). The
+                              picker draws the actual scene, grabbed by the renderer
+                              (requestSceneGrab -> GlobalStates.weSceneGrabPath, a PNG at the
+                              real 32:9 aspect), NOT the preview image - the preview does not
+                              depict an ultrawide scene. The render-scale Quality dial
+                              (WallpaperSelectorSidebar, surface renderScale 0.25..1) IS shipped
+                              and gated the same way, but honest about its reach: WE renders a
+                              scene into its own authored-resolution FBO regardless of window, so
+                              the dial only trims a scene's final composite (fps is the lever for
+                              a heavy scene); it is the video path, composited at window size,
+                              where a lower quality cuts real work
+                              bc571a8d ("feat(wallpaperSelector): a render-scale Quality dial, gated and honest")
+  WallpaperEngineCompat.qml    Per-wallpaper compatibility verdicts, the reference app's bulk
+                              scanner: the scan runs in a SPAWNED `qs -p` scanner process
+                              (scripts/wallpapers/we_compat_scan.qml) loading each project into a
+                              real surface, so a wallpaper that wedges or crashes the renderer
+                              kills the scanner and not the shell - this service owns the queue,
+                              respawns past the corpse (a death mid-project is that project's
+                              verdict), and records ok/broken. Its own raw-JSON store
+                              (wallpaper-engine-compat.json), NOT the overrides file: verdicts
+                              are scan-managed state, not user settings (the reference's
+                              SCAN_MANAGED_KEYS split as a file boundary). web/application are
+                              "unsupported" by construction, unscanned. The scanner speaks its
+                              verdicts on STDERR because qs's stdout is block-buffered off a tty.
+                              Decisions in services/we_compat.js; the grid badges broken tiles
+                              and the sidebar's Hide broken filters them, both through
+                              statusFor - tests/test_we_compat_wiring.py pins the one reader
+                              dd97c0a1 ("feat(wallpaperSelector): the engine's full settings, per-wallpaper properties, and a compatibility scan")
   SchemePreview.qml            Per-scheme swatches for the scheme pickers: one venv run of
                               scripts/colors/scheme_preview.py quantizes the wallpaper once and
                               builds every Material variant from it. Cached against the wallpaper
@@ -834,8 +1022,15 @@ scripts/                   Standalone helper scripts (Python/bash) invoked via P
                               checked on the cmdline - the fork matched the full command
                               line and adopted its own launcher; this repo's lint refuses
                               that form (the map is a fenced block, so it counts as code)
+  typing/                     sync_monkeytype_languages.py / sync_monkeytype_sounds.py refresh
+                              assets/typing against a pinned immutable monkeytype sha, verify
+                              every download (a real RIFF/WAVE, a pack no thinner than
+                              MINIMUM_WORDS) and never execute what they fetched. Development
+                              only; the shell never runs them
 translations/              i18n string tables (Translation.tr(...) singleton)
-assets/                    Static images/fonts bundled with the shell
+assets/                    Static images/fonts bundled with the shell; assets/typing is the vendored
+                            Monkeytype word packs and sounds (GPL-3.0-only, checksummed per manifest,
+                            provenance in ATTRIBUTION.md)
 ```
 
 ## The Config system (settings page ↔ persisted JSON)
@@ -1151,6 +1346,28 @@ yourself.
 whose `minimumSize` equals its `maximumSize` is floated, sized and centred by Hyprland on its own,
 purely from the fixed size hints. Prefer that over a runtime rule. It also keeps the window title
 free to stay translated, since nothing is matching on it.
+
+**...and a window sized that way is exactly as big as the page it is showing, on every screen, so
+the pages have to fit the screen themselves.** The cheatsheet's `SwipeView` reports the CURRENT
+page's implicit size (indexed out of `contentChildren` by `currentIndex`, not `currentItem`, whose
+size is unsettled on the first frame; it used to report the largest of every page's, which opened
+the typing test as tall as the keybind table - "fix(cheatsheet): size the window to the tab it is
+showing, not the tallest"), and the Elements page was nine rows of fixed 70px tiles - ~800px with
+the window's chrome - which fits a 1080p panel at scale 1 (970px usable) and on the same panel at 1.25x
+(864 logical) put the window 17px under the bar and 17px under the dock, at 1.5x (720) 44px off the
+top of the screen. The keybinds page had a budget of `screen.height - 220`, a literal standing in
+for "the bar, the dock and the chrome" on one desktop, and the Elements page had none. "The
+screen" for a floating window is what the compositor leaves: `HyprlandData.monitors[].reserved`
+is `[left, top, right, bottom]` (matched by `screen.name`, the way the bar already reads it), and
+`modules/common/functions/cheatsheetFit.js` turns that, the gaps and the window's own padding and
+tab bar into one budget every page takes. A page that cannot re-flow scales itself as one picture
+and reports the SCALED size - a `scale` on the column under a page still reporting its natural size
+sizes the window to the natural size, which is the clipping. Before `HyprlandData` has answered the
+reserve reads as nothing, so a window that never clipped is the window it was. Measured in a nested
+Hyprland at all three sizes (`tests/tst_cheatsheet_fit.qml` carries them;
+`tests/test_cheatsheet_width_budget.py` pins the wiring): 788 → 788 / 744 / 600 against 970 / 754 /
+610 usable.
+("fix(cheatsheet): pages fit the screen the compositor leaves, not a 220px guess").
 
 **A Hyprland option the shell sets is reported back as set whether or not it did anything, and the
 complaint is on the screen rather than in the log.** `decoration:screen_shader` is the measured
@@ -1713,6 +1930,17 @@ ce41c4f9c ("feat(cava): give CavaService the producer it always implied"),
 bcf5f9ca1 ("refactor(cava): move every band consumer onto the one service"),
 004a17745 ("test(cava): pin the producer, the gate and the band contract").
 
+The same rule holds for cover art: **the download+quantize pipeline lives once, in
+`modules/imi/mediaControls/MediaArtSource.qml`** - feed it `artUrl` (via `media_art.js`'s
+resolve), read `displayedArtFilePath` and `colors`; each surface keeps only its own
+dominant-colour mix. It was copy-pasted across the bar, dock, left sidebar and popup players, and
+the copies had drifted exactly as CavaService's consumers did: the sidebar's lacked the `curl -4`
+IPv4 pin (its downloads could hang on an IPv6 stall) and the `file://` fast-path (it re-curled
+local art every track). A fifth media surface must use this component, not paste a fifth copy.
+It cannot live in `modules/common/widgets` - it spawns curl, and `lint_dumb_widgets.py` fails the
+suite on a Process there.
+1550313c ("refactor(media): one shared MediaArtSource; fix tint, progress, and waste").
+
 **A signal nothing connects to is that same hole from the other side, and only a surface can
 find it.** `PhoneScrcpy.feedback(message, ok)`, `PhoneCamera.errorOccurred(message)` and
 `PhoneMic.errorOccurred(message)` have been raised on every failure since those services landed,
@@ -1784,6 +2012,61 @@ row. ("perf(search): rebuild the launcher results once per turn, not per input c
   `PhoneFeatureCard.qml`, whose three cards were the only controls in this
   shell a keyboard could not reach until they became controls at all.
 
+- **An id declared inside a `Loader`'s `sourceComponent` is not visible from a
+  binding outside it, and the failure is an empty window with the error a scroll
+  away.** The cheatsheet's page list (icon, name, `component`) was written on
+  the `Scope` root, naming `Component { id: keybindsPage }` and its siblings -
+  which are declared inside `sourceComponent: FloatingWindow { ... }`, i.e. in
+  the Loader's component scope, where a file-scoped id is not. The list threw
+  `ReferenceError: keybindsPage is not defined`, the tab list `Cannot call
+  method 'map' of undefined`, and the window opened as a 56x110 box: padding,
+  a toolbar with no tabs, and nothing in the view. Every lint and contract was
+  green, because a reference resolves at binding time. A list that names ids
+  lives in the scope that declares them - here the window - and the readers
+  follow it. Measured on the deployed shell, which is the only place it shows.
+  ("fix(cheatsheet): the page list lives on the window, where the page Components are in scope").
+
+- **A singleton's `Component.onCompleted` runs again on any reload that rebuilds
+  the singleton, so "cleanup on init" runs under whatever is on screen.**
+  `Directories` wiped the clipboard decode directory in its `onCompleted`,
+  reasoning that it ran once per process. A hot reload that changes a file in
+  the singleton's dependency graph (a deploy touching `Config.qml`, an update)
+  rebuilds it - the log shows its `[Directories]` line after every
+  `Configuration Loaded` - and the `rm -rf` ran under the launcher's live
+  previews: eight `Cannot open: file:///tmp/quickshell/media/cliphist/<id>`
+  lines, each just before a `Configuration Loaded`, and blank boxes where the
+  images were. Two more holes in the same ownership: the path was one
+  directory for every `qs` process, so a nested harness wiped the session's
+  previews on start, and each `CliphistImage` deleted "its" file on
+  destruction while the launcher rebuilds every row per keystroke. Reproduced
+  in a nested Hyprland: a content change to `Config.qml` took the directory
+  from 6 files to 0 with the images up. The directory is per process
+  (`Quickshell.processId`), the start-up sweep spares any sibling whose pid is
+  alive, and a preview is a held file - `Cliphist.acquireDecode`/`releaseDecode`
+  from the row, removed by a sweep only once nothing holds it. Before putting
+  a `rm` in an `onCompleted`, ask what a reload does to it.
+  ("fix(cliphist): a decoded preview lives while anything shows it").
+
+- **A ListView `add` transition started while the view is off screen freezes
+  where it started, and `from: 0` on opacity leaves the card invisible for
+  good.** `StyledListView`'s add transition fades and scales a new delegate
+  from 0. The right sidebar is a persistent surface whose content hides while
+  closed, so a delegate built then - a notification arriving with the panel
+  closed, the whole list restored from file at startup - starts that
+  transition and it never advances: measured with a per-delegate probe in a
+  nested Hyprland, sixteen arrivals with the panel closed left cards at
+  0.65 / 0.87 / 0.96 / 0.98 / 0.99, a restart left five of seven at exactly 0,
+  and opening the panel moved none of them; only a card that took a new
+  notification while open was drawn again. On screen that is a blank list
+  under a footer counting sixteen, with nothing in the log - the delegates
+  exist, at full height, `visible: true`. `NotificationListView` gates
+  `animateAppearance` on its own effective `visible` and settles any card
+  below 1 when it comes on screen; a transition is for something the user can
+  see, and a view that is hidden adds at rest. Before giving a view an add
+  transition with a `from`, ask whether its window can be hidden while the
+  model grows. `tests/test_notification_list_entrance.py` pins both halves.
+  ("fix(notifications): a card built while the sidebar is closed arrives at rest").
+
 - **A `Flow` with no width of its own and an incubated parent wraps once and
   stays wrapped.** `Flow` takes its `implicitWidth` when a layout does not
   give it a width, and computes that implicit width from the width it
@@ -1799,6 +2082,31 @@ row. ("perf(search): rebuild the launcher results once per turn, not per input c
   Note also that `Layout.alignment` hands a child its preferred size and
   positions it, never resizes it, so an aligned Flow overflows a narrow
   row instead of wrapping; that is a separate, older question.
+  The preferred width goes on EVERY path the row has. The first fix handed
+  it over only for a labelled row (`root.text ? naturalWidth : -1`), and the
+  Quick page's Bar & Screen cards use the row without a label - right-aligned
+  under a heading of their own - so the same four chips latched one per line
+  there ("This broke again"). `QuickPageProbe.qml` builds the real page
+  through an asynchronous `Loader` and walks it for every Flow: 4/4/3/2 lines
+  before, one each after. `test_selection_array_flow.py` refuses a
+  conditional preferred width.
+  4ef84e521 ("fix(settings): a segmented row's chips lay out on the width the row has"),
+  0a44ed17c ("fix(settings): a segmented row without a label lays out on its natural width too").
+  **And the preferred width alone still overflows a cell narrower than the chips**, because an
+  aligned child is handed its preferred size and never resized: a fifth bar style made the Quick
+  page's Bar style Flow 461px in a 442px card and it drew past the edge. On the unlabelled path the
+  Flow now fills its cell up to the natural width as a `Layout.maximumWidth` - a wider cell leaves
+  it at its natural width, right-aligned, a narrower one gives it less and the chips wrap for the
+  real reason. Measured through `QuickPageProbe.qml`: 316px, two lines, nothing over. The labelled
+  path keeps its aligned natural width, since the label beside it has no minimum and would be
+  what yields.
+  ("fix(settings): a segmented row without a label wraps inside its card instead of overflowing").
+  **And wrapping is the last resort, not the layout.** The Quick page is 720 wide; two card columns
+  hand each card 316px of content, and only one of its four chip rows fits that - so once they
+  could wrap, three rows had an orphan chip on a second line beside a neighbour of another height.
+  Before letting chips wrap, check whether the container can hold the row at all; the cards stack
+  now, title left and chips right, every row on one line (measured 461px in a 720px row).
+  ("fix(settings): the Bar & Screen cards stack so every chip row sits on one line").
 
 - **CI's Qt is older than yours, and its JS parser is too.** The workflow
   installs Ubuntu's `qt6-declarative-dev`; a developer here runs Arch's
@@ -2180,6 +2488,35 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   39c70df85 ("perf(settings): warm the pages one at a time, while the window is open"),
   2581cafae ("fix(settings): the warm-up is gated on Config.ready, not on the window"),
   de2b31b13 ("test(settings): drive when the settings host builds its pages").
+  **And a page built ahead of the user waits OUTSIDE the window until first shown.** Quickshell
+  creates the backing `QQuickWindow` on the first `visible`: it re-parents the whole prebuilt
+  content tree into it and then polishes every layout that queued a polish while windowless. With
+  fifteen warmed pages (~24,500 items) in that tree the assignment blocked the GUI thread 88–92ms
+  and the window's first sync another 70–77ms, for fourteen pages nobody was looking at — the
+  ~16-frame stutter on the first open after a restart; with only the page on screen in the tree
+  (the control), 7ms and 18ms. The page loaders now park in an `Item` off the window and join the
+  host on their first `isActive`; a page left behind is kept, never re-parked. Two measured
+  gotchas shape the parking. A declared `parent: null` does NOT detach it: the binding is applied
+  while the item is built and then overwritten when the enclosing item appends it to its children
+  — the parking stayed in the tree and 22,290 items were still re-parented at the open — so it is
+  detached in `Component.onCompleted`. And it is sized from values that are live before the window
+  exists (`contentPaneWidth/Height`: the root's size, the rail's implicit width, the paddings, the
+  search bar's height, the column's spacing), NOT from the host: layouts do not polish without a
+  window (QTBUG-126704), so the host sits at a stale width until the open, and a parking that
+  followed it was re-laid out fourteen pages deep inside that same assignment. The runtime harness
+  walks the parking as well as the window (a walk of the visual tree alone never sees a warmed page
+  again), checks the detachment for real, and reads the parking's size against the page on screen.
+  93e5147ed ("perf(settings): pages built ahead wait outside the window until first shown").
+- **A `layer` on a shared widget is on only while the effect it exists for is drawn.** A layer is
+  an offscreen texture and a render pass of its own, and it breaks batching around it. `RippleButton`
+  kept one on every background, always, to clip the ripple to the rounded corners — and the button
+  is in every row, chip and sidebar entry of the shell. Measured in a nested Hyprland, the settings
+  window's first frame synced ~2,700 elements into 946 draw batches through those layers and blocked
+  the GUI thread 165ms; gated on hover-or-ripple (`root.hovered || ripple.opacity > 0`), 121ms and
+  1,101 batches before anything else changed. At rest the background is a plain rounded `Rectangle`;
+  the layer comes up on hover so its texture exists before the press lands, and stays while a ripple
+  fades. `tests/test_ripple_layer_gate.py` pins the gate.
+  82e2627d5 ("perf(ripple): the button's mask layer is on only while a ripple is drawn").
 - **Do not put dynamic object maps in a `JsonAdapter`, including through a `property var`.** Plugin
   ids and monitor names are not known when QML compiles, while `JsonObject` only supports declared
   properties. Writing undeclared children caused `JsonAdapter::deserializeRec` to segfault on the
@@ -2482,7 +2819,10 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   is wrong, and would equally hide a real one.
   4046f1854 ("feat(widgets): the card casts a shadow, and lifts when handled").
 - **The elevation is a component of its own, and it is what a widget that is not a card reaches
-  for.** `WidgetElevation` owns the numbers, the hover/drag lift and the layer; `WidgetCard` hands
+  for.** `WidgetElevation` owns the numbers, the hover/drag lift and the layer (and the user's
+  own switch, `plugins.shadows` - Settings > Plugins > Widget shadows, on by default - is ONE gate
+  in its `shadowVisible`, beside the motion drop, never a flag callers pass down;
+  `tests/test_widget_shadow_toggle.py`); `WidgetCard` hands
   it the states and adds a surface. That split exists because five bundled widgets cannot be cards
   — a cookie dial, a punched glyph grid, a shape-masked image, and a card with an avatar bubble
   off its top edge — and each had carried its own `StyledDropShadow` at its own radius and colour
@@ -2570,6 +2910,20 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   STATE belongs to a `HoverHandler` there; the cursor and the clicks stay with the MouseArea, which
   is the same channels rule as 05bf3013f, applied the other way round.
   0b9a5df1e ("feat(media): the transport controls adopt the interaction model").
+- **A layout settling lands; only a press travels.** `GroupButton` animated EVERY `implicitWidth` and
+  `implicitHeight` change with the click-bounce tier, and a window created after its rows were built
+  polishes their content on its first frames (layouts never polish without a window — see the page
+  parking above), so every chip's width jumped to its real value right then and the Behavior turned
+  the jump into travel: ~20 frames of chips growing ~2.5px a frame while the row's `Flow` wrapped and
+  unwrapped behind them, the "options shaking" reported on the first open of Settings. Probed on the
+  "Auto dark/light" row in a nested Hyprland: natural width 195 → 245 in 2.5px steps, Flow height
+  flapping 33 ↔ 68 on alternate frames. The bounce is press feedback and the pointer is on the
+  button when it presses, so the Behaviors are gated on `root.hovered` — the gate
+  `AndroidQuickToggleButton` already used for the same reason. After: 195 → 252 in one burst inside
+  the open's own polish, before any frame, and the Flow settles once. The general rule: a `Behavior`
+  on a size or position that a LAYOUT can write needs a gate that names the user's action, or it
+  animates the layout's arithmetic. `tests/test_group_button_settle.py` pins the gate.
+  8bb388202 ("fix(group-button): a layout settling lands; only a press travels").
 - **A Behavior whose animation reads its tier from a binding carries the PREVIOUS transition.** The
   shared interaction model (`Appearance.interaction`, decided in `modules/common/interaction_motion.js`)
   gives every control the same five states, and each pair of states has its own duration and curve -
@@ -2585,6 +2939,22 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   vacated the nested-dim rule for every component rooted on one - a detector that knows only one
   idiom stops detecting the moment the idiom changes.
   af09ed3b9 ("feat(widgets): one driver wires a control to the model").
+- **A control that keeps its own input presses on a `PassiveRippleSurface`, and the lift never goes
+  on the control.** A `ComboBox` opens its popup on its own release and an `ItemDelegate` reports
+  the click that chooses a row, so neither can be a `RippleButton`, and for a year both answered a
+  press with a colour swap and nothing else - the one kind of control in the shell that did. The
+  surface is a `RippleButton` with `passive: true`: its containment mask is an Item with no area, so
+  no point is inside it and neither its `MouseArea` nor the `AbstractButton` under it sees a press.
+  Disabling the `MouseArea` alone is NOT enough (an `AbstractButton` accepts presses itself, and as a
+  Control's background it is above the control in delivery order - it swallowed the popup's toggle);
+  a `QtObject` with a JS `contains` is not enough either (Qt wants an invokable it can see from C++,
+  and warns and ignores the mask). The host binds `hostHovered`/`hostDown`/`hostPressPoint` and
+  applies `interactionMotion.scale` to its PARTS - background, content, arrow - never to itself: a
+  popup is positioned by mapping through its parent's transform, so a Scale on the `ComboBox` opened
+  the list where the shrunken button was at the instant of release and left it there.
+  `test_combo_box_press.py` refuses a root transform; `ComboProbe.qml` is the probe that found it.
+  53285a0e5 ("feat(widgets): a combo box ripples, on a surface that takes no press"),
+  2b319b896 ("feat(widgets): a dropdown's list unfolds in and folds out").
 - **The model's motion is applied by the CONTROL, and a caller that adds its own composites with it
   rather than replacing it.** `Item.scale` and a `Scale` transform multiply down the scene graph
   exactly the way `opacity` does, so the mirror image of the doubled-dim rule above holds for the
@@ -2623,10 +2993,113 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   declaration, because both `RippleButton`s spell `buttonEffectiveRadius` across two lines with
   `pressProgress` on the continuation, and a line-scoped version finds no radius control at all and
   reports a clean tree. And the rule reaches only controls that apply the model:
-  `common/widgets/GroupButton.qml` drives its own `down`-keyed radius and bounce and has never
-  adopted it, so it is a non-adoption rather than a doubling and the lint leaves it alone.
+  `common/widgets/GroupButton.qml` drove its own `down`-keyed radius and bounce and had never
+  adopted it, so it was a non-adoption rather than a doubling and the lint left it alone. It is
+  a `RippleButton` now (see the button-vocabulary point below), so the model reaches it through
+  the base and its ends read `buttonEffectiveRadius` rather than keying `down` themselves.
   fix(sessionScreen): let RippleButton own the session button's press,
   test(lint): fail on a hover/press radius inside a control that already tightens.
+- **Two buttons, and which one a call site picked decided whether it rippled.** `GroupButton` and
+  `RippleButton` were both rooted on `Button`, and each spelled its own background, its own
+  `MouseArea` and its own press morph - twelve property names in common. The notification footer
+  lost its ripple the day it moved onto the group vocabulary: the morph came with `GroupButton`,
+  the ripple never did, and nothing said so. `GroupButton` extends `RippleButton` now and keeps
+  only what a button GROUP adds - the bounce, the segmented `leftRadius`/`rightRadius` ends mapped
+  onto the base's per-corner overrides, and the index bookkeeping. Three things are worth not
+  re-deriving. The call-site surface survived because `colBackgroundActive` and
+  `colBackgroundToggledActive` kept their names and now FEED `colRipple`: M3 draws a press as the
+  state layer and the ripple both, so the old pressed background is not redundant with the new
+  ripple. The one property that did not survive was the `mouseArea` alias, which
+  `AndroidQuickToggleButton` read `containsMouse` through - a `Control` has said `hovered` all
+  along. And the long-press-to-`altAction` that `GroupButton`'s own `MouseArea` carried moved INTO
+  `RippleButton`, because it is the touch spelling of a right click and every ripple button should
+  answer both the same way. 9d073fc3d ("refactor(widgets): build GroupButton on RippleButton so a
+  group button ripples").
+- **A widget grew a second copy because the shared one had no seam, and the copy then drifted.**
+  `NotificationGroup` was written against `services/Notifications.qml` end to end - eight call
+  sites, dismissal by an id the freedesktop server minted, a popup timeout - so the phone could not
+  use it and wrote its own: 429 lines re-spelling the same 70px drag threshold, the same 20px
+  overshoot, the same 0.3/0.1 neighbour lean. Then they diverged, and the copy was the one that got
+  it wrong (a group of one drew an expand chevron that expanded nothing, which the original gates
+  on `multipleNotifications`). The seam is `NotificationController`: it takes whole notification
+  objects rather than ids, so which id a backend dismisses by stays the backend's business, and its
+  DEFAULTS are the freedesktop behaviour so no existing call site changed. The phone's list is 67
+  lines now. Three things worth not re-deriving. Field names normalise at the SERVICE
+  (`summary`/`body`/`image` beside the daemon's `title`/`text`/`iconPath`), operations normalise at
+  the CONTROLLER, and the split is not arbitrary: the service's own tests pin the daemon's shape,
+  so the actions list - which the card wants as `{text, identifier}` and the daemon sends as bare
+  strings - maps in `actionsOf` rather than in either file. A capability that only one backend has
+  (inline reply) is a `supportsReply` flag, not a branch in the card. And a service's PERSISTED
+  cache is a version boundary: adding those fields meant every restored notification arrived
+  without them, which no fixture in this suite could catch because they all write a current cache -
+  it took a deploy and the live log, six errors stamped at the second the code loaded. 39f9b7da6
+  ("fix(phone): upgrade a cached notification to the card's shape on restore").
+- **Re-rooting a widget hands every subclass the base's properties, and a subclass that already
+  declared one now has TWO.** `AndroidQuickToggleButton` declared `property real appear: 1` back
+  when `GroupButton` was rooted on `Button`. The move onto `RippleButton` gave it a second, and QML
+  carries both: the panel's wave writes the derived property, while `RippleButton`'s
+  `opacity: dimOpacity * appear` binding is compiled in the base's scope and reads its own, which
+  stays at 1. Nothing errors. `StaggerEntrance` compounded it from the other side - it leaves
+  opacity and scale to any control exposing `interactionMotion`, which those tiles started doing
+  the same day, so it stopped dressing them while the binding meant to take over was reading the
+  wrong property. Between the two the quick toggles arrived at full strength with no entrance at
+  all, and it was the user who saw it, not the suite. Two things generalise. A duck-typed protocol
+  (here: "a member is a child that declares `appear`") silently widens when a shared base gains the
+  property it keys on - re-rooting is a protocol change, not just an inheritance change. And when a
+  lint walks this repo's type graph it must key a name to EVERY file that has it: the first version
+  of `tests/lint_shadowed_stagger_appear.py` kept one path per stem, `rglob` handed it the vendored
+  designsystem's second `RippleButton.qml` (which declares no `appear`), the chain dead-ended one
+  link early, and it passed over the very regression it was written for. d10c5137c
+  ("fix(quickToggles): one `appear` per tile, so the toggles fade in again"), e45f8f8ca
+  ("test(lint): fail on a wave member's `appear` shadowing an inherited one").
+- **A layout owns `x`, so an animation that writes it has to remember a position - and it
+  remembered the wrong one.** `StyledText.animateChange` slid the text out and back by animating
+  `root.x`/`root.y` toward an `originalX` captured in `Component.onCompleted`. For anything inside
+  a layout that capture is taken before the layout has run, so every later glyph swap "returned"
+  the item to a stale place and left it there. A `ListView` builds its first delegate before the
+  view has width, which is what selected the victim: in the contacts list, expanding the FIRST row
+  swapped `expand_more` for `expand_less` and parked that row's chevron **311px** left of the
+  card's trailing edge - in the middle of the contact's name - while every row built after the view
+  had width was correct. It animates a `Translate` now, which no layout writes, so the rest
+  position is zero and there is nothing to remember. This is the same rule `BarGroup` is built on
+  two points up, arrived at from the other end. 1a3f683be ("fix(widgets): move a text change with a
+  transform, not the item's own x"), 764e81d06 ("test(phone): measure the contact chevron, at rest
+  and after the glyph swap").
+- **A skip for a reason it did not name is a check that cannot fail.** Moving `GroupButton` onto
+  `RippleButton` pulled `InteractionMotion` into the chain, and the QML unit tests' import tree - a
+  mirror of symlinks under `tests/imports` with its own `qmldir` - had no entry for it, so the row
+  under test stopped building. `tst_config_selection_array` skipped on ANY load error, so the suite
+  reported two more skips, zero failures and exit 0. The guard now excuses the one thing it is
+  allowed to, the way `tst_grouped_list` already did: a Qt too old for the per-corner radii. When a
+  widget moves onto a new base, its base's dependencies have to reach `tests/imports` too.
+  80d970c89 ("test: resolve InteractionMotion, and fail rather than skip on a load error").
+- **...and the container a caller reaches for is `GroupedList`, which the guidelines already said.**
+  The first fix for the roster below wrapped the rows in a `StyledRectangle` of its own.
+  `docs/M3_GUIDELINES.md` names `GroupedList` for exactly that presentation, the component is used
+  in ten places including the phone's own webcam page, and the wrapper was written anyway. It drew
+  as a perfect rectangle, which is the second lesson: **`clip` on a `Rectangle` clips to the
+  bounding box, not to the radius**, so the opaque rows painted over all four corners while the
+  wrapper reported `radius: 17`. The runtime check written beside it asked for that property, was
+  told 17, and passed against a screen showing square corners - a property is not a pixel, and a
+  shape check reads the drawn rows. `GroupedList` takes a `model` and a `rowDelegate` now, because
+  the roster's rows are the daemon's and the component only took declared ones, and it hands a row
+  the plate's corners for the overpaint reason above.
+  `tests/lint_hand_rolled_row_group.py` fails on the shape now - and its own first version passed
+  over a file containing nothing but the offender, because it read the type from the text before
+  the colon and `delegate: PhoneDeviceItem {` is not that. Prove a lint in both directions.
+  d2c1f434a ("feat(widgets): let a GroupedList draw a model"), 777f32d30 ("fix(phone): the roster
+  is a GroupedList, not a rectangle of its own"), af8f55dcd ("test(lint): fail on a group of rows
+  wrapped in a rectangle of its own").
+- **`DialogListItem` is drawn for a container, and a caller that gives it none gets a bare list.**
+  It carries `buttonRadius: 0` on the layer-3 tone because the Wi-Fi and Bluetooth pickers put it
+  inside a dialog. The phone roster used it with nothing around it, so its rows sat straight on the
+  panel and the menu read as a list. It unrolls inside a `StyledRectangle` at the group tier now,
+  with the menu's radius, its vertical padding and a clip so square rows keep rounded ends, and the
+  chosen device carries what M3 gives a selected menu item - the secondary container tone, its
+  matching ink, a trailing check - where `active` had done nothing but cancel the hover colour.
+  Watch the harness when a surface appears: `rosterBox()` was spelled "the list's parent", which
+  the new wrapper would silently have become. 102e91e64 ("fix(phone): give the roster the menu
+  surface its rows are drawn for").
 - **A one-tree widget's geometry reads the SETTLED span's box, never the animating one.** Three
   trees were written with `spanW: root.implicitWidth`, and `implicitWidth` carries a Behavior: every
   rect became a per-frame target, so the Behaviors that carry the travel never converged, and any
@@ -2826,9 +3299,16 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   re-pays on every pixel of a drag, since the rect tracks the widget's position. Take the slice
   with a `ShaderEffectSource`'s `sourceRect` over a shared, unclipped, cached `Image` instead: the
   rect is free to move, and matching the request Background's own wallpaper `Image` makes means a
-  surface built while that wallpaper is on screen needs no decode at all.
+  surface built while that wallpaper is on screen needs no decode at all. That request now carries
+  a fifth parameter: a `sourceSize` bound (`bgRoot.wallpaperDecodeSize`, screen x configured zoom,
+  stable across lock), so an 8K file no longer decodes at 8K for a 1.1x-screen viewport — and every
+  sharer (the frost's `decodeWidth`/`decodeHeight`, the depth cutout's `decodeSize`) must carry the
+  SAME bound or #147 comes back with a new spelling. Qt preserves the picture's aspect under
+  `PreserveAspectCrop` + `sourceSize` (measured: 7680x2160 bounded to 2112x1188 decodes 4224x1188),
+  which is what keeps the depth registration's `coverRect` — an aspect-only computation — correct.
   33139b688 ("fix(widgets): give every desktop widget's frost one shared wallpaper decode"),
-  e15b9f166 ("test(widgets): pin the desktop frost to one shared wallpaper request").
+  e15b9f166 ("test(widgets): pin the desktop frost to one shared wallpaper request"),
+  61aec909 ("perf(background): bound the wallpaper decode to what a screen can draw").
 - Desktop plugin delegates are retained for every available manifest and gated through an animated
   `FadeLoader`, rather than repeating only the enabled ids. Removing a model delegate destroys it
   immediately and makes an M3 exit transition impossible; keep disabled loaders dormant until their
@@ -3095,6 +3575,43 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   widget that declares none is rendered anyway rather than omitted, since omitting it is the same
   silent disappearance this fixed. a47462fcc ("fix(verticalBar): render plugin bar widgets instead
   of an empty stub"), 06d31aabc ("test(bar): pin the two bars to one widget-url resolution").
+- **A layout id is a consumer. "Nothing instantiates it, nothing names it" is not true of a bar
+  widget until `BarWidgets.qml` has been read.** The dumb-widget audit deleted
+  `modules/imi/bar/PowerButton.qml` and `LeftSidebarButton.qml` as orphans: no QML instantiated them
+  and no source named them. The bar names its widgets by id from `Config.options.bar.layouts.*`,
+  Settings > Bar offers every id in `BarWidgets.qml`, and `fileNameFor` capitalises the id into the
+  file - `leftSidebarButton` was the first entry of the maintainer's own left layout and
+  `powerButton` sat in the right one. Both vanished from the live bar; the only trace was one
+  `WARN scene: ... File not found` line per reload, in a log nobody reads for a change that passed
+  the whole suite. `test_bar_widget_parity.py` now holds every palette id to a file on disk - the
+  direction its existing check did not cover, which read the names the RESOLVER could produce rather
+  than the ones the USER could pick. e2f25db06 ("refactor(bar): delete two buttons nothing built"),
+  9ebfa2acd ("fix(bar): bring back the two buttons the layout still names").
+- **Reading a pixel off the screen from inside the shell: `ScreencopyView` -> `grabToImage` ->
+  `saveToFile`, hosted in a mapped window.** Four dead ends first, all recorded in
+  `ScreenSampleProbe.qml`: `grabToImage` REFUSES an item whose window is not visible; a
+  `ColorQuantizer` pointed at the grab's `itemgrabber:` URL fails (it loads through the file
+  engine); `Canvas.loadImage` of that URL never completes under any render strategy; and a Canvas
+  that is not visible never paints (opacity 0.004 keeps one in the render loop, out of sight). What
+  works: a one-pixel transparent input-masked bottom-layer window hosts the view, `captureFrame()`
+  on the sampling clock (`live: false` - a live view copies every compositor frame), a 32ms timer
+  bridges the asynchronous capture, and an 8x8 grab saved to tmpfs feeds the existing quantizer.
+  22ms capture-to-colour, 1.3% of a core at 5Hz, and the colour agrees with the grim pipeline it
+  replaced. dae047147 ("feat(openrgb): sample the screen through a screencopy view, not a grim spawn").
+- **RGB lighting is driven through ONE open SDK client, never the `openrgb` CLI per write.** The
+  CLI cannot stream: each invocation is a fresh client handshake (1.0 s measured, `--nodetect` or
+  not), it autoconnects to the local server on top of `--client` so every device is listed and
+  written twice (`--noautoconnect` lists nothing), and it ends in a mode command - and a mode
+  command re-initialises the controller, which is the white blink the lights showed on every
+  palette step ("the flicker each second"). The OpenRGB Effects plugin is the reference: Direct
+  mode once when zones are assigned, then only `UpdateLEDs` per tick with per-frame interpolation.
+  `scripts/rgb/openrgb_stream.py` is that as a process `OpenRgb.qml` keeps open - Direct once per
+  controller and not for one already there, then frames at 30 fps ramping to each target on stdin;
+  1 ms to set up, 0.3 ms for 20 frames. The CLI path survives only as the fallback for a server
+  that never answers. `test_openrgb_stream.py` runs the script against a fake server; the contract
+  test holds both colour paths to handing the streamer their colour first.
+  9944abb97 ("fix(openrgb): every write goes through the SDK server, so the lights stop blinking"),
+  ddf80fde5 ("feat(openrgb): stream colours through one open SDK client, the Effects plugin's way").
 - **A `Process`'s `onExited` handler that ignores its `exitCode` argument will happily act on stale
   data.** `TempScreenshotProcess` writes to a deterministic path (`image-${screen.name}`), so a failed
   `grim` run used to leave the *previous* successful capture sitting there untouched - the region
@@ -4040,6 +4557,33 @@ mode is built out of are worth not re-deriving:
   (feat(plugins): layout_surfaces.js - the lock's widget choice forks too;
   feat(plugins): a widget's presence is asked per surface, not once;
   feat(editMode): the Lock section picks which widgets the lock screen shows.)
+- **A widget's own SETTINGS fork per surface too — per key, under `lockOptions`, and the
+  accessors take the surface; the surface SELECTOR is Edit Mode's tab, never a control on the
+  widget.** Position, span and presence each had a lock store; the widget's options stayed in the
+  flat `pluginOptions[id][key]`, and since the lock screen has no widget host of its own (the
+  desktop's widget is cross-faded by `AbstractBackgroundWidget`), the desktop and lock "copies" of
+  the resource monitor were one object reading one key — rotated on the Lockscreen tab, rotated
+  on the desktop (the maintainer's report, 2026-09-03). `lockOptions[id][key]` sits beside
+  `pluginOptions` and inherits PER KEY: present is the lock's own, absent reads through, `null`
+  re-inherits. Not the layout's whole-screen snapshot, on purpose — a user who rotates the monitor
+  for the lock still wants its blur to follow the desktop. Three keys never fork
+  (`SHARED_OPTION_KEYS`: `positionLocked`, `clickThrough`, `__gridSize`): Edit Mode policy with one
+  writer and one meaning, and the span has its own surface path. `PluginState.option()` and
+  `setOption()` take a trailing `surface` with the position API's `currentSurface` default, so
+  every widget binding and in-widget knob that predates the fork follows the face the desktop
+  is showing — that IS the whole user-facing change: the monitor's rotate button on the Lockscreen
+  tab writes the lock's `vertical`, and the desktop's binding re-evaluates when the look flips.
+  Settings > Widgets rows are desktop-only by construction (the size row's rule) and name
+  `PluginState.desktopSurface` on every call; a Desktop / Lock screen switch on each card was
+  built and REJECTED by the maintainer — Edit Mode's Desktop / Lockscreen tab is the one surface
+  selector, and a second per widget duplicates it. A setting that must be reachable on the lock
+  side without an in-widget knob keeps an explicit manifest row (the clock's "Clock style
+  (locked)"); if per-surface editing of plain options is ever wanted, it goes into Edit Mode's
+  widget menu, not the card. Presets carry `lockOptions` under the `has()` rule `lockPositions`
+  follows. No migration: absence is the upgrade state.
+  (feat(plugins): widget options fork per surface in the pure store rules;
+  feat(plugins): PluginState.option and setOption take a surface;
+  feat(presets): a preset carries the lock screen's widget options.)
 - **A dragged widget holds a neighbour's edge through a Schmitt trigger, and
   both thresholds read the SHADOW — stage 10, spec §6.**
   `modules/common/functions/edge_snap.js` owns the arithmetic: four relations
@@ -6106,8 +6650,15 @@ map-time keyboard grant. A third obligation lives in `services/GlobalFocusGrab.q
 the grab's whitelist must end with the dismissables — Hyprland hands the grab's keyboard focus to
 a surface picked from the END of the list, and with the bar/OSK after the panel, an opening panel
 never activates and every keypress is silently dropped (the persistent-sidebar contract pins the
-order; fix(sidebars): route the focus grab's keyboard to the opening panel). `SessionScreen` still
-maps per open and pays this same 61ms.
+order; fix(sidebars): route the focus grab's keyboard to the opening panel). `SessionScreen` is
+that family too now — per-screen windows, the latch, Exclusive keyboard and the whole-surface
+mask both gated on `isTarget`, an exit that owns `reallyOpen` — with one addition of its own:
+`rules.lua`'s `quickshell:session` rule was `ignore_alpha = 0`, under which a permanently-mapped
+surface's fully transparent idle pixels would ask the compositor to blur the entire screen, so
+the threshold moved to 0.4 (the scrim sits at ~0.88+, so it frosts exactly as before). Its layer
+follows the overview's #339 rule — Overlay only while open over a true fullscreen window, Top
+otherwise — because a permanently-mapped Overlay surface holds the fullscreen fast path shut.
+c27bebd0 ("perf(sessionScreen): the session menu's surface outlives the gesture").
 
 A fourth cost, found by the first multi-monitor user to update (#297): **a persistent surface has
 to say which screen it lives on.** A `PanelWindow` with no `screen:` asks the compositor to choose
@@ -6229,8 +6780,140 @@ above before adding a third call site),
 answered),
 `MarqueeText` (a single-line label that scrolls only while it overflows its box, over the overflow
 and back, at a distance-proportional speed with a floor — see the entry below before adopting one),
-`CatalogueRow` (one entry of a catalogue, drawn — see the entry below before building a list row).
+`CatalogueRow` (one entry of a catalogue, drawn — see the entry below before building a list row),
+`Presence` (an element that fades in and out on a state and stays drawn until the fade out has
+finished, optionally giving up its room along an axis - the spelling for anything that would
+otherwise be a bare `visible:` on a state; `FadeLoader` is the same for a Loader, `Revealer` the
+size-only sibling),
+`PopupAnchorIndicator` (the one open state a bar widget has while a click holds its popup open:
+Material's active indicator, a primary bar on the bar surface's popup-facing edge as long as the
+widget's visual, growing in and fading - see the entry below before painting a toggled container or
+a ring on a bar widget).
 All in `modules/common/widgets/`.
+
+**A bar widget's open state is the edge indicator, never a container or a ring around it.** The
+bar had no open state for a widget whose popup is up. Two were tried and failed on styling: a
+`RippleButton` tonal toggled container (a filled pill behind the Docker gauge's bare ring, wrong
+under every style but M3) and a dashed ring hugging the visual, from the p3drovfx fork's expressive
+dashboard pill (needs air that the group pills and the flat bar do not give). `PopupAnchorIndicator`
+is Material's active indicator: a primary bar, `borderWidth.emphasis` thick, as long as the widget's
+visual, on the bar surface's popup-facing edge, so it is outside every group pill under every style
+and points at the popup. It is mounted on the widget's root with `wraps` (the visual), `edgeItem`
+(the root) and `edge` from `BarEdges.popupEdge(vertical, bottom)` - the bar's `bottom` flag is its
+side when vertical. The edge it lies on is the nearest PAINTED PLATE's, found by walking the root's
+ancestors for a `popupAnchorSurface`: `BarGroup` exposes its pill when it paints one (Pills,
+Separated, Islands, an M3 material pill), else the section exposes its plate - the M3 section
+pill, the Float Islands island, the centre-only pill, or the bar background - and a bar that paints
+nothing (Islands with transparent groups) falls back to the root's own edge. Not the root's edge
+in general (a vertical bar's widgets are narrower than the bar) and not the window's (taller than
+the plate by shadows and gaps, unevenly - measured: the line landed below every plate but Hug's).
+Two tokenised tiers: effects for the fade, one spatial tier for the grow both ways.
+`tests/test_bar_popup_anchor_contract.py` keeps a register of the click-held popups and fails on
+one that ships without it, with a tonal container, or on a section that stops naming its plate.
+Verified by nested screenshots, five corner styles by three group styles horizontal plus three
+vertical: the line sits inside the plate flush with its popup-facing edge, as long as the visual,
+in every one. `BarAnchorProbe.qml` measures the length and centring headlessly (IPC `probe arm`,
+`probe boxes`).
+("feat(bar): a widget's open popup is marked by an indicator on the bar's edge").
+
+**One opacity for the blurred shell surfaces, and widgets follow it through `PluginState`.** Every
+blurred surface - the bar, the sidebars, the dock, the settings window, the cheatsheet - draws on
+`colLayer0`, which `Appearance` thins by `backgroundTransparency`; Settings > Quick's "Shell
+opacity" slider is that amount inverted (`1 - appearance.transparency.backgroundTransparency`),
+inert while Automatic derives it from the wallpaper or while transparency is off. There is no
+per-surface slider: the surfaces share one colour. The bar popup card painted an opaque
+`colLayer1Base` by choice; it is thinned by the same amount now, and the compositor's threshold
+(`PopupBlurThreshold`) needs nothing new, since it already sits below the bar's body, which is
+fainter than the card ("feat(bar): the popup card follows the shell opacity"). Desktop widgets keep their own slider
+(`plugins.blurOpacity`) unless `plugins.followShellOpacity` is on, in which case
+`PluginState.configuredBackgroundOpacity` hands every panel `1 - Appearance.backgroundTransparency`
+- PluginState is the one place every widget's panel alpha already passes, so no widget reads
+`plugins.blurOpacity` itself (`tests/test_shell_opacity_contract.py` fails one that does).
+("feat(settings): a shell opacity slider, and widgets that follow it").
+
+**A border is thinned like its fill, never mixed with it.** `colLayer0Border` was
+`mix(m3outlineVariant, colLayer0, 0.4)`: an opaque outline mixed with a fill the shell opacity
+slider thins leaves the border at 0.4 + 0.6 of the fill's alpha - an opaque ring around a
+see-through plate, reported the day the slider shipped. It is `transparentize(mix(outline,
+colLayer0Base), backgroundTransparency)` now, the fill's own amount
+("fix(appearance): the plate border thins with the fill instead of ringing it").
+
+**An unpainted bar can shade the screen edge behind it.** With `bar.showBackground` off and
+`bar.borderless` "transparent" - and only under a style where Show Background APPLIES (Hug, Float,
+Float Islands; M3 and Islands paint their own containers whatever the switch says, and the shade
+showed under M3's pills the day it shipped) - the bar is glyphs over the wallpaper; `bar.edgeShadow` draws
+`colBarEdgeShade` at the screen edge fading to transparent across the bar, in both bar contents
+behind the plate, gated on exactly that state - the bottom flag flips the gradient, and is the
+right-hand side when vertical. Settings > Bar's switch is inert outside the state.
+`tests/test_bar_edge_shadow_contract.py` pins the gate, the direction and the token
+("feat(bar): an edge shadow behind an unpainted bar").
+
+**The privacy indicator is an alarm: danger-red in both themes, under every bar style.** M3's error
+role flips saturation with the theme - the dark theme's `m3error` is a pastel pink and its
+`m3errorContainer` the deep red, the light theme the other way round - so a `colError` pill was pink
+with a dark glyph in the dark theme and read as decoration ("sticks out like a sore thumb, and not
+in a good way"). It is not the accent either: the maintainer's rule is that the privacy widget
+ALWAYS reads as danger-red. `Appearance.colors.colAlarm` / `colOnAlarm` / `colAlarmHover` pick the
+saturated member of the pair and its on-colour in either theme; the indicator wears them unchanged
+across styles, hover as a colour. `tests/test_privacy_indicator_palette.py` refuses the accent and
+the bare error tokens there
+("fix(bar): the privacy indicator is danger-red in both themes").
+
+**kitty.conf is managed; the user's kitty settings live in `user.conf`, and opacity is shell
+config.** The kitty directory is deployed with a `--delete` sync, so a hand edit to the shipped
+kitty.conf vanished on every update ("transparency or blur values just disappear after an update").
+The shipped file says it is managed and includes `user.conf` LAST - the user's own file, never
+shipped, excluded from the sync along with matugen's `colors-matugen.conf` the way fish keeps
+`conf.d` and tmux its plugins. The knob most people were hand-editing, `background_opacity`, is
+`appearance.terminal.opacity`, written into the generated theme's managed block by
+`scripts/terminal/apply_terminal_background.py` (pattern or not) and set from Settings > Appearance
+> Terminal - shell config, so a preset carries it with `appearance`. kitty's `background_blur` is
+macOS-only; on Hyprland the compositor blurs a translucent kitty. Never move a shipped kitty
+setting into `user.conf` from a script, and never ship a `user.conf`
+("fix(installer): a user's kitty settings survive an update",
+"feat(settings): terminal opacity as shell config").
+
+**Edit Mode's chrome is ONE toolbar, tabs first, undo and redo before Done; the band under the
+desktop is the desktop's.** The Desktop/Lockscreen tab bar was a second `Toolbar` in a band that
+mirrored the toolbar's under the card; the maintainer asked for it in the toolbar and for the
+desktop to take the space. `viewportGeometry` reserves `edgeMargin + chrome + margin` above and one
+`margin` below now, and centres the card in the room those unequal bands leave, not in the usable
+area (which would put half the top band back under the desktop). `chromeBandFraction` places the
+one toolbar; `lint_edit_mode_band_fraction.py` fails a piece placed at `1 - bandFraction`. Redo
+is edit_mode.js's `swap(read, write, value)`: an entry that restores `value` and RETURNS the entry
+restoring what it displaced, so `editUndo` keeps the return on `editRedoStack` and `editRedo`
+keeps its return back on the undo stack; `composite` folds a gesture's batch the same way (undone
+from the end, redone from the start). Every push site is a `swap` over its one literal store path -
+a new site that pushes a bare closure still undoes, but its undo has no redo. A new mutation empties
+the redo stack. The snap toggle's glyph is `grid_on`/`grid_off`; the alignment glyph read as a
+text control ("feat(editMode): one toolbar with the tabs first, and undo/redo").
+
+**A plugin's options say their group once, as a heading, and a labelled chip row wraps.** The clock
+declared eleven rows labelled "Cookie: ..." (and its digital and pixel rows the same way), which read
+as a list of one word, and its "Cookie: minute hand" row lost its last word under five chips. Manifest
+options take `"group"` (and a `"groupIcon"`); `PluginOptions` renders each consecutive run of one
+group as a hairline and a `ContentSubsection` header with the icon, its visible rows PACKED beneath:
+consecutive booleans two to a line (the Bar page's switch pairs), the rest full rows - a choice row
+keeps its label centred beside its chips and stacks only when they cannot fit; forcing a block to
+stack read as five uncentred labels - shown only while one of its rows is - and the labels drop the
+prefix. Plugin choice rows are `ConfigSelectionArray { compact: true }`: with every option iconed
+the chips are icon-only, named on hover, the current one named beside the label ("these grouped
+buttons need to be redesigned to be more compact"); a text-only option keeps text chips. Two shapes
+were tried and rejected on the way: a bare heading over plain rows ("more
+cryptic than before"), and GroupedList plates around the rows ("increasing the space isn't the
+solution" - plates add 24px per row and, in a palette where the plate is the card's colour, only air).
+Structure comes from headers and packing, never from surfaces or padding (`docs/PLUGINS.md`; `tests/test_clock_options_contract.py` refuses a style-bound clock row
+without a group or with the prefix). `ConfigSelectionArray`'s row is a grid: a labelled row whose chips
+cannot share the line STACKS them beneath the label, right-aligned (wrapping beside a centred label
+put "Bold" alone on a second line), and an unlabelled row still fills and wraps
+("feat(plugins): options group under a heading instead of repeating it in every label",
+"fix(settings): a labelled segmented row wraps its chips instead of covering its label").
+
+**A `RippleButton`'s background only shrinks when its size is set outright.** A Control forces its
+background to its own size unless `width`/`height` are set explicitly; `background.implicitWidth`
+plus `background.anchors.centerIn` changes nothing, and the outline parented to that background
+stayed the bar-height hoop it was meant to shrink. Set `background.width`/`background.height`
+("fix(bar): the Docker and tray overflow backgrounds are sized outright, so they can hug the content").
 
 **A catalogue's rows are one component, and it is deliberately not a control.** Edit Mode's drawer,
 every settings row and the widget store's cards all draw the same thing — a leading icon, a name, a
@@ -6301,8 +6984,13 @@ than a new widget: (a) a subsection header with a leading icon (`ContentSubsecti
 segmented single-choice row whose every option carries an icon and a label (`ConfigSelectionArray`
 options' `icon`); (c) a computed live hint under such a row (`ConfigSelectionArray.detailContent`, a
 full-width slot whose gap follows what is DRAWN in it, so a hint that hides itself takes its gap with
-it); (d) a toggle row with a leading icon chip (`ConfigSwitch.iconChip`, drawn by
-`CatalogueRow.iconChip`); (e) a dropdown with a leading icon and a "(Recommended)" suffix on its
+it); (d) a toggle row with a PLAIN leading icon (`ConfigSwitch.buttonIcon`, drawn by
+`CatalogueRow` with nothing behind it). It was an icon on a tonal chip, `iconChip`, from the grammar's
+first day until 2026-08-30, when the maintainer looked at Phone & Devices: "those icons should exist,
+the backgrounds should not. This only applies to the panels/options themselves. The category titles
+should have both the icon and the background." The tile is a header's (a); an option row wearing one
+reads as a second control. The property is GONE, not defaulted off, and the grammar test refuses the
+word anywhere under `modules/`; (e) a dropdown with a leading icon and a "(Recommended)" suffix on its
 default choice (a `recommended: true` entry in `ConfigComboBox`'s model - the widget suffixes it
 through `Translation.tr`, so no call site spells the word); (f) a text field with a floating label
 (`ConfigTextArea.floatingLabel` - the label rests where the value goes, floats to the top edge on
@@ -6335,9 +7023,10 @@ label is a rationale, and a rationale is the (i)'s). Three things about it are n
   wherever that page's other contracts already live, so the file does not grow one class per page
   while the reference stays the thing that defines the grammar. It fails in both directions: a page
   carrying the opt-ins without an entry (the grammar adopted and nothing holding it there) and an
-  entry whose page has dropped them (a register nobody rechecks). The marker is `iconChip: true`,
-  which is the one opt-in no page carries by accident - it defaults off precisely because 159
-  `ConfigSwitch` call sites draw that row.
+  entry whose page has dropped them (a register nobody rechecks). The marker is EVERY subsection
+  header on the page leading with an icon - the piece no page carries by accident (a page that gave
+  two of six headers an icon has not adopted the grammar, and one with no subsections has nothing to
+  adopt it with). It was `iconChip: true` until the chip was retired on 2026-08-30 (item (d) above).
   4c7fe3e1f ("test(settings): the row grammar gets an adopter register, running both ways"),
   1d2823bf4 ("feat(settings): a Devices & Phone page, on the row grammar").
 
@@ -6349,6 +7038,56 @@ label is a rationale, and a rationale is the (i)'s). Three things about it are n
 "feat(capture): record_bitrate.js, what a quality tier costs on this screen",
 "feat(settings): the Capture page adopts the row grammar",
 "test(settings): pin the row grammar's widgets and its reference page").
+
+**Gracefully entering and exiting: an element that comes and goes with a state never snaps.** A
+bare `visible: engine.isFinished` is a one-frame swap, and the typing test's results screen shipped
+as exactly that, with its stage, its keyboard preview, its restart button, its live counters, its
+three sub-pages and the toolbar's modifier group all gated the same way. Each is a `Presence` now
+(the pages are `FadeLoader`s), and where two states share one place - the stage and the score, the
+reading line and its loading mark - they sit in ONE slot and cross-fade, with the slot's height
+eased on the same tier, because two sequential layout children fading past each other stack
+mid-fade and jump the layout. Measured in a nested Hyprland with a 15s test: the results' presence
+0 → 1 as the stage's 1 → 0 with the slot 186 → 226px, and a restart sampled 80ms in still drawing
+the score at 0.01 - a lifetime past the flag, which is the whole of the rule. The typing contract
+refuses a bare `visible:` on state in the surface and the toolbar.
+("fix(typing): nothing in the test snaps in or out on state").
+
+**A Bluetooth device's battery has one lookup and three readers.** A device's level comes from
+BlueZ's `Battery1` interface (`BluetoothDevice.batteryAvailable` gating `battery`, 0..1) or, when
+BlueZ has nothing - HID controllers like the DualSense, bluetoothd without `Experimental=true` -
+from the UPower power_supply whose `nativePath` carries the device's MAC. `services/BluetoothStatus.qml`
+knew both but handed the answer out only as the quick toggle's ` • NN%` suffix, so At-a-glance grew
+its own filter on `batteryAvailable` and lost every controller. `BluetoothStatus.batteryLevelOf(device)`
+is now the one lookup (0..1, `-1` when neither source knows), `formatBatterySuffix` formats it,
+`batteryDevices` is the connected devices with a level and `lowestBatteryDevice` the one to worry
+about; the suffix, At-a-glance and the bar's `BluetoothBattery.qml` all read those and nothing else
+(`tests/test_bluetooth_battery_widget.py` forbids `UPower` and `batteryAvailable` in the readers).
+The widget draws a ring only for devices with a level - a device with no report has nothing to
+draw - but its popup lists every CONNECTED device, "No battery report" and all, because the popup
+answers "what is connected", not "what is charged". Its click deep-links to the Bluetooth dialog
+through `GlobalStates.sidebarRightDialog = "bluetooth"` before `sidebarRightOpen = true`: a
+property consumed and cleared by `SidebarRightContent` (on completion, on the open edge, on a write
+while open - the `sidebarLeftTab` shape), not a signal, because the sidebar's content is a `Loader`
+that exists only while the panel is shown and a signal fired before it is built reaches nothing.
+`Icons.getBluetoothDeviceMaterialSymbol` maps BlueZ's `input-gaming` to `stadia_controller` ahead of
+the generic fallback, so the same controller is named in the dialog, on the bar and in At-a-glance.
+Nothing on a test machine puts a ring on this widget, so `tests/run_bluetooth_battery_probe.sh`
+fakes the connected list in a COPY of the tree under a nested Hyprland and reads the rings, the
+hover and the click back over IPC; its header carries the numbers it measured.
+("feat(bar): a Bluetooth battery widget, one ring per device")
+
+**An icon in a circle on the bar is an OUTLINED ring under every bar style but M3.** The
+maintainer's rule (2026-09-02), with the resource monitor's four rings as the reference: a bar
+widget that puts a glyph in a circle draws the ring, not a disc, unless the style is M3, where the
+tonal pill is the container and the circle is filled. Where the circle means progress - and on the
+bar it usually does: the resource monitor's usage, the media widget's position, the Docker widget's
+running-over-total - it is `ClippedOutlineCircularProgress`, with `ClippedFilledCircularProgress`
+only for M3 (and the resource monitor's own Filled option). The style decision stays in the bar
+widget: a shared ring widget that read `Config.options.bar.cornerStyle` was written first and
+refused by `lint_dumb_widgets`, which is right - the widget picks the component and passes the
+choice down. `tests/test_bar_icon_ring_contract.py` holds Media and Docker to it and lists every
+file that may use the filled ring.
+("fix(bar): the media and Docker circles are outline progress rings, as the resource monitor's").
 
 **A marquee is the answer for an IDENTITY, and where it may run is as much of the design as how it
 moves.** `MarqueeText` exists because every long label in this shell elides, which is honest about

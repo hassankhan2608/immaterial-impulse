@@ -24,7 +24,7 @@ Item {
     readonly property int tailnetIndex: root.tailnetEnabled ? (root.aiChatEnabled ? 1 : 0) : -1
     property bool phoneEnabled: Config.options.sidebar.phone.enable
     property var tabButtonList: [
-        ...(root.aiChatEnabled ? [{"icon": "neurology", "name": Translation.tr("Intelligence")}] : []),
+        ...(root.aiChatEnabled ? [{"icon": "star_shine", "name": Translation.tr("Intelligence")}] : []),
         ...(root.tailnetEnabled ? [{"icon": Tailscale.materialSymbol, "name": Translation.tr("Tailnet")}] : []),
         ...(root.ociVpsEnabled ? [{"icon": OciVps.materialSymbol, "name": Translation.tr("VPS")}] : []),
         ...(root.translatorEnabled ? [{"icon": "translate", "name": Translation.tr("Translator")}] : []),
@@ -170,6 +170,12 @@ Item {
                 id: swipeView
                 anchors.fill: parent
                 spacing: Appearance.spacing.space150
+
+                // The bar button's glyph follows the open page.
+                onCurrentIndexChanged: GlobalStates.sidebarLeftTabIcon =
+                    root.tabButtonList[swipeView.currentIndex]?.icon ?? ""
+                Component.onCompleted: GlobalStates.sidebarLeftTabIcon =
+                    root.tabButtonList[swipeView.currentIndex]?.icon ?? ""
 
                 clip: true
                 layer.enabled: true

@@ -7,6 +7,7 @@ import qs.modules.common.functions
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 
 /**
  * Syncs RGB peripherals to the Material You accent color via the OpenRGB CLI.
@@ -15,8 +16,25 @@ import Quickshell.Io
  * upstream implementation shells into a Python SDK client (openrgb-python +
  * scipy fade interpolation) from applycolor.sh; here that is replaced by a
  * single `openrgb --mode static --color <hex>` invocation - no extra Python
- * dependencies, and the openrgb CLI already talks to a running OpenRGB
- * server instance when one exists.
+ * dependencies.
+ *
+ * Every write goes through the SDK server. The CLI does NOT talk to a
+ * running server on its own: without `--client` each invocation runs a full
+ * hardware detection pass of its own - seconds long, and it resets every
+ * device to its default colour on the way, so the lights blinked white on
+ * every palette step and every ambient sample ("the flicker each second").
+ * So the service brings a server up whenever the sync is enabled (its own
+ * `openrgb --server`, unless one already answers on 127.0.0.1:6742) and,
+ * once it answers, keeps ONE client open to it: scripts/rgb/openrgb_stream.py,
+ * which puts each controller into its Direct mode once and from then on
+ * sends nothing but LED frames - the way the OpenRGB Effects plugin drives
+ * hardware. `--client` on the CLI was tried first and is not enough: every
+ * CLI call is a fresh handshake (a second, measured) followed by a mode
+ * command, and the mode command is the re-initialisation that blinks. The
+ * streamer takes a target colour per line on stdin and ramps the devices
+ * to it at 30 fps, so a palette animation or an ambient sample arrives as
+ * a fade rather than a step. The CLI path below survives as the fallback
+ * for a server that never comes up - slow and blinking, but working.
  *
  * Trigger: upstream fires when applycolor.sh runs after matugen generates a
  * new palette. The equivalent moment in this shell is
@@ -58,6 +76,104 @@ Singleton {
     // singleton is instantiated at startup and starts tracking palette changes.
     function load() {}
 
+    // ---- the streaming client ----------------------------------------
+    readonly property string streamScript: `${Directories.scriptPath}/rgb/openrgb_stream.py`
+    // Ready once the streamer has its controllers set up; every colour
+    // goes through `pushColor` from then on, and the CLI path only when
+    // this is false.
+    property bool streamReady: false
+    readonly property bool streamWanted: root.enabled && root.available && root.serverReady
+    // Exclusions travel as argv (names as their own elements, nothing
+    // shell-spliced). The type exclusions are the ambient loop's - GPU RGB
+    // rides the graphics card's i2c bus and a frame stream to it mid-game
+    // stalls rendering - so they apply while the loop drives the lights and
+    // the accent path, one fade per palette change, still reaches the GPU.
+    readonly property list<string> streamArgs: {
+        const args = ["python3", root.streamScript, "--fps", "30", "--smoothing", "0.25"];
+        for (const name of root.excludedDevices)
+            args.push("--exclude-name", name);
+        if (root.ambientActive)
+            for (const type of root.ambientTypeExclusions)
+                args.push("--exclude-type", type);
+        return args;
+    }
+    // A change in what the streamer excludes is a restart: the process
+    // reads its argv once. Cheap - reconnecting is a millisecond and a
+    // controller already in Direct gets no mode command - and the colour is
+    // re-pushed once it reports ready.
+    onStreamArgsChanged: {
+        if (!streamProc.running)
+            return;
+        root.streamReady = false;
+        streamProc.running = false;
+        streamProc.running = Qt.binding(() => root.streamWanted);
+    }
+    function pushColor(hex) {
+        if (!root.streamReady)
+            return false;
+        streamProc.write(hex + "\n");
+        root.lastAppliedColor = hex;
+        return true;
+    }
+    // What the lights should show right now, for a streamer that just came
+    // up. The ambient loop's next sample answers for itself.
+    function pushCurrentColor() {
+        if (root.ambientActive || !Config.ready || GlobalStates.screenLocked)
+            return;
+        root.pushColor(root.hexOf(Appearance.m3colors.m3primary));
+    }
+    Process {
+        id: streamProc
+        command: root.streamArgs
+        running: root.streamWanted
+        stdinEnabled: true
+        stdout: SplitParser {
+            onRead: data => {
+                if (data.startsWith("ready")) {
+                    root.streamReady = true;
+                    root.lastAppliedColor = "";
+                    root.pushCurrentColor();
+                } else if (data.startsWith("lost")) {
+                    root.streamReady = false;
+                }
+            }
+        }
+        // The streamer's notices - which controllers it skips and why, a
+        // mode switch, a rescan - are diagnostics, not warnings.
+        stderr: SplitParser {
+            onRead: data => console.log("[OpenRgb]", data)
+        }
+        onRunningChanged: {
+            if (!running)
+                root.streamReady = false;
+        }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0 && root.streamWanted)
+                console.warn("[OpenRgb] streamer exited with code", exitCode);
+        }
+    }
+
+    // The address serverProbeProc checks and serverProc listens on.
+    readonly property list<string> sdkClientArgs: ["--client", "127.0.0.1:6742"]
+    // Our own server is on its way up: hold the write rather than let a
+    // detecting CLI race the detecting server for the same devices.
+    readonly property bool serverStarting: !root.serverReady
+        && (serverProc.running || (detectorSyncProc.running && detectorSyncProc.thenStartServer))
+    onServerReadyChanged: {
+        if (root.serverReady)
+            root.startPendingApply();
+    }
+
+    // An openrgb argv, routed through the SDK server once one answers. Pure
+    // in shape - `["openrgb", ...rest]` in, the same with the client flag
+    // spliced after the binary out - so the per-device builder below stays
+    // the tested, server-agnostic function it was.
+    function sdkCommand(argv) {
+        if (!root.serverReady || argv.length === 0 || argv[0] !== "openrgb")
+            return argv;
+        return [argv[0]].concat(root.sdkClientArgs, argv.slice(1));
+    }
+
     function hexOf(color) {
         let hex = color.toString(); // "#rrggbb" or "#aarrggbb"
         if (hex.length === 9)
@@ -86,6 +202,8 @@ Singleton {
         const hex = root.hexOf(Appearance.m3colors.m3primary);
         if (hex === root.lastAppliedColor)
             return;
+        if (root.pushColor(hex))
+            return;
         root.pendingColor = hex;
         // "static" persists on-device where supported (the CLI counterpart of
         // upstream's SDK direct-mode writes); the ambient loop uses "direct".
@@ -97,6 +215,8 @@ Singleton {
     function startPendingApply() {
         if (applyProc.running)
             return; // Re-dispatched from applyProc.onExited
+        if (root.serverStarting)
+            return; // Re-dispatched from onServerReadyChanged
         if (root.pendingColor === "" || root.pendingColor === root.lastAppliedColor) {
             root.pendingColor = "";
             return;
@@ -122,7 +242,7 @@ Singleton {
         root.lastAppliedColor = hex;
         // Color is passed as its own argv element - never spliced into a
         // shell string.
-        applyProc.command = ["openrgb", "--mode", root.pendingMode, "--color", hex];
+        applyProc.command = root.sdkCommand(["openrgb", "--mode", root.pendingMode, "--color", hex]);
         applyProc.running = true;
     }
 
@@ -144,7 +264,7 @@ Singleton {
             return;
         }
         root.lastAppliedColor = hex;
-        applyProc.command = cmd;
+        applyProc.command = root.sdkCommand(cmd);
         applyProc.running = true;
     }
 
@@ -199,7 +319,10 @@ Singleton {
 
     Timer {
         id: debounceTimer
-        interval: 1000
+        // 200, not the 1000 it was: a write through the server is a client
+        // call, not a detection pass, so the debounce only has to swallow
+        // the palette animation's per-frame steps, not hide a blink.
+        interval: 200
         repeat: false
         onTriggered: root.requestApply()
     }
@@ -217,6 +340,9 @@ Singleton {
             if (!root.enabled)
                 return;
             root.lastAppliedColor = ""; // Force a sync on (re-)enable
+            root.serverSpawnAttempted = false;
+            serverProbeProc.running = false;
+            serverProbeProc.running = true;
             root.scheduleApply();
         }
         function onExcludedDevicesChanged() {
@@ -258,8 +384,10 @@ Singleton {
             LANG: "C",
             LC_ALL: "C"
         })
-        // Constant argv - nothing is spliced in.
-        command: ["openrgb", "--list-devices"]
+        // Constant argv - nothing is spliced in. Through the server when
+        // one answers: a scan without it is a detection pass, and a
+        // detection pass blinks every device white.
+        command: root.sdkCommand(["openrgb", "--list-devices"])
         stdout: StdioCollector {
             // The stream closes on process exit, so the parse (and the
             // handed-off apply) always sees the complete listing.
@@ -332,6 +460,14 @@ Singleton {
     property bool ambientScanDone: false
     readonly property string ambientDir: FileUtils.trimFileProtocol(`${Directories.cache}/openrgb`)
     readonly property string ambientFramePath: `${root.ambientDir}/ambient-frame.jpg`
+    // The screencopy sample. tmpfs, not the cache: this file is rewritten
+    // up to five times a second and never needs to survive anything.
+    readonly property string sampleFramePath: `${Quickshell.env("XDG_RUNTIME_DIR")}/quickshell-imi-rgb-sample.png`
+    // Sampling reads the compositor's own frame through a ScreencopyView -
+    // no grim process, no JPEG encode. grim remains the fallback for the
+    // day the screencopy path breaks (`samplerBroken` latches on the first
+    // refused grab), which is also why its availability probe stays.
+    property bool samplerBroken: false
     readonly property string detectorSyncScript: `${Directories.scriptPath}/rgb/sync_openrgb_detectors.py`
     readonly property string detectorStatePath: FileUtils.trimFileProtocol(`${Directories.state}/user/openrgb-detectors.json`)
 
@@ -355,6 +491,10 @@ Singleton {
     }
 
     function captureAmbientFrame() {
+        if (!root.samplerBroken && samplerLoader.item !== null) {
+            samplerLoader.item.sample();
+            return;
+        }
         if (grimProc.running)
             return;
         // The name comes straight from hyprctl's monitor list; no focused
@@ -381,6 +521,8 @@ Singleton {
             if (Config.options.appearance.openrgb.monitorSmooth ?? true)
                 hex = root.mixHex(root.lastAppliedColor, hex, 0.5);
         }
+        if (root.pushColor(hex))
+            return;
         root.pendingColor = hex;
         // Transient streaming mode: no per-write mode persistence, and it
         // exists on devices that lack "static" (gamepads, some keyboards).
@@ -413,9 +555,81 @@ Singleton {
         return (hex(ch(16)) + hex(ch(8)) + hex(ch(0))).toUpperCase();
     }
 
+
+    // The sampler needs a mapped window: `grabToImage` refuses an item
+    // whose window is not visible (measured; a hidden FloatingWindow, an
+    // unparented view and a Canvas.loadImage of the grab URL all fail in
+    // their own ways - see ScreenSampleProbe.qml). So the view lives in a
+    // one-pixel, transparent, input-masked window on the bottom layer,
+    // which exists only while the ambient loop can run.
+    LazyLoader {
+        id: samplerLoader
+        active: root.monitorMode
+
+        PanelWindow {
+            id: samplerWindow
+            implicitWidth: 1
+            implicitHeight: 1
+            color: "transparent"
+            exclusionMode: ExclusionMode.Ignore
+            WlrLayershell.layer: WlrLayer.Bottom
+            WlrLayershell.namespace: "quickshell:rgbsampler"
+            anchors { left: true; bottom: true }
+            mask: Region {}
+
+            function sample() {
+                const name = HyprlandData.monitors.find(m => m.focused)?.name ?? "";
+                const screen = Quickshell.screens.find(s => s.name === name) ?? null;
+                if (screen === null)
+                    return;
+                if (copyView.captureSource !== screen)
+                    copyView.captureSource = screen;
+                copyView.captureFrame();
+                grabTimer.restart();
+            }
+
+            ScreencopyView {
+                id: copyView
+                // A view that is not visible cannot be grabbed; near-zero
+                // opacity keeps it in the render loop and out of sight
+                // (its window is one transparent pixel regardless).
+                opacity: 0.004
+                width: 8
+                height: 8
+                live: false
+                paintCursor: false
+            }
+
+            // captureFrame() is asynchronous; one frame of grace before the
+            // grab reads the view. 32ms, measured end-to-end at 22ms.
+            Timer {
+                id: grabTimer
+                interval: 32
+                onTriggered: {
+                    if (!copyView.hasContent)
+                        return; // First tick after activation; the next has it.
+                    const started = copyView.grabToImage(result => {
+                        if (!result.saveToFile(root.sampleFramePath)) {
+                            root.samplerBroken = true;
+                            console.warn("[OpenRgb] sampler cannot write", root.sampleFramePath, "- falling back to grim");
+                            return;
+                        }
+                        ambientQuantizer.source = "";
+                        ambientQuantizer.source = "file://" + root.sampleFramePath;
+                    }, Qt.size(8, 8));
+                    if (!started) {
+                        root.samplerBroken = true;
+                        console.warn("[OpenRgb] grabToImage refused - falling back to grim");
+                    }
+                }
+            }
+        }
+    }
+
     Timer {
         id: ambientTimer
-        running: root.ambientActive && root.grimAvailable && root.serverReady
+        running: root.ambientActive && root.serverReady
+            && (!root.samplerBroken || root.grimAvailable)
         interval: Config.options.appearance.openrgb.monitorPollInterval ?? 200
         repeat: true
         triggeredOnStart: true
@@ -426,7 +640,9 @@ Singleton {
     // server starting up and one the user runs themselves).
     Timer {
         id: serverPollTimer
-        running: root.ambientActive && !root.serverReady
+        // Whenever the sync is on, not only while the ambient loop runs:
+        // the accent path's writes blinked for the same reason.
+        running: root.enabled && root.available && !root.serverReady
         interval: 1000
         repeat: true
         onTriggered: {
@@ -462,7 +678,7 @@ Singleton {
         command: ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6742"]
         onExited: (exitCode, exitStatus) => {
             root.serverReady = exitCode === 0;
-            if (root.serverReady || !root.ambientActive)
+            if (root.serverReady || !root.enabled)
                 return;
             if (!root.serverSpawnAttempted && !serverProc.running && !detectorSyncProc.running) {
                 root.serverSpawnAttempted = true;

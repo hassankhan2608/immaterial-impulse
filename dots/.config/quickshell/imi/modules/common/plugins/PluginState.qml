@@ -37,6 +37,11 @@ Singleton {
             // shows exactly the set `lock.showWidgets` shows it today.
             lockPresence: null,
             pluginOptions: {},
+            // A widget's own settings on the lock screen, per key: a key
+            // stored here is the lock's own, one absent reads through to
+            // pluginOptions (layout_surfaces.js). Same no-migration argument
+            // as the two above - absence is the correct upgrade state.
+            lockOptions: {},
             // Plugin ids whose options/positions/enabled state survive preset
             // application (never captured INTO presets - see presets.sh).
             presetPersist: {},
@@ -216,9 +221,31 @@ Singleton {
         writeTimer.restart();
     }
 
-    function option(pluginId, key, fallback) {
-        const value = root.state?.pluginOptions?.[pluginId]?.[key];
+    // A widget's option on a surface. Same default-surface rule as
+    // position(): a caller that names none - every widget binding, the
+    // in-widget knobs - reads the face the desktop is showing, so the
+    // resource monitor's rotate button on the Lockscreen tab writes the
+    // lock's `vertical`, and the desktop's binding re-evaluates when the
+    // look flips because it read currentSurface. Settings names its surface
+    // (PluginOptions), and Edit Mode's policy keys are shared whatever is
+    // passed (layout_surfaces.js SHARED_OPTION_KEYS).
+    function option(pluginId, key, fallback, surface) {
+        const value = Surfaces.rawOption(root.state, surface ?? root.currentSurface, pluginId, key);
         return value === undefined ? fallback : value;
+    }
+
+    // Has this widget any lock-screen setting of its own?
+    function lockOptionsForked(pluginId) {
+        return Surfaces.isOptionsForked(root.state, pluginId);
+    }
+
+    // Re-link one widget's lock settings to the desktop's.
+    function resetLockOptions(pluginId) {
+        const nextState = Surfaces.withoutLockOptions(root.state, pluginId);
+        if (nextState === root.state) return;
+        nextState.version = root.schemaVersion;
+        root.state = nextState;
+        writeTimer.restart();
     }
 
     // Desktop-widget panel opacity, resolved against the global transparency
@@ -245,9 +272,17 @@ Singleton {
         return (transparencyEnabled || keepTranslucent) ? baseOpacity : 1;
     }
 
+    // The opacity a widget panel is given when its caller passes none: the
+    // shell's own (Settings > Quick's "Shell opacity", the background
+    // transparency inverted - what the bar, the sidebars and the dock draw
+    // at) when `plugins.followShellOpacity` is on, else the widgets' slider.
+    readonly property real configuredBackgroundOpacity: Config.options.plugins.followShellOpacity
+        ? 1 - Appearance.backgroundTransparency
+        : Config.options.plugins.blurOpacity
+
     function effectiveBackgroundOpacity(pluginId, baseOpacity, keepTranslucentDefault) {
         return root.resolveBackgroundOpacity(
-            baseOpacity === undefined ? Config.options.plugins.blurOpacity : baseOpacity,
+            baseOpacity === undefined ? root.configuredBackgroundOpacity : baseOpacity,
             Config.options.appearance.transparency.enable,
             root.option(pluginId, "keepTranslucent", keepTranslucentDefault === true));
     }
@@ -273,7 +308,16 @@ Singleton {
     // waits for the manifest loads to settle before calling at all.
     //
     // The per-plugin work itself deletes the old key (gridSizes.migrateSizeMode),
-    // so the pass is idempotent on its own and the marker only saves the walk.
+    // so the pass is idempotent on its own - and the walk, not the marker, is
+    // what decides whether to run. The marker was the gate once, and it
+    // stranded the second wave: weather and currency burned it in 0.6, so
+    // when calendar and world-clock crossed from live `sizeMode` to
+    // `grid.sizes` months later, their freshly-retired options could never be
+    // folded - a stored 3x1 or 1x1 silently reset to the default on upgrade,
+    // which is the precise loss this migration exists to prevent. A marker
+    // records that a pass ran; only the data can say whether the NEXT pass
+    // has work. It is still written, as a record, and still never burned
+    // against an empty manifest list.
     //
     // Split in two so the substance can be driven from a TestCase: the whole
     // point of the pass is which options come out the other side, and a
@@ -298,12 +342,27 @@ Singleton {
         return nextState;
     }
 
+    // Whether any manifest offering several spans still has a stored
+    // `sizeMode` to fold. Pure, so the gate itself is drivable from a
+    // TestCase - the marker-shaped gate this replaces could only be observed
+    // by mutating the live singleton.
+    function sizeModesPending(state, manifests) {
+        if (!Array.isArray(manifests)) return false;
+        for (const manifest of manifests) {
+            if (!manifest || !manifest.id) continue;
+            if (GridSizes.offeredSizes(manifest.grid).length <= 1) continue;
+            if (state?.pluginOptions?.[manifest.id]?.sizeMode !== undefined)
+                return true;
+        }
+        return false;
+    }
+
     function migrateSizeModes(manifests) {
         if (!root.ready) return;
-        if (root.migrationRan(root.sizeModeMarker)) return;
         // Returning without marking is the whole guard: a pass over an empty
         // manifest list would burn the marker having read nothing.
         if (!Array.isArray(manifests) || manifests.length === 0) return;
+        if (!root.sizeModesPending(root.state, manifests)) return;
 
         root.state = root.stateWithSizeModesMigrated(root.state, manifests);
         writeTimer.restart();
@@ -325,24 +384,18 @@ Singleton {
         writeTimer.restart();
     }
 
-    function setOption(pluginId, key, value) {
+    // null means REMOVE, not store: `option()` falls back only on undefined,
+    // so a persisted null would answer every later read in place of the
+    // caller's fallback - a key that never existed, materialised on disk.
+    // Edit Mode's undo is what reaches this branch: reversing a first-ever
+    // commit restores "no stored choice", which has to leave the store the
+    // way it found it. On the lock surface the same null is the re-inherit:
+    // the lock key goes and the desktop's value reads through again.
+    function setOption(pluginId, key, value, surface) {
         if (!pluginId || !key) return;
-
-        const nextState = Object.assign({}, root.state);
-        const nextOptions = Object.assign({}, nextState.pluginOptions || {});
-        const nextPlugin = Object.assign({}, nextOptions[pluginId] || {});
-        // null means REMOVE, not store: `option()` falls back only on
-        // undefined, so a persisted null would answer every later read in
-        // place of the caller's fallback - a key that never existed,
-        // materialised on disk. Edit Mode's undo is what reaches this branch:
-        // reversing a first-ever commit restores "no stored choice", which
-        // has to leave the store the way it found it. No live caller stored
-        // null before this meaning was assigned (checked, not assumed).
-        if (value === null || value === undefined) delete nextPlugin[key];
-        else nextPlugin[key] = value;
-        nextOptions[pluginId] = nextPlugin;
+        const nextState = Surfaces.withOption(root.state, surface ?? root.currentSurface,
+            pluginId, key, value);
         nextState.version = root.schemaVersion;
-        nextState.pluginOptions = nextOptions;
         root.state = nextState;
         writeTimer.restart();
     }
@@ -484,6 +537,11 @@ Singleton {
                     && typeof parsed.pluginOptions === "object"
                     && !Array.isArray(parsed.pluginOptions)
                     ? parsed.pluginOptions
+                    : {},
+                lockOptions: parsed.lockOptions
+                    && typeof parsed.lockOptions === "object"
+                    && !Array.isArray(parsed.lockOptions)
+                    ? parsed.lockOptions
                     : {},
                 presetPersist: parsed.presetPersist
                     && typeof parsed.presetPersist === "object"

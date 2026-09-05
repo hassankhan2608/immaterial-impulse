@@ -60,6 +60,16 @@ hl.window_rule({match = {class = "^(plasma-changeicons)$" }, no_initial_focus = 
 hl.window_rule({match = {class = "^(plasma-changeicons)$" }, move = {999999, 999999}})
 -- stupid dolphin copy
 hl.window_rule({match = {title = "^(Copying — Dolphin)$" }, move = {40, 80}})
+-- The wallpaper compatibility scanner (qs -p we_compat_scan.qml) needs a
+-- MAPPED window - `rendered` is its whole instrument and an unmapped surface
+-- never produces a frame - but it is not for the user to see. Without a rule
+-- Hyprland tiles it into the active workspace and focuses it on every spawn
+-- and respawn, once per broken wallpaper. Float it, deny initial focus, and
+-- park it offscreen (same shape as plasma-changeicons above) so it stays
+-- mapped but out of the way.
+hl.window_rule({match = {title = "^(Wallpaper compatibility scan)$" }, float = true})
+hl.window_rule({match = {title = "^(Wallpaper compatibility scan)$" }, no_initial_focus = true})
+hl.window_rule({match = {title = "^(Wallpaper compatibility scan)$" }, move = {999999, 999999}})
 
 -- Tiling
 hl.window_rule({match = {class = "^dev\\.warp\\.Warp$" }, tile = true})
@@ -143,7 +153,6 @@ hl.layer_rule({ match = { namespace = "quickshell:.*" }, blur = true})
 hl.layer_rule({ match = { namespace = "quickshell:.*" }, ignore_alpha = 0.05})
 hl.layer_rule({ match = { namespace = "quickshell:bar" }, animation = "slide"})
 hl.layer_rule({ match = { namespace = "quickshell:actionCenter" }, no_anim = true})
-hl.layer_rule({ match = { namespace = "quickshell:cheatsheet" }, animation = "slide bottom"})
 -- The subject selector: a full-screen surface that is transparent everywhere
 -- except one toolbar, because the wallpaper and the widgets it is judging are
 -- the real ones underneath it. Under the catch-all above that is the worst
@@ -160,7 +169,7 @@ hl.layer_rule({ match = { namespace = "quickshell:clockDepthSelect" }, blur = fa
 -- dock then slid downward, into the screen, to leave.
 hl.layer_rule({ match = { namespace = "quickshell:dock" }, animation = "slide"})
 -- Edit Mode's chrome: another full-screen surface that is transparent
--- everywhere except two opaque toolbars, because the desktop it frames is the
+-- everywhere except an opaque toolbar (and its drawer), because the desktop it frames is the
 -- real one underneath it. Same hazard as the subject selector above - under the
 -- catch-all 0.05 its transparent pixels clear the threshold and the compositor
 -- is asked to blur the whole screen - answered the other way round, because the
@@ -202,7 +211,14 @@ hl.layer_rule({ match = { namespace = "quickshell:regionSelector" }, no_anim = t
 hl.layer_rule({ match = { namespace = "quickshell:screenshot" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "quickshell:session" }, blur = true})
 hl.layer_rule({ match = { namespace = "quickshell:session" }, no_anim = true})
-hl.layer_rule({ match = { namespace = "quickshell:session" }, ignore_alpha = 0})
+-- 0.4, not 0: the session surface stays mapped while closed now, and at
+-- ignore_alpha = 0 its fully transparent idle pixels would still clear the
+-- threshold - a permanently-mapped screen-sized surface asking the compositor
+-- to blur the entire screen. The scrim sits at ~0.88+ alpha, so 0.4 blurs it
+-- exactly as before and ignores the closed surface. Failure direction: too
+-- high unblurs the scrim (flat but harmless), too low re-frosts the idle
+-- screen.
+hl.layer_rule({ match = { namespace = "quickshell:session" }, ignore_alpha = 0.4})
 -- The sidebars' surfaces stay mapped and the panels slide in QML (EdgeSlide,
 -- on tiers pinned to the layersIn/layersOut this used to draw), so there is
 -- no map to animate. The slide rules these replaced fired only on map, which
@@ -223,6 +239,13 @@ hl.layer_rule({ match = { namespace = "quickshell:sidebarLeft" }, blur = false})
 -- WindowBlurRegion in Bar.qml / VerticalBar.qml / Dock.qml).
 hl.layer_rule({ match = { namespace = "quickshell:bar" }, blur = false})
 hl.layer_rule({ match = { namespace = "quickshell:verticalBar" }, blur = false})
+-- The wallpaper layer is opaque edge to edge, so the catch-all blur above
+-- bought nothing there - and cost a fullscreen three-pass blur on every frame
+-- the desktop widgets changed it. With the Visualizer running that was every
+-- frame: GPU 81% with this rule absent, 62% with it (measured live, music
+-- playing, 5120x1440). No region is published for it; there is nothing
+-- translucent on the surface to scope a blur to.
+hl.layer_rule({ match = { namespace = "quickshell:background" }, blur = false})
 hl.layer_rule({ match = { namespace = "quickshell:dock" }, blur = false})
 -- And the transient surfaces, which were the last panels still frosting their
 -- own shadow (#89): every OSD indicator sits in an elevation margin, and the
@@ -230,10 +253,6 @@ hl.layer_rule({ match = { namespace = "quickshell:dock" }, blur = false})
 -- overview itself). See WindowBlurRegion in OnScreenDisplay.qml / Overview.qml.
 hl.layer_rule({ match = { namespace = "quickshell:onScreenDisplay" }, blur = false})
 hl.layer_rule({ match = { namespace = "quickshell:overview" }, blur = false})
--- The cheatsheet has drawn a StyledRectangularShadow all along; the
--- whole-surface blur was frosting it, which is why the card read as having no
--- shadow at all. See WindowBlurRegion in Cheatsheet.qml.
-hl.layer_rule({ match = { namespace = "quickshell:cheatsheet" }, blur = false})
 -- Notification popups: each card carries its own shadow, so the whole-surface
 -- blur frosted every one of them. The shell publishes a region per card
 -- instead, leaving the gaps between them unblurred. See WindowBlurRegion in

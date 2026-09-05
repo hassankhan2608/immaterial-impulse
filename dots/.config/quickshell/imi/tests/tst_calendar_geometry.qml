@@ -12,15 +12,18 @@ TestCase {
     readonly property real cardRadius: 30
     readonly property real pillLabel: 84   // a plausible "August 2026"
 
-    function widthOf(span) { return span === "1x1" ? 132 : 276; }
-    function heightOf(span) { return span === "2x2" ? 228 : 108; }
+    function widthOf(span) { return span === "1x1" ? 132 : span === "3x2" ? 420 : 276; }
+    function heightOf(span) { return span === "2x2" || span === "3x2" ? 228 : 108; }
 
     function surface(span) {
         return Geometry.monthSurfaceRect(span, widthOf(span), heightOf(span), 1,
             pillLabel, cardRadius);
     }
     function label(span) {
-        return Geometry.monthLabelRect(span, widthOf(span), heightOf(span), 1);
+        return Geometry.monthTextRect(span, widthOf(span), heightOf(span), 1);
+    }
+    function hero(span) {
+        return Geometry.heroDayRect(span, widthOf(span), heightOf(span), 1, 2, 20);
     }
     function nav(index, span) {
         return Geometry.navButtonRect(index, span, widthOf(span), heightOf(span), 1);
@@ -54,14 +57,26 @@ TestCase {
                 "the 2x2 month is a plain title, so the surface fades");
     }
 
-    function test_the_month_name_travels_between_the_two_wide_spans() {
-        compare(label("1x1"), null, "the 1x1 band says the month in short form");
+    function test_the_month_text_is_one_element_with_a_home_at_every_span() {
+        // The maintainer's rule: never hidden and replaced by a same-purpose
+        // twin. One element, four homes, and its FORM follows the span.
+        compare(label("1x1").form, "short", "AUG in the band");
+        compare(label("2x1").form, "long", "August 2026 in the pill");
+        compare(label("2x2").form, "long", "August 2026 as the title");
+        compare(label("3x2").form, "hero", "AUGUST atop the hero column");
         const inPill = label("2x1");
         const asTitle = label("2x2");
         verify(inPill.x > asTitle.x,
                "out of the pill's padding and back onto the card inset");
         verify(asTitle.size > inPill.size, "and a step larger as a title");
         compare(asTitle.x, 12);
+        const inHero = label("3x2");
+        compare(inHero.x, 16, "on the hero column's own inset");
+        const weekdayText = Geometry.weekdayTextRect("3x2", 420, 228, 1);
+        verify(inHero.y + inHero.height <= weekdayText.y,
+               "month above the weekday");
+        compare(Geometry.weekdayTextRect("2x2", 276, 228, 1), null,
+                "the weekday name fades at the spans with no home for it");
     }
 
     function test_the_month_name_starts_inside_its_pill() {
@@ -74,14 +89,25 @@ TestCase {
         compare(inPill.height, pill.height);
     }
 
-    function test_the_month_steppers_exist_only_at_2x2_and_in_order() {
-        compare(nav(0, "1x1"), null);
+    function test_the_month_steppers_live_at_both_whole_month_spans() {
+        compare(nav(0, "1x1"), null, "the small spans are about today");
         compare(nav(0, "2x1"), null);
         const prev = nav(0, "2x2");
         const next = nav(1, "2x2");
         verify(prev.x < next.x, "previous, then next");
         compare(next.x + next.width, 276 - 12, "flush with the card inset");
         verify(prev.x + prev.width < next.x, "and they do not overlap");
+        // The SAME pair travels to the foot of the hero column at 3x2.
+        const heroPrev = nav(0, "3x2");
+        const heroNext = nav(1, "3x2");
+        compare(heroPrev.x, 16, "on the hero column's own inset");
+        verify(heroPrev.x < heroNext.x);
+        compare(heroPrev.y + heroPrev.height, 228 - 12, "at the column's foot");
+        verify(heroNext.x + heroNext.width <= Geometry.dayGridSurfaceRect(
+            "3x2", 420, 228, 1, cardRadius).x + 0.01, "clear of the grid surface");
+        const dayRect = hero("3x2");
+        verify(dayRect.y + dayRect.height <= heroPrev.y + 0.01,
+               "the hero date stops above the steppers");
     }
 
     function test_the_weekday_letters_divide_their_own_content_width() {
@@ -126,7 +152,10 @@ TestCase {
             const inWeek = Math.floor(i / Geometry.COLUMNS) === 2;
             compare(day(i, "2x1") !== null, inWeek,
                     "cell " + i + " at 2x1 - null is a fade, never a morph");
-            compare(day(i, "1x1") !== null, i === 20, "cell " + i + " at 1x1");
+            compare(day(i, "1x1"), null,
+                    "cell " + i + " at 1x1: the hero date element is the "
+                    + "card there, and a cell that also carried it would be "
+                    + "a same-purpose twin");
         }
     }
 
@@ -169,15 +198,78 @@ TestCase {
         }
     }
 
-    function test_today_grows_into_the_hero_and_loses_its_highlight() {
-        const inGrid = day(20, "2x2");
-        const hero = day(20, "1x1");
-        verify(hero.size > inGrid.size * 4, "a caption becomes the whole card");
-        compare(inGrid.pill, 28, "a highlight in the grid");
-        compare(hero.pill, 0,
-                "and no highlight at 1x1 - a fill of zero size has finished leaving");
-        compare(hero.x, 0);
-        compare(hero.width, 132, "centred across the whole card");
-        compare(hero.y + hero.height, 108, "under the band, down to the card edge");
+    function test_the_3x2_surface_hugs_the_right_edge_at_the_2x2s_width() {
+        const wide = grid("3x2");
+        compare(wide.width, 252, "the 2x2's surface, moved");
+        compare(wide.x + wide.width, 420 - 12, "flush with the card inset");
+        compare(wide.y, 12);
+        compare(wide.y + wide.height, 228 - 12);
+        compare(wide.radius, cardRadius - 12);
+    }
+
+    function test_the_3x2_strip_and_cells_live_inside_the_surface() {
+        const surfaceRect = grid("3x2");
+        const strip0 = weekday(0, "3x2");
+        verify(strip0.x >= surfaceRect.x, "the strip moved onto the surface");
+        compare(strip0.x, surfaceRect.x + 4);
+        for (let i = 0; i < Geometry.CELLS; i++) {
+            const cell = day(i, "3x2");
+            verify(cell !== null, "every cell has a home at 3x2");
+            verify(cell.x >= surfaceRect.x, "cell " + i + " on the surface");
+            verify(cell.x + cell.width <= surfaceRect.x + surfaceRect.width + 0.01);
+            verify(cell.y >= strip0.y + strip0.height, "under the strip");
+            verify(cell.y + cell.height <= surfaceRect.y + surfaceRect.height + 0.01);
+        }
+    }
+
+    function test_the_3x2_hero_column_owns_the_left_and_only_the_left() {
+        const surfaceRect = grid("3x2");
+        const chip = Geometry.heroRect("chip", "3x2", 420, 228, 1);
+        verify(chip !== null);
+        verify(chip.x + chip.width <= surfaceRect.x + 0.01,
+               "the chip stays clear of the grid surface");
+        compare(Geometry.heroRect("chip", "2x2", 276, 228, 1), null,
+                "the chip exists only at 3x2 - it has no twin anywhere");
+        const month = label("3x2");
+        const weekdayRow = Geometry.weekdayTextRect("3x2", 420, 228, 1);
+        const dayRect = hero("3x2");
+        verify(month.y < weekdayRow.y && weekdayRow.y < dayRect.y,
+               "month, weekday, date, top to bottom");
+        verify(dayRect.size > month.size * 3, "the date is the hero");
+        for (const slot of [month, weekdayRow, dayRect])
+            verify(slot.x + slot.width <= surfaceRect.x + 0.01,
+                   "the hero column stays clear of the grid surface");
+        compare(surface("3x2"), null, "no band and no pill");
+    }
+
+    function test_the_hero_date_is_one_element_from_1x1_to_3x2() {
+        const at1x1 = hero("1x1");
+        verify(at1x1.present);
+        compare(at1x1.x, 0);
+        compare(at1x1.width, 132, "centred across the whole card");
+        compare(at1x1.y + at1x1.height, 108, "under the band, down to the card edge");
+        const at3x2 = hero("3x2");
+        verify(at3x2.present);
+        compare(at3x2.size, at1x1.size, "the same hero, the same size");
+        verify(at3x2.x + at3x2.width <= Geometry.dayGridSurfaceRect(
+            "3x2", 420, 228, 1, cardRadius).x + 0.01, "left of the grid surface");
+    }
+
+    function test_the_hero_fades_over_todays_own_cell_between_its_homes() {
+        // Leaving 1x1 for 2x2 must still read as the big date shrinking into
+        // its circle - so the hero's fade-home IS today's cell, not a corner.
+        const at2x2 = hero("2x2");
+        const cell = day(20, "2x2");
+        verify(!at2x2.present, "no hero at 2x2 - it fades");
+        compare(at2x2.x, cell.x);
+        compare(at2x2.y, cell.y);
+        compare(at2x2.size, cell.size, "shrunk to the cell's own caption size");
+        const at2x1 = hero("2x1");
+        verify(!at2x1.present);
+        compare(at2x1.y, day(20, "2x1").y, "on the week strip's row at 2x1");
+        // A shifted month with today nowhere on the card fades dead centre.
+        const nowhere = Geometry.heroDayRect("2x2", 276, 228, 1, 2, -1);
+        verify(!nowhere.present);
+        compare(nowhere.width, 0);
     }
 }

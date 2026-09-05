@@ -191,43 +191,46 @@ Item {
         // off screen when the wave runs takes no slot anyway.
         Item {
             id: rosterReveal
+            objectName: "rosterReveal"
             Layout.fillWidth: true
             // Unrolled from nothing to the list's own height, and faded with
             // it, both off the one scalar declared at the top of this file.
             // The clip is what makes the height a reveal rather than a squash:
             // the rows keep their own size and the box uncovers them.
-            Layout.preferredHeight: rosterList.height * root.rosterProgress
+            Layout.preferredHeight: rosterGroup.implicitHeight * root.rosterProgress
             visible: root.rosterProgress > 0
             opacity: root.rosterProgress
             clip: true
 
-            // The list stands at its OWN content height whatever this wrapper
-            // is doing. A `ListView` told it is zero pixels tall builds no
-            // delegates, so it reports a content height of zero and can never
-            // grow out of it - the height that folds has to be a box around
-            // the list rather than the list's own.
-            StyledListView {
-                id: rosterList
-                width: rosterReveal.width
-                height: rosterList.contentHeight
-                interactive: false
-                spacing: 0
-
-                model: ScriptModel {
-                    values: PhoneConnect.devices
-                }
-                delegate: PhoneDeviceItem {
-                    required property var modelData
-                    device: modelData
-                    anchors {
-                        left: parent?.left
-                        right: parent?.right
-                    }
-                    active: root.device !== null && root.device.id === modelData.id
-                    onClicked: {
-                        root.pickedDeviceId = modelData.id;
-                        PhoneConnect.selectDevice(modelData.id);
-                        root.rosterOpen = false;
+            // The presentation M3_GUIDELINES.md names for rows that are
+            // related but stay visually distinct - each row on its own plate,
+            // the group's outer corners rounded and the inner ones not. This
+            // used to be a StyledRectangle wrapped around a list view, which
+            // is the thing that rule exists to prevent, and it drew square
+            // besides: `clip` on a Rectangle clips to the box, not the radius,
+            // so the rows painted over the corners it was supposed to have.
+            GroupedList {
+                id: rosterGroup
+                objectName: "rosterGroup"
+                anchors { left: parent.left; right: parent.right; top: parent.top }
+                // No `bgcolor` and no padding override: a PhoneDeviceItem
+                // paints its own surface, so the group draws no plate behind
+                // it, and the row is then inset exactly like every other
+                // group's rows - which is also the room its hover lift grows
+                // into. See GroupedList.
+                model: PhoneConnect.devices
+                rowDelegate: Component {
+                    PhoneDeviceItem {
+                        // Handed to the row by the plate; see GroupedList.
+                        property var modelData: null
+                        device: modelData
+                        active: root.device !== null && modelData !== null
+                            && root.device.id === modelData.id
+                        onClicked: {
+                            root.pickedDeviceId = modelData.id;
+                            PhoneConnect.selectDevice(modelData.id);
+                            root.rosterOpen = false;
+                        }
                     }
                 }
             }

@@ -34,11 +34,27 @@ TestCase {
 
     function initTestCase() {
         rowComponent = Qt.createComponent("fixtures/ConfigSelectionArrayRow.qml");
+        // A skip on ANY load error is a check that cannot fail. This one hid a
+        // real one: `GroupButton` moved onto `RippleButton`, the test import
+        // tree had no `InteractionMotion` to resolve, and the row stopped
+        // building - the suite reported two more skips, zero failures and
+        // exit 0. The only reason this file may skip is a Qt too old for the
+        // per-corner radii, exactly as `tst_grouped_list` says it.
+        if (rowComponent.status === Component.Error) {
+            const reason = rowComponent.errorString();
+            // The row reaches `StyledText`, which sets `font.variableAxes` -
+            // Qt 6.7 and up. That, and not the per-corner radii this file
+            // first guessed at, is why the row cannot build on the CI Qt: the
+            // guess was never checked because a skip on ANY error printed the
+            // same green either way.
+            verify(/variableAxes|(top|bottom)(Left|Right)Radius/.test(reason),
+                "the row failed to build for a reason that is not Qt's version: " + reason);
+        }
     }
 
     function ensureComponent() {
         if (rowComponent.status === Component.Error)
-            skip("this Qt cannot build the row: " + rowComponent.errorString());
+            skip("Qt is older than 6.7, so the variable font axes this row's text sets do not exist here");
         compare(rowComponent.status, Component.Ready, rowComponent.errorString());
     }
 

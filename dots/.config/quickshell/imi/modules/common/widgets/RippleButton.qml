@@ -54,6 +54,31 @@ Button {
     // opacity only. The button keeps owning its colours and its ripple - this
     // drives the motion, and only the motion.
     property bool interactionMotionEnabled: true
+    // Where the last press landed, in this button's coordinates. A surface
+    // that mirrors this button's press - a GroupedList plate under a row
+    // that is itself a button - starts its ripple from here.
+    property point pressPoint: Qt.point(0, 0)
+    // A surface only. Draws the hover, the ripple and the lift for a control
+    // that keeps its own input - a ComboBox, a list row - and receives no
+    // input itself: the mask below is an Item with no area, so no point is
+    // inside this button and neither the MouseArea nor the AbstractButton
+    // underneath it ever sees a press. (Disabling the MouseArea alone is not
+    // enough: an AbstractButton accepts presses on its own, and as a
+    // Control's background it sits ABOVE the control in delivery order and
+    // would swallow the popup's toggle. A QtObject with a JS `contains` is
+    // not enough either - Qt wants an invokable it can see from C++, and
+    // warns and ignores the mask.) The host binds `interactionMotion
+    // .hovered`/`.down` and calls `startRipple`/`fadeRipple` at its own
+    // press points - see PassiveRippleSurface, which packages exactly that.
+    property bool passive: false
+    containmentMask: root.passive ? nothing : null
+    Item {
+        id: nothing
+        parent: root
+        width: 0
+        height: 0
+        visible: false
+    }
     property InteractionMotion interactionMotion: InteractionMotion {
         hovered: root.hovered && root.interactionMotionEnabled
         down: root.down && root.interactionMotionEnabled
@@ -95,6 +120,15 @@ Button {
 
         rippleFadeAnim.complete();
         rippleAnim.restart();
+    }
+
+    // The other half of `startRipple`, made reachable for the same reason it
+    // is: a surface that drives this button's visuals without letting its
+    // click through - the Components workbench - can start a ripple and had no
+    // way to end one, so every previewed press left its ripple standing.
+    function fadeRipple() {
+        if (!root.rippleEnabled) return;
+        rippleFadeAnim.restart();
     }
 
     component RippleAnim: NumberAnimation {
@@ -139,6 +173,7 @@ Button {
                 return;
             }
             root.down = true
+            root.pressPoint = Qt.point(event.x, event.y);
             if (root.downAction) root.downAction();
             if (!root.rippleEnabled) return;
             const {x,y} = event
@@ -156,6 +191,15 @@ Button {
             root.down = false
             if (!root.rippleEnabled) return;
             rippleFadeAnim.restart();
+        }
+        // The touch spelling of the right-click action. A pointer has a
+        // second button; a finger has a long press, and every button built
+        // on this one should answer both the same way.
+        onPressAndHold: () => {
+            if (!root.altAction) return;
+            root.altAction();
+            root.down = false;
+            if (root.rippleEnabled) rippleFadeAnim.restart();
         }
     }
 
@@ -219,7 +263,16 @@ Button {
             animation: Appearance?.animation.elementMoveFast.colorAnimation.createObject(this)
         }
 
-        layer.enabled: true
+        // The layer exists for the ripple: an OpacityMask that clips the
+        // expanding circle to the rounded corners. It is NOT on at rest. A
+        // layer is an offscreen texture and a render pass of its own, and
+        // this button is in every row, chip and sidebar entry of the shell -
+        // the settings window's first frame synced ~2,700 elements into 946
+        // batches with it always on, a 165 ms stall on the first open. At
+        // rest the background is a plain rounded Rectangle drawn directly;
+        // the layer comes up on hover, so the texture is allocated before
+        // the press lands, and stays while a ripple is still fading.
+        layer.enabled: root.hovered || ripple.opacity > 0
         layer.effect: OpacityMask {
             maskSource: Rectangle {
                 width: buttonBackground.width

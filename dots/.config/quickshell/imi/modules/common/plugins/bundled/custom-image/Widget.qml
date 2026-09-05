@@ -28,7 +28,30 @@ Item {
     readonly property var blurRegions: []
 
     readonly property string imagePath: PluginState.option("custom-image", "path", "")
+    // With a background, a PNG's alpha shows the container colour through
+    // it; without one, it shows the wallpaper. Only meaningful once there
+    // is an image - the empty tile keeps its surface either way, or the
+    // placeholder glyph floats on nothing.
+    readonly property bool transparentBackground: PluginState.option("custom-image", "transparentBackground", false)
+    readonly property bool animated: root.imagePath.toLowerCase().endsWith(".gif")
     readonly property string shapeName: PluginState.option("custom-image", "shape", "Cookie4Sided")
+    // "None": no mask, no plate - the image keeps its own silhouette (the
+    // whole point of pairing it with a transparent background).
+    readonly property bool shapeless: root.shapeName === "None"
+    // The last real shape, remembered so turning transparency off can fall
+    // back to it: "None" without transparency would be a bare rectangle the
+    // option grid can no longer even offer.
+    onShapeNameChanged: {
+        if (!root.shapeless)
+            PluginState.setOption("custom-image", "shapeBeforeNone", root.shapeName)
+        }
+    onTransparentBackgroundChanged: root.dropNoneIfOpaque()
+    Component.onCompleted: root.dropNoneIfOpaque()
+    function dropNoneIfOpaque(): void {
+        if (!root.transparentBackground && root.shapeless)
+            PluginState.setOption("custom-image", "shape",
+                PluginState.option("custom-image", "shapeBeforeNone", "Cookie4Sided"))
+    }
     property bool dropHover: false
     // The resize handle assigns this directly, which breaks the binding on
     // purpose - the same trade the built-in made - and persists it on release.
@@ -116,10 +139,11 @@ Item {
                 id: imageShape
                 anchors.fill: parent
                 z: 0
-                color: Appearance.colors.colPrimaryContainer
+                color: ((root.transparentBackground && root.imagePath !== "") || root.shapeless)
+                    ? "transparent" : Appearance.colors.colPrimaryContainer
                 shape: root.getShape(root.shapeName)
 
-                layer.enabled: true
+                layer.enabled: !root.shapeless
                 layer.effect: OpacityMask {
                     maskSource: MaterialShape {
                         width: imageShape.width
@@ -130,13 +154,28 @@ Item {
 
                 StyledImage {
                     anchors.fill: parent
-                    source: root.imagePath !== "" ? root.imagePath : ""
-                    fillMode: Image.PreserveAspectCrop
+                    source: (root.imagePath !== "" && !root.animated) ? root.imagePath : ""
+                    fillMode: root.shapeless ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                     cache: false
                     antialiasing: true
                     sourceSize.width: parent.width
                     sourceSize.height: parent.height
-                    visible: root.imagePath !== ""
+                    visible: root.imagePath !== "" && !root.animated
+                }
+
+                // A .gif plays. AnimatedImage decodes every frame on the GUI
+                // thread, so it is only in the tree for a gif rather than
+                // carrying every static image too - and it holds its frames
+                // rather than re-decoding (`cache: true` is its default,
+                // kept deliberately; the shell's perf work showed per-frame
+                // decode on this thread is what stalls the compositor side).
+                AnimatedImage {
+                    anchors.fill: parent
+                    source: (root.imagePath !== "" && root.animated) ? "file://" + root.imagePath : ""
+                    fillMode: root.shapeless ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                    antialiasing: true
+                    visible: root.imagePath !== "" && root.animated
+                    playing: visible
                 }
 
                 // Placeholder + hover hint

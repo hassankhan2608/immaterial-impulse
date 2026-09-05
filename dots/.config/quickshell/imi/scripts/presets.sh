@@ -50,6 +50,7 @@ case "$action" in
                 desktopPositions: (.desktopPositions // {}),
                 lockPositions: (.lockPositions // {}),
                 lockPresence: (.lockPresence // null),
+                lockOptions: (.lockOptions // {}),
                 pluginOptions: (.pluginOptions // {})
             }' 2>/dev/null)" || plugin_state=""
         else
@@ -61,9 +62,10 @@ case "$action" in
             desktopPositions: (.desktopPositions // {}),
             lockPositions: (.lockPositions // {}),
             lockPresence: (.lockPresence // null),
+            lockOptions: (.lockOptions // {}),
             pluginOptions: (.pluginOptions // {})
         }' "$PLUGIN_STATE_FILE" 2>/dev/null \
-            || printf '{"version":2,"desktopPositions":{},"lockPositions":{},"lockPresence":null,"pluginOptions":{}}')"
+            || printf '{"version":2,"desktopPositions":{},"lockPositions":{},"lockPresence":null,"lockOptions":{},"pluginOptions":{}}')"
         fi
         # A preset is a document people SHARE, and `config.json` holds the
         # user's own OpenWeatherMap key. Saving one used to copy it verbatim,
@@ -92,6 +94,40 @@ case "$action" in
             echo "Error: preset not found: $name" >&2
             exit 1
         fi
+        # Selective application (spec 2026-08-31): --only <spec,...> filters
+        # the preset to the named sections BEFORE the existing merge, which
+        # then behaves exactly as it does for an old partial preset - omitted
+        # keys keep their live values. A spec is a top-level key, an
+        # "appearance:<sub>" subsection, or "_pluginState". Specs are
+        # validated against [A-Za-z0-9_:], and one bad spec refuses the whole
+        # apply rather than guessing.
+        only_specs=""
+        if [ "$3" = "--only" ]; then
+            only_specs="$4"
+            if [ -z "$only_specs" ] || ! printf '%s' "$only_specs" | grep -Eq '^[A-Za-z0-9_:]+(,[A-Za-z0-9_:]+)*$'; then
+                echo "Error: bad --only spec: $only_specs" >&2
+                exit 1
+            fi
+            keep_top="$(printf '%s' "$only_specs" | tr ',' '\n' \
+                | grep -v ':' | grep -v '^_pluginState$' | jq -R . | jq -sc .)"
+            keep_appearance="$(printf '%s' "$only_specs" | tr ',' '\n' \
+                | grep '^appearance:' | cut -d: -f2 | jq -R . | jq -sc .)"
+            filtered_preset="$(jq -c --argjson top "$keep_top" --argjson app "$keep_appearance" \
+                '. as $p
+                 | (reduce $top[] as $k ({}; if ($p | has($k)) then .[$k] = $p[$k] else . end))
+                 | if ($app | length) > 0 and ($p.appearance? != null) then
+                       .appearance = (reduce $app[] as $k ({};
+                           if ($p.appearance | has($k)) then .[$k] = $p.appearance[$k] else . end))
+                   else . end' "$preset_file")"
+            preset_file="$(mktemp "${PRESETS_DIR}/.apply-XXXXXX.json")"
+            printf '%s' "$filtered_preset" > "$preset_file"
+            trap 'rm -f "$preset_file"' EXIT
+            if printf '%s' "$only_specs" | tr ',' '\n' | grep -qx '_pluginState'; then
+                jq -c --slurpfile orig <(jq '._pluginState // empty' "$PRESETS_DIR/${name}.json") \
+                    'if ($orig | length) > 0 then ._pluginState = $orig[0] else . end' \
+                    "$preset_file" > "${preset_file}.tmp" && mv "${preset_file}.tmp" "$preset_file"
+            fi
+        fi
         preset_plugin_state="$(jq -c '._pluginState // empty' "$preset_file")"
         # Plugins flagged presetPersist keep their CURRENT options, desktop
         # positions and enabled state through preset application. The flag map
@@ -105,10 +141,11 @@ case "$action" in
                 desktopPositions: (.desktopPositions // {}),
                 lockPositions: (.lockPositions // {}),
                 lockPresence: (.lockPresence // null),
+                lockOptions: (.lockOptions // {}),
                 pluginOptions: (.pluginOptions // {}),
                 presetPersist: (.presetPersist // {})
             }' "$PLUGIN_STATE_FILE" 2>/dev/null \
-                || printf '{"version":2,"desktopPositions":{},"lockPositions":{},"lockPresence":null,"pluginOptions":{},"presetPersist":{}}')"
+                || printf '{"version":2,"desktopPositions":{},"lockPositions":{},"lockPresence":null,"lockOptions":{},"pluginOptions":{},"presetPersist":{}}')"
             # Top-level merging keeps fields omitted by older position-only
             # presets, while a new preset's complete maps replace current state.
             jq -n --argjson current "$current_plugin_state" --argjson preset "$preset_plugin_state" \
@@ -127,11 +164,17 @@ case "$action" in
                     | .pluginOptions = (if ($preset | has("pluginOptions"))
                         then ($preset.pluginOptions // {})
                         else ($current.pluginOptions // {}) end)
+                    | .lockOptions = (if ($preset | has("lockOptions"))
+                        then ($preset.lockOptions // {})
+                        else ($current.lockOptions // {}) end)
                     | .presetPersist = ($current.presetPersist // {})
                     | reduce $persistIds[] as $id (.;
                         (if ($current.pluginOptions // {}) | has($id)
                          then .pluginOptions[$id] = $current.pluginOptions[$id]
                          else .pluginOptions |= del(.[$id]) end)
+                        | (if ($current.lockOptions // {}) | has($id)
+                         then .lockOptions[$id] = $current.lockOptions[$id]
+                         else .lockOptions |= del(.[$id]) end)
                         | ($current.desktopPositions // {}) as $cpos
                         | .desktopPositions = (reduce (((.desktopPositions // {}) + $cpos) | keys_unsorted[]) as $screen (.desktopPositions // {};
                             if ($cpos[$screen] // {}) | has($id)

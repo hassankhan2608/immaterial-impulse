@@ -10,6 +10,8 @@ import QtQuick.Controls
 import "."
 import "currency_geometry.js" as Geometry
 import "currency_shapes.js" as CurrencyShapes
+import "../services/currency_history.js" as History
+import "../services/currency_daily.js" as Daily
 
 Item {
     id: root
@@ -41,10 +43,13 @@ Item {
 
     readonly property real width1x1: baseWidth
     readonly property real width2x1: (baseWidth * 2) + gap
+    readonly property real width3x1: (baseWidth * 3) + gap * 2
+    readonly property real height2: (baseHeight * 2) + gap
 
-    implicitHeight: baseHeight
+    implicitHeight: sizeMode === "3x2" ? height2 : baseHeight
     implicitWidth: {
         if (sizeMode === "1x1") return width1x1;
+        if (sizeMode === "3x1" || sizeMode === "3x2") return width3x1;
         return width2x1;
     }
 
@@ -53,8 +58,91 @@ Item {
     // here instead would retarget every element every frame, and elements
     // whose x depends on the right edge - the panel, its cells - would crawl
     // behind the card instead of travelling with it.
-    readonly property real spanW: root.sizeMode === "1x1" ? root.width1x1 : root.width2x1
-    readonly property real spanH: root.baseHeight
+    readonly property real spanW: root.sizeMode === "1x1" ? root.width1x1
+        : root.sizeMode === "3x1" || root.sizeMode === "3x2" ? root.width3x1 : root.width2x1
+    readonly property real spanH: root.sizeMode === "3x2" ? root.height2 : root.baseHeight
+
+    // The clock the 24h readings tick against: the movement columns, the
+    // chart's x axis and the refresh stamp all age even when no new sample
+    // arrives. A minute is plenty for all three.
+    property double nowTick: Date.now()
+    Timer {
+        interval: 60000
+        repeat: true
+        running: root.visible
+        onTriggered: root.nowTick = Date.now()
+    }
+    // { pct, abs, direction } per quote. Day-over-day from the daily
+    // closes first - the same data the trend charts read, so the arrow and
+    // the chart cannot disagree. The 24h observed fold is the fallback for
+    // a cold daily store, and null hides the column entirely.
+    function movementFor(code) {
+        const daily = Daily.changeFrom(CurrencyService.daily, code, root.nowTick);
+        if (daily !== null) return daily;
+        const current = CurrencyService.rates[code];
+        if (current === undefined) return null;
+        return History.changeOf(CurrencyService.history, code, root.nowTick, current);
+    }
+    function signedPct(change) {
+        return (change.pct >= 0 ? "+" : "") + change.pct.toFixed(2) + "%";
+    }
+    function signedAbs(change) {
+        // A zero delta is three quiet decimals, not six trailing zeros.
+        const digits = change.abs === 0 ? 3
+            : Math.min(6, CurrencyMath.fractionDigits(Math.abs(change.abs)) + 1);
+        return "(" + (change.abs >= 0 ? "+" : "") + change.abs.toFixed(digits) + ")";
+    }
+    // The base currency's flag, from the ISO code's country half. EUR's
+    // "EU" is a real regional-indicator pair; a code with no letters there
+    // yields nothing and the element hides.
+    // One painter for every trend chart: the smoothed line, optionally a
+    // soft fill down to the baseline (the 3x2's look). Points are unit-box.
+    function drawTrend(ctx, w, h, points, strokeColor, fill) {
+        if (!points || points.length < 2) {
+            // The honest-quiet placeholder: a flat baseline, not a fake curve.
+            ctx.strokeStyle = Functions.ColorUtils.applyAlpha(strokeColor, 0.35);
+            ctx.lineWidth = 2 * Appearance.effectiveScale;
+            ctx.beginPath();
+            ctx.moveTo(0, h - 2);
+            ctx.lineTo(w, h - 2);
+            ctx.stroke();
+            return;
+        }
+        const pts = points.map(p => ({ x: p.x * w, y: (0.08 + p.y * 0.8) * h }));
+        ctx.lineWidth = 2 * Appearance.effectiveScale;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+            const mid = (pts[i].x - pts[i - 1].x) / 2;
+            ctx.bezierCurveTo(pts[i - 1].x + mid, pts[i - 1].y,
+                pts[i].x - mid, pts[i].y, pts[i].x, pts[i].y);
+        }
+        if (fill) {
+            ctx.save();
+            ctx.lineTo(pts[pts.length - 1].x, h);
+            ctx.lineTo(pts[0].x, h);
+            ctx.closePath();
+            ctx.fillStyle = Functions.ColorUtils.applyAlpha(strokeColor, 0.18);
+            ctx.fill();
+            ctx.restore();
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) {
+                const mid = (pts[i].x - pts[i - 1].x) / 2;
+                ctx.bezierCurveTo(pts[i - 1].x + mid, pts[i - 1].y,
+                    pts[i].x - mid, pts[i].y, pts[i].x, pts[i].y);
+            }
+        }
+        ctx.strokeStyle = strokeColor;
+        ctx.stroke();
+    }
+
+    function flagEmoji(code) {
+        const letters = String(code || "").toUpperCase().slice(0, 2);
+        if (!/^[A-Z]{2}$/.test(letters)) return "";
+        return String.fromCodePoint(...[...letters].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
+    }
 
 
 
@@ -97,7 +185,10 @@ Item {
         id: card
         objectName: "nandoroidCurrencyCard"
         anchors.fill: parent
-        tint: Appearance.colors.colPrimaryContainer
+        // The card's own default tint - the darker surface the weather card
+        // sits on (the maintainer: "use the darker background color... same
+        // one used for weather"). The container-colour override this carried
+        // was the one thing separating the two cards.
         useBlurBackground: root.useBlurBackground
         backgroundOpacity: root.backgroundOpacity
         tensionX: root.resizeBow.x
@@ -153,13 +244,47 @@ Item {
             // one canvas whose shape is a parameter, Bun at 1x1 morphing
             // into the full-height panel at 2x1.
 
-            // 2x1 only: the sparkline backdrop
+            // The chart line - the 2x1's card-wide backdrop and the 3x1's
+            // hero chart are ONE element in two homes. It draws the day the
+            // shell actually observed (currency_history.js: one sample per
+            // successful refresh, of the base against the first quote); the
+            // decorative curve it shipped with survives only as the
+            // placeholder while the history is younger than two samples.
             Canvas {
                 id: sparklineCanvas
-                anchors.fill: parent
-                opacity: root.sizeMode === "2x1" ? 0.35 : 0
+                readonly property var slot: Geometry.chartRect(root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
+                x: slot ? slot.x : 0
+                y: slot ? slot.y : 0
+                width: slot ? slot.width : root.spanW
+                height: slot ? slot.height : root.spanH
+                Behavior on x { SpanTravel {} }
+                Behavior on y { SpanTravel {} }
+                Behavior on width { SpanTravel {} }
+                Behavior on height { SpanTravel {} }
+                opacity: root.sizeMode === "2x1" ? 0.35
+                    : (root.sizeMode === "3x1" || root.sizeMode === "3x2") ? 0.6 : 0
                 Behavior on opacity { SpanFade {} }
                 visible: opacity > 0
+                // The fetched week first (the maintainer's rule: the curve
+                // is only decorative when there is no 7-day data), then the
+                // observed 24h ring, then the ornament.
+                readonly property var series: {
+                    const week = Daily.trendFor(CurrencyService.daily,
+                        CurrencyService.quote1, root.nowTick, 7).points;
+                    if (week.length >= 2) return week;
+                    return History.seriesFor(
+                        CurrencyService.history, CurrencyService.quote1, root.nowTick);
+                }
+                onSeriesChanged: requestPaint()
+                onWidthChanged: requestPaint()
+                onHeightChanged: requestPaint()
+                // A requestPaint before the canvas is available is dropped
+                // silently - the geometry and data settle during creation,
+                // so without this the first REAL paint never comes and the
+                // line simply is not there (the play-button canvas records
+                // the same lesson).
+                onAvailableChanged: if (available) requestPaint()
+                Component.onCompleted: requestPaint()
                 onPaint: {
                     var ctx = getContext("2d");
                     ctx.reset();
@@ -168,15 +293,20 @@ Item {
                     ctx.lineWidth = 2 * Appearance.effectiveScale;
                     ctx.lineCap = "round";
                     ctx.beginPath();
-                    let points = [0.8, 0.6, 0.75, 0.4, 0.55, 0.3, 0.45, 0.2];
-                    let step = width / (points.length - 1);
-                    ctx.moveTo(0, height * points[0]);
+                    // Normalised points: measured when there is a day to
+                    // show, the authored curve until then.
+                    let points = sparklineCanvas.series.length >= 2
+                        ? sparklineCanvas.series.map(p => ({ x: p.x, y: 0.15 + p.y * 0.7 }))
+                        : [0.8, 0.6, 0.75, 0.4, 0.55, 0.3, 0.45, 0.2].map(
+                            (y, i, all) => ({ x: i / (all.length - 1), y: y }));
+                    ctx.moveTo(points[0].x * width, points[0].y * height);
                     for (let i = 1; i < points.length; i++) {
-                        let x = i * step;
-                        let y = height * points[i];
-                        let prevX = (i - 1) * step;
-                        let prevY = height * points[i - 1];
-                        ctx.bezierCurveTo(prevX + step/2, prevY, x - step/2, y, x, y);
+                        let x = points[i].x * width;
+                        let y = points[i].y * height;
+                        let prevX = points[i - 1].x * width;
+                        let prevY = points[i - 1].y * height;
+                        let mid = (x - prevX) / 2;
+                        ctx.bezierCurveTo(prevX + mid, prevY, x - mid, y, x, y);
                     }
                     ctx.stroke();
                 }
@@ -246,14 +376,15 @@ Item {
                     }
                 }
 
-                // 1x1 only: the payments badge glyph, fading as the container
-                // becomes a data panel.
+                // The payments badge glyph: on both badge-shaped homes (the
+                // 1x1 Bun, the 3x1 chip), fading while the container is the
+                // data panel.
                 MaterialSymbol {
                     anchors.centerIn: parent
                     text: "payments"
-                    iconSize: 18 * Appearance.effectiveScale
+                    iconSize: (root.sizeMode === "1x1" ? 18 : 14) * Appearance.effectiveScale
                     color: Appearance.colors.colOnPrimary
-                    opacity: root.sizeMode === "1x1" ? 1 : 0
+                    opacity: root.sizeMode !== "2x1" ? 1 : 0
                     Behavior on opacity { SpanFade {} }
                     visible: opacity > 0
                 }
@@ -327,6 +458,7 @@ Item {
 
             // ---- shared: the base currency --------------------------------
             StyledText {
+                id: baseCode
                 objectName: "currencyBase"
                 readonly property var slot: Geometry.baseLabelRect(root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
                 // The group's left edge travels; the code then sits after
@@ -349,6 +481,105 @@ Item {
                         easing.bezierCurve: Appearance.animation.elementMove.bezierCurve
                     }
                 }
+            }
+
+            // ---- 3x1 only: the flag, the dividers, the refresh stamp ------
+            StyledText {
+                readonly property var slot: Geometry.flagRect(root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
+                readonly property string flag: root.flagEmoji(CurrencyService.baseCurrency)
+                visible: opacity > 0 && flag !== ""
+                opacity: slot !== null ? 1 : 0
+                Behavior on opacity { SpanFade {} }
+                // Riding the code's own painted end, superscript - the
+                // geometry slot guessed a fixed x and floated the flag into
+                // the divider when the code ran shorter ("mispositioned").
+                x: baseCode.x + baseCode.paintedWidth + 4 * Appearance.effectiveScale
+                y: baseCode.y + 2 * Appearance.effectiveScale
+                text: flag
+                font.pixelSize: Math.round((slot ? slot.size : 16) * 1.0)
+            }
+            Repeater {
+                model: 2
+                Rectangle {
+                    required property int index
+                    readonly property var slot: Geometry.dividerRect(index, root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
+                    visible: opacity > 0
+                    opacity: slot !== null ? 0.18 : 0
+                    Behavior on opacity { SpanFade {} }
+                    x: slot ? slot.x : 0
+                    y: slot ? slot.y : 0
+                    width: slot ? slot.width : 1
+                    height: slot ? slot.height : 0
+                    color: Appearance.colors.colOnPrimaryContainer
+                }
+            }
+            StyledText {
+                readonly property var slot: Geometry.updatedRect(root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
+                readonly property string stamp: History.agoLabel(root.nowTick, CurrencyService.lastSuccessTime)
+                visible: opacity > 0 && stamp !== ""
+                opacity: slot !== null ? 0.6 : 0
+                Behavior on opacity { SpanFade {} }
+                x: slot ? slot.x : 0
+                y: slot ? slot.y : 0
+                width: slot ? slot.width : 0
+                horizontalAlignment: Text.AlignRight
+                text: "Last updated: " + stamp
+                font.pixelSize: Appearance.font.pixelSize.smallest
+                color: Appearance.colors.colOnPrimaryContainer
+            }
+
+            // ---- 3x2 only: the base spelled out, and its month ------------
+            StyledText {
+                readonly property var slot: Geometry.nameRect(root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
+                visible: opacity > 0
+                opacity: slot !== null ? 1 : 0
+                Behavior on opacity { SpanFade {} }
+                x: slot ? slot.x : 16 * Appearance.effectiveScale
+                y: slot ? slot.y : root.spanH
+                width: slot ? slot.width : 100
+                wrapMode: Text.WordWrap
+                maximumLineCount: 2
+                elide: Text.ElideRight
+                text: CurrencyService.nameFor(CurrencyService.baseCurrency)
+                font.pixelSize: Appearance.font.pixelSize.normal
+                font.weight: Font.Medium
+                color: Appearance.colors.colOnPrimaryContainer
+            }
+            Canvas {
+                id: monthCanvas
+                readonly property var slot: Geometry.chart30Rect(root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
+                visible: opacity > 0
+                opacity: slot !== null ? 0.9 : 0
+                Behavior on opacity { SpanFade {} }
+                x: slot ? slot.x : 16 * Appearance.effectiveScale
+                y: slot ? slot.y : root.spanH
+                width: slot ? slot.width : 100
+                height: slot ? slot.height : 40
+                readonly property var trend: Daily.trendFor(
+                    CurrencyService.daily, CurrencyService.quote1, root.nowTick, 30)
+                onTrendChanged: requestPaint()
+                onWidthChanged: requestPaint()
+                onAvailableChanged: if (available) requestPaint()
+                Component.onCompleted: requestPaint()
+                onPaint: {
+                    const ctx = getContext("2d");
+                    ctx.reset();
+                    ctx.clearRect(0, 0, width, height);
+                    root.drawTrend(ctx, width, height, monthCanvas.trend.points,
+                        Appearance.colors.colOnPrimaryContainer, true);
+                }
+            }
+            StyledText {
+                readonly property var slot: Geometry.caption30Rect(root.sizeMode, root.spanW, root.spanH, Appearance.effectiveScale)
+                visible: opacity > 0
+                opacity: slot !== null ? 0.55 : 0
+                Behavior on opacity { SpanFade {} }
+                x: slot ? slot.x : 16 * Appearance.effectiveScale
+                y: slot ? slot.y : root.spanH
+                width: slot ? slot.width : 100
+                text: monthCanvas.trend.points.length >= 2 ? "30 days period" : "collecting the month..."
+                font.pixelSize: Appearance.font.pixelSize.smallest
+                color: Appearance.colors.colOnPrimaryContainer
             }
 
             // ---- the quote cells: 1-2 shared, 3-4 enter and exit ----------
@@ -404,9 +635,14 @@ Item {
                     visible: opacity > 0
                     z: 2
 
-                    readonly property color inkColor: quoteCell.lastSlot.stacked
+                    // Stacked cells sit on the panel (on-primary ink) at
+                    // 2x1, but the 3x1's detailed cells sit straight on the
+                    // card.
+                    readonly property color inkColor: quoteCell.lastSlot.stacked && !(quoteCell.lastSlot.detailed ?? false)
                         ? Appearance.colors.colOnPrimary
                         : Appearance.colors.colOnPrimaryContainer
+                    readonly property var movement: (quoteCell.lastSlot.detailed ?? false)
+                        ? root.movementFor(quoteCell.quoteCurrency) : null
 
                     StyledText {
                         // the code: top-left when stacked, left-middle in a row
@@ -429,10 +665,114 @@ Item {
                         opacity: quoteCell.lastSlot.stacked ? 1 : 0.6
                         Behavior on opacity { SpanFade {} }
                     }
+                    // 3x1 only: which way the day went, beside the value.
+                    MaterialSymbol {
+                        visible: opacity > 0
+                        opacity: quoteCell.movement !== null ? 1 : 0
+                        Behavior on opacity { SpanFade {} }
+                        x: valueText.x + valueText.implicitWidth + 3 * Appearance.effectiveScale
+                        y: valueText.y + (valueText.height - height) / 2
+                        // The flat state is a DASH: trending_flat renders as
+                        // a rightward arrow, which beside a falling weekly
+                        // chart read as a signal nobody could name.
+                        text: quoteCell.movement === null ? "remove"
+                            : quoteCell.movement.direction > 0 ? "trending_up"
+                            : quoteCell.movement.direction < 0 ? "trending_down"
+                            : "remove"
+                        iconSize: Appearance.font.pixelSize.normal
+                        color: quoteCell.movement === null ? Appearance.colors.colOnPrimaryContainer
+                            : quoteCell.movement.direction > 0 ? Appearance.m3colors.m3success
+                            : quoteCell.movement.direction < 0 ? Appearance.m3colors.m3error
+                            : Appearance.colors.colOnPrimaryContainer
+                    }
+
+                    // 3x1 only: the movement column - percent over absolute.
+                    // Centered against the value's own line and tucked in
+                    // from the edge: pinned at y:0 in `smallest` it floated
+                    // above the number it describes, tiny and adrift.
+                    ColumnLayout {
+                        id: movementColumn
+                        objectName: "currencyMovementColumn"
+                        visible: opacity > 0
+                        opacity: quoteCell.movement !== null ? 1 : 0
+                        Behavior on opacity { SpanFade {} }
+                        anchors.right: parent.right
+                        anchors.rightMargin: 2 * Appearance.effectiveScale
+                        // Bottom-aligned to the value, not centred on it:
+                        // centred, the absolute line still dangled under the
+                        // value's baseline into the chart's zone, which read
+                        // as the block sitting below the currency twice over.
+                        // Sharing the value's bottom puts the absolute delta
+                        // on the currency's own line and stacks the percent
+                        // above it.
+                        anchors.bottom: valueText.bottom
+                        spacing: -2 * Appearance.effectiveScale
+                        StyledText {
+                            Layout.alignment: Qt.AlignRight
+                            text: quoteCell.movement !== null ? root.signedPct(quoteCell.movement) : ""
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            font.weight: Font.DemiBold
+                            color: quoteCell.inkColor
+                        }
+                        StyledText {
+                            Layout.alignment: Qt.AlignRight
+                            text: quoteCell.movement !== null ? root.signedAbs(quoteCell.movement) : ""
+                            font.pixelSize: Appearance.font.pixelSize.smallest
+                            opacity: 0.7
+                            color: quoteCell.inkColor
+                        }
+                    }
+
+                    // 3x2 only: the quote's own week, drawn under the
+                    // numbers in the direction's colour.
+                    Canvas {
+                        id: cellTrend
+                        readonly property bool wanted: quoteCell.lastSlot.trend ?? false
+                        visible: opacity > 0
+                        opacity: wanted ? 1 : 0
+                        Behavior on opacity { SpanFade {} }
+                        x: 0
+                        y: quoteCell.height * 0.45
+                        width: quoteCell.width
+                        height: quoteCell.height * 0.38
+                        readonly property var trend: cellTrend.wanted
+                            ? Daily.trendFor(CurrencyService.daily, quoteCell.quoteCurrency, root.nowTick, 7)
+                            : ({ points: [], direction: 0 })
+                        readonly property color trendColor: trend.direction > 0 ? Appearance.m3colors.m3success
+                            : trend.direction < 0 ? Appearance.m3colors.m3error
+                            : Appearance.colors.colOnPrimaryContainer
+                        onTrendChanged: requestPaint()
+                        onTrendColorChanged: requestPaint()
+                        onWidthChanged: requestPaint()
+                        onAvailableChanged: if (available) requestPaint()
+                        Component.onCompleted: requestPaint()
+                        onPaint: {
+                            const ctx = getContext("2d");
+                            ctx.reset();
+                            ctx.clearRect(0, 0, width, height);
+                            root.drawTrend(ctx, width, height,
+                                cellTrend.trend.points, cellTrend.trendColor, true);
+                        }
+                    }
                     StyledText {
+                        visible: opacity > 0
+                        opacity: (quoteCell.lastSlot.trend ?? false) ? 0.55 : 0
+                        Behavior on opacity { SpanFade {} }
+                        width: quoteCell.width
+                        y: quoteCell.height - height
+                        horizontalAlignment: Text.AlignHCenter
+                        text: cellTrend.trend.points.length >= 2 ? "7-Day Trend" : "collecting..."
+                        font.pixelSize: Appearance.font.pixelSize.smallest
+                        color: Appearance.colors.colOnPrimaryContainer
+                    }
+
+                    StyledText {
+                        id: valueText
+                        objectName: "currencyQuoteValue"
                         // the value: under the code when stacked, right-aligned
                         // in a row
-                        width: quoteCell.width
+                        width: (quoteCell.lastSlot.detailed ?? false)
+                            ? quoteCell.width * 0.55 : quoteCell.width
                         horizontalAlignment: quoteCell.lastSlot.stacked
                             ? Text.AlignLeft : Text.AlignRight
                         x: 0

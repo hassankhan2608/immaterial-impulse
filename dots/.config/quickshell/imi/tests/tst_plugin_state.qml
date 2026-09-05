@@ -1,7 +1,9 @@
 import QtQuick
 import QtTest
+import qs
 import qs.modules.common
 import qs.modules.common.plugins
+import "../modules/common/plugins/layout_surfaces.js" as Surfaces
 
 TestCase {
     name: "PluginStateTest"
@@ -20,6 +22,11 @@ TestCase {
         // leaves every later test reading a fork it did not make.
         Config.options.plugins.enabled = savedEnabled;
         PluginState.resetLockPresence();
+        // Options fork per plugin, not per test: drop the lock maps a test
+        // made, and put the default surface back on the desktop.
+        for (const id of ["surf_monitor", "surf_follow", "surf_shared"])
+            PluginState.resetLockOptions(id);
+        GlobalStates.editLockPreview = false;
     }
 
     function test_positionDefaultsWhenUnset() {
@@ -131,6 +138,20 @@ TestCase {
             Config.options.plugins.blurOpacity);
         Config.options.appearance.transparency.enable = false;
         compare(PluginState.effectiveBackgroundOpacity("notes"), 1);
+    }
+
+    // Settings > Widgets' "Follow shell opacity": a widget panel takes the
+    // shell's opacity - the background transparency inverted, what the bar and
+    // the sidebars draw at - instead of the widgets' own slider.
+    function test_effectiveBackgroundOpacityFollowsTheShellWhenAsked() {
+        Config.options.appearance.transparency.enable = true;
+        Config.options.appearance.transparency.automatic = false;
+        Config.options.appearance.transparency.backgroundTransparency = 0.3;
+        Config.options.plugins.blurOpacity = 0.1;
+        Config.options.plugins.followShellOpacity = true;
+        fuzzyCompare(PluginState.effectiveBackgroundOpacity("notes"), 0.7, 0.0001);
+        Config.options.plugins.followShellOpacity = false;
+        compare(PluginState.effectiveBackgroundOpacity("notes"), 0.1);
     }
 
     // The opt-out is a stored PluginState option, so it survives a restart and
@@ -309,6 +330,41 @@ TestCase {
         const next = migratedState({});
         compare(next.migrations[PluginState.sizeModeMarker], true);
     }
+    function test_a_later_adopter_is_folded_even_after_the_marker_burned() {
+        // Weather and currency migrated in 0.6 and set the marker; calendar
+        // and world-clock adopted grid.sizes months later with their own
+        // stored sizeMode. The DATA is the gate: pending must say yes while
+        // any multi-span manifest still has a sizeMode stored, whatever the
+        // marker says - the marker-shaped gate stranded exactly this case.
+        const state = {
+            migrations: { migratedSizeMode: true },
+            pluginOptions: { "calendar": { sizeMode: "2x1", blurEnabled: true } }
+        };
+        const manifests = [{ id: "calendar", grid: { cols: 2, rows: 2, sizes: [
+            { cols: 1, rows: 1 }, { cols: 2, rows: 1 },
+            { cols: 2, rows: 2 }, { cols: 3, rows: 2 }] } }];
+        verify(PluginState.sizeModesPending(state, manifests),
+               "a stranded sizeMode behind a burned marker is still pending");
+        const next = PluginState.stateWithSizeModesMigrated(state, manifests);
+        compare(next.pluginOptions["calendar"].sizeMode, undefined);
+        compare(next.pluginOptions["calendar"].__gridSize, "2x1");
+        compare(next.pluginOptions["calendar"].blurEnabled, true);
+        verify(!PluginState.sizeModesPending(next, manifests),
+               "folded state has nothing pending - the pass converges");
+    }
+
+    function test_nothing_pending_means_no_pass_at_all() {
+        const state = { pluginOptions: { "calendar": { blurEnabled: true } } };
+        const manifests = [
+            { id: "calendar", grid: { cols: 2, rows: 2, sizes: [
+                { cols: 2, rows: 2 }, { cols: 3, rows: 2 }] } },
+            { id: "notes", grid: { cols: 2, rows: 2 } }
+        ];
+        verify(!PluginState.sizeModesPending(state, manifests));
+        verify(!PluginState.sizeModesPending(null, manifests));
+        verify(!PluginState.sizeModesPending(state, "not-a-list"));
+    }
+
 
     function test_sizeModeMigrationLeavesAWidgetOwnedSizeModeAlone() {
         // world-clock declares no `grid` and drives its own sizeMode from its
@@ -341,5 +397,53 @@ TestCase {
         const next = PluginState.stateWithSizeModesMigrated(state, [weatherManifest()]);
         compare(next.desktopPositions["DP-1"].nandoroid_weather.x, 12);
         compare(next.presetPersist.nandoroid_weather, true);
+    }
+
+    // ---- options, forked per surface ----------------------------------------
+
+    function test_aLockOptionInheritsTheDesktopUntilWritten() {
+        PluginState.setOption("surf_monitor", "vertical", false, PluginState.desktopSurface);
+        compare(PluginState.option("surf_monitor", "vertical", true, PluginState.lockSurface), false);
+        verify(!PluginState.lockOptionsForked("surf_monitor"));
+
+        PluginState.setOption("surf_monitor", "vertical", true, PluginState.lockSurface);
+        compare(PluginState.option("surf_monitor", "vertical", false, PluginState.lockSurface), true);
+        compare(PluginState.option("surf_monitor", "vertical", true, PluginState.desktopSurface), false);
+        verify(PluginState.lockOptionsForked("surf_monitor"));
+
+        PluginState.resetLockOptions("surf_monitor");
+        compare(PluginState.option("surf_monitor", "vertical", true, PluginState.lockSurface), false);
+        verify(!PluginState.lockOptionsForked("surf_monitor"));
+    }
+
+    function test_theDefaultSurfaceFollowsTheLockLook() {
+        // A caller that names no surface - every widget binding that predates
+        // the fork - reads and writes whichever face the desktop is showing.
+        compare(PluginState.currentSurface, PluginState.desktopSurface);
+        PluginState.setOption("surf_follow", "vertical", false);
+        GlobalStates.editLockPreview = true;
+        compare(PluginState.currentSurface, PluginState.lockSurface);
+        compare(PluginState.option("surf_follow", "vertical", true), false);
+        PluginState.setOption("surf_follow", "vertical", true);
+        compare(PluginState.option("surf_follow", "vertical", false), true);
+        GlobalStates.editLockPreview = false;
+        compare(PluginState.option("surf_follow", "vertical", true), false);
+        compare(PluginState.option("surf_follow", "vertical", false, PluginState.lockSurface), true);
+    }
+
+    function test_aSharedKeyLandsOnTheDesktopFromEitherSurface() {
+        PluginState.setOption("surf_shared", "positionLocked", true, PluginState.lockSurface);
+        compare(PluginState.option("surf_shared", "positionLocked", false, PluginState.desktopSurface), true);
+        verify(!PluginState.lockOptionsForked("surf_shared"));
+    }
+
+    function test_loadTextKeepsALockOptionsMapAndDropsAList() {
+        PluginState.loadText(JSON.stringify({ version: 2, pluginOptions: { m: { vertical: false } },
+            lockOptions: { m: { vertical: true } } }));
+        compare(PluginState.option("m", "vertical", false, PluginState.lockSurface), true);
+        PluginState.loadText(JSON.stringify({ version: 2, lockOptions: ["m"] }));
+        compare(JSON.stringify(PluginState.state.lockOptions), "{}");
+        PluginState.loadText(JSON.stringify({ version: 2 }));
+        compare(JSON.stringify(PluginState.state.lockOptions), "{}");
     }
 }

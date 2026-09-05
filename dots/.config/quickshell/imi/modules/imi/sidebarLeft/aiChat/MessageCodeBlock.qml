@@ -172,16 +172,20 @@ ColumnLayout {
                 id: codeColumnLayout
                 anchors.fill: parent
                 spacing: 0
-                ScrollView {
+                Flickable {
                     id: codeScrollView
                     Layout.fillWidth: true
-                    // Layout.fillHeight: true
-                    implicitWidth: parent.width
                     implicitHeight: codeTextArea.implicitHeight + 1
-                    contentWidth: codeTextArea.width - 1
-                    // contentHeight: codeTextArea.contentHeight
+                    contentWidth: codeTextArea.implicitWidth
+                    contentHeight: codeTextArea.implicitHeight
                     clip: true
-                    ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+                    // A plain never-interactive Flickable, NOT a ScrollView:
+                    // ScrollView filters its children's wheel events to feed
+                    // its scrollbars, so it swallowed the transcript's scroll
+                    // over every code block even after its inner Flickable
+                    // was made non-interactive. This one cannot claim a
+                    // wheel at all; the horizontal bar below drags.
+                    interactive: false
                     
                     ScrollBar.horizontal: ScrollBar {
                         anchors.bottom: parent.bottom
@@ -209,7 +213,10 @@ ColumnLayout {
 
                     TextArea { // Code
                         id: codeTextArea
-                        Layout.fillWidth: true
+                        // Short code still fills the plate (selection and
+                        // edit backgrounds span it); long lines overflow
+                        // into the Flickable's contentWidth.
+                        width: Math.max(implicitWidth, codeScrollView.width)
                         readOnly: !editing
                         selectByMouse: enableMouseSelection || editing
                         renderType: Text.NativeRendering

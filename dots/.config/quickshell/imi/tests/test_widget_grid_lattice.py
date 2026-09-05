@@ -43,6 +43,7 @@ DELEGATES_TO_THE_DESIGN_SYSTEM = {
     "nandoroid-currency",
     "nandoroid-media",
     "nandoroid-system-monitor",
+    "nandoroid-system-monitor-gpu",
     "nandoroid-weather",
 }
 
@@ -141,20 +142,9 @@ class RootSizesGoThroughTheGridHelpers(unittest.TestCase):
 class PortedWidgetsDeclareTheSpansTheyActuallyOccupy(unittest.TestCase):
     """The two widgets this test was written for, pinned mode by mode."""
 
-    # `widgetWidth`/`widgetHeight` used to name the spans on their own line.
-    # They are the ANIMATING box now - both widgets morph in one tree, so the
-    # box travels towards a settled span rather than snapping to it - and the
-    # span helpers moved one step back, into the `spanWidthOf`/`spanHeightOf`
-    # every element's geometry is evaluated at. Both halves are still pinned:
-    # the file reaches the lattice through the helpers, and the animating box
-    # follows a span rather than a literal.
-    def assertBoxFollowsTheSpan(self, src, name):
-        width = re.search(r"property real widgetWidth:\s*(.+)", src).group(1)
-        height = re.search(r"property real widgetHeight:\s*(.+)", src).group(1)
-        self.assertEqual(width.strip(), "root.spanW",
-                         f"{name}'s animating box must follow the settled span")
-        self.assertEqual(height.strip(), "root.spanH", name)
-
+    # Both widgets own only their settled spans now: the manifest declares
+    # `grid.sizes`, the host owns and animates the box, and the widget's
+    # implicit size is the settled-span fallback a bare probe renders at.
     def test_world_clock_is_2x2_or_3x1(self):
         src = (BUNDLED / "world-clock/Widget.qml").read_text(encoding="utf-8")
         self.assertIn("widgetGridSpanX(2)", src)
@@ -163,14 +153,21 @@ class PortedWidgetsDeclareTheSpansTheyActuallyOccupy(unittest.TestCase):
         self.assertIn("widgetGridSpanY(2)", src)
         self.assertIn("widgetGridSpanY(1)", src,
                       "the wide mode is one row, so 108 tall - not 120")
-        self.assertBoxFollowsTheSpan(src, "world-clock")
+        self.assertIn("implicitWidth: root.spanW", src,
+                      "the probe fallback is the settled span")
 
-    def test_calendar_is_1x1_2x1_or_2x2(self):
+    def test_calendar_reaches_the_lattice_through_the_span_helpers(self):
+        """calendar adopted `grid.sizes`, so the host owns its box and the
+        animating-box half of this pin moved to the host; what stays pinned
+        is that every settled span the geometry evaluates at comes from the
+        helpers - including the 3x2 hero span."""
         src = (BUNDLED / "calendar/Widget.qml").read_text(encoding="utf-8")
         for call in ("widgetGridSpanX(1)", "widgetGridSpanX(2)",
+                     "widgetGridSpanX(3)",
                      "widgetGridSpanY(1)", "widgetGridSpanY(2)"):
             self.assertIn(call, src, f"calendar must size through {call}")
-        self.assertBoxFollowsTheSpan(src, "calendar")
+        self.assertIn("implicitWidth: root.spanW", src,
+                      "the probe fallback is the settled span")
 
 
 class ManifestFloorsAreRealSpans(unittest.TestCase):
@@ -192,16 +189,19 @@ class ManifestFloorsAreRealSpans(unittest.TestCase):
                 self.assertIn(manifest["defaultHeight"], SPAN_Y.values(),
                               f"{name} defaultHeight is not a spanY value")
 
-    def test_floors_are_the_smallest_span_the_widget_can_take(self):
-        """A floor larger than the widget's smallest mode makes that mode
-        unreachable, because the host takes the max of floor and content.
+    def test_no_grid_manifest_carries_a_floor_besides_its_grid(self):
+        """A manifest with a grid has no floor to get wrong - the host sizes
+        the widget to the span. Both widgets that once needed their floor
+        pinned to their smallest mode (world-clock, calendar) adopted
+        `grid.sizes`, so what remains to hold is that neither slid back to
+        carrying both mechanisms at once.
         """
-        for name, width, height in (("world-clock", SPAN_X[2], SPAN_Y[1]),
-                                    ("calendar", SPAN_X[1], SPAN_Y[1])):
+        for name in ("world-clock", "calendar"):
             manifest = json.loads(
                 (BUNDLED / name / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["defaultWidth"], width, name)
-            self.assertEqual(manifest["defaultHeight"], height, name)
+            self.assertIn("grid", manifest, name)
+            self.assertNotIn("defaultWidth", manifest, name)
+            self.assertNotIn("defaultHeight", manifest, name)
 
 
 class RenamedModesStillReadOldState(unittest.TestCase):
@@ -227,25 +227,20 @@ class RenamedModesStillReadOldState(unittest.TestCase):
         self.assertIsNone(re.search(r'sizeMode\s*===\s*"4x1"', src),
                           'world-clock still branches on the dead name "4x1"')
 
-    def test_calendar_normalises_the_persisted_mode(self):
-        src = (BUNDLED / "calendar/Widget.qml").read_text(encoding="utf-8")
-        self.assertTrue(
-            re.search(r"property string sizeMode:\s*root\.normalizeSizeMode\(",
-                      src),
-            "calendar must normalise the persisted mode on read")
-        self.assertIn('"2x1"', src, "the wide-short mode is two columns by one")
-
-    def test_calendar_maps_the_legacy_name_onto_the_same_shape(self):
-        """Without the mapping, "1x2" falls through to the switch default and
-        silently promotes the user's week strip to the full month.
+    def test_calendar_normalises_the_hosts_span(self):
+        """calendar's mode is the HOST's span now (`grid.sizes`); what it
+        still normalises is the empty string a bare probe reads and any span
+        a later manifest stops offering - an unknown mode falls to the
+        default rather than to a branch nothing draws. The legacy "1x2"
+        mapping retired with the option that carried it: the stored value is
+        folded into `__gridSize` by gridSizes.migrateSizeMode, which drops a
+        span the manifest does not offer, exactly as resolveSize would.
         """
         src = (BUNDLED / "calendar/Widget.qml").read_text(encoding="utf-8")
-        self.assertIn("function normalizeSizeMode", src,
-                      "calendar must normalise the persisted mode on read")
-        body = src[src.index("function normalizeSizeMode"):]
-        body = body[:body.index("\n    }")]
-        self.assertIn('"1x2"', body,
-                      "normalizeSizeMode must recognise the legacy name")
+        self.assertTrue(
+            re.search(r"property string sizeMode:\s*root\.normalizeSizeMode\(root\.hostGridSize\)",
+                      src),
+            "calendar's mode must derive from the host's span")
         self.assertIsNone(re.search(r'sizeMode\s*===\s*"1x2"', src),
                           'calendar still branches on the dead name "1x2"')
 

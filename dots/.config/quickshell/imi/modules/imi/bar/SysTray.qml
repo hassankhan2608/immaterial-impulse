@@ -7,6 +7,7 @@ import qs
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
+import "../../common/functions/barEdges.js" as BarEdges
 
 Item {
     id: root
@@ -97,16 +98,23 @@ Item {
         RippleButton {
             id: trayOverflowButton
             visible: root.showOverflowMenu && root.unpinnedItems.length > 0
-            toggled: root.trayOverflowOpen
             downAction: () => root.trayOverflowOpen = !root.trayOverflowOpen
 
             Layout.alignment: Qt.AlignVCenter | Qt.AlignHCenter
-            background.implicitWidth: 24
-            background.implicitHeight: 24
+            // Explicit, not implicit: a Control forces its background to its
+            // own size unless the size is set outright.
+            background.width: 24
+            background.height: 24
             background.anchors.centerIn: this
-            colBackgroundToggled: Appearance.colors.colSecondaryContainer
-            colBackgroundToggledHover: Appearance.colors.colSecondaryContainerHover
-            colRippleToggled: Appearance.colors.colSecondaryContainerActive
+
+            // The open state is the bar's anchor indicator on the popup-facing
+            // edge under the button, not a tonal container.
+            PopupAnchorIndicator {
+                wraps: trayOverflowButton.background
+                edgeItem: root
+                edge: BarEdges.popupEdge(Config.options.bar.vertical, Config.options.bar.bottom)
+                shown: root.trayOverflowOpen
+            }
 
             contentItem: MaterialSymbol {
                 verticalAlignment: Text.AlignVCenter
@@ -114,7 +122,7 @@ Item {
                 iconSize: Appearance.font.pixelSize.larger
                 text: Config.options.bar.bottom ? "keyboard_control_key" : "expand_more"
                 horizontalAlignment: Text.AlignHCenter
-                color: root.trayOverflowOpen ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer2
+                color: root.trayOverflowOpen ? Appearance.colors.colPrimary : Appearance.colors.colOnLayer2
                 rotation: (root.trayOverflowOpen ? 180 : 0) - (90 * root.vertical) + (180 * root.invertSide)
                 Behavior on rotation {
                     animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)

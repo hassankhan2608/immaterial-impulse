@@ -59,12 +59,31 @@ Singleton {
             property string hyprlandInstanceSignature: ""
 
             property JsonObject ai: JsonObject {
-                property string model: "gemini-2.5-flash"
+                // No built-in models ship any more; empty until the
+                // user's first pick from their own providers.
+                property string model: ""
                 property real temperature: 0.5
             }
 
             property JsonObject cheatsheet: JsonObject {
                 property int tabIndex: 0
+            }
+
+            // Typing test scores. Only aggregate metrics are kept - never the
+            // target text and never the keys that were actually pressed.
+            property JsonObject typingTest: JsonObject {
+                property list<var> recentResults: []
+                property list<var> personalBests: []
+                // Lifetime tallies. They outlive `recentResults`, which is
+                // capped, so "tests completed" stays true after the oldest
+                // results have been pruned away.
+                property int testsStarted: 0
+                property int testsCompleted: 0
+                property real secondsTyping: 0
+                // [{ d: "YYYY-MM-DD", n: tests }], one entry per active day,
+                // bounded to roughly a year - enough for the activity map and
+                // far smaller than keeping every result to derive it.
+                property list<var> activity: []
             }
 
             property JsonObject sidebar: JsonObject {
@@ -96,6 +115,11 @@ Singleton {
                 // process, so a shell restart mid-capture has to be able to
                 // find its way back to the rectangle being recorded.
                 property string region: ""
+                // Unix seconds the current recording started, 0 when idle.
+                // Written by record.sh beside `enable`, and persisted for
+                // the same reason: the recording outlives the shell, and
+                // the bar's elapsed timer has to survive a restart.
+                property real startedAt: 0
             }
 
             property JsonObject overlay: JsonObject {
