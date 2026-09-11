@@ -477,3 +477,21 @@ function dedup_and_sort_listfile(){
     mv -f -- "$temp" "$2"
   fi
 }
+
+# Quickshell's QML disk cache keys entries by source hash, so every edited or
+# updated .qml leaves its old compiled entry behind for good. An age rule does
+# not reach them: on one machine 44,745 entries (798 MB) were mostly younger
+# than 30 days and still stale (767 MB survived the first prune). The cache
+# is wiped at install instead - Qt recompiles exactly the files the deployed
+# tree loads on the next start, a few seconds once. Crash dumps keep the age
+# rule (70 dumps, 465 MB, went to 31 MB). Only these two well-known
+# directories are touched, never the parent.
+function prune_shell_caches(){
+  local base="${XDG_CACHE_HOME:-$HOME/.cache}/quickshell"
+  if [[ -d "$base/qmlcache" ]]; then
+    find "$base/qmlcache" -mindepth 1 -delete 2>/dev/null || true
+  fi
+  if [[ -d "$base/crashes" ]]; then
+    find "$base/crashes" -mindepth 1 -mtime +30 -delete 2>/dev/null || true
+  fi
+}

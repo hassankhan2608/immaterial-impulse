@@ -2,8 +2,7 @@
 
 All notable changes to Immaterial Impulse are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and the project follows
-[Semantic Versioning](https://semver.org/) (currently pre-1.0: `0.x` may make
-breaking changes on a minor bump).
+[Semantic Versioning](https://semver.org/).
 
 The version is stored in `VERSION` (a symlink to the shell's
 `dots/.config/quickshell/imi/VERSION`, so it deploys with the config and the
@@ -11,6 +10,113 @@ About page can read it). The companion `qs-wallpaperengine` is versioned in its
 own repo; the installer pins which revision it builds.
 
 ## [Unreleased]
+
+### Added
+- **Backup and restore your configuration.** `./setup backup` archives the
+  files an update never touches and the repo cannot reproduce (the shell's
+  config, plugins and presets, `hypr/custom`, `hyprland/shellOverrides`,
+  `hyprlock.conf`, `hypridle.conf`) into `~/imi-backup-<date>.tar.gz`;
+  `./setup restore <archive>` puts them back on a fresh install, moving
+  anything already there aside as `.pre-restore-*`. Restore refuses to run
+  under a live shell unless forced.
+- **Choose which colour the wallpaper seeds the palette with.** Settings >
+  Colours > "Source colour": dominant (as before), most or least saturated,
+  lightest, darkest, or strongest. The terminal colours follow the same pick.
+- **Notifications can be made to ignore the app's own timeout.** Settings >
+  Notifications > "Let notifications set their own timeout"; off, every popup
+  uses the configured duration, including ones an app marked "never dismiss".
+
+### Changed
+- **The shell no longer loads Mesa's software renderer beside the NVIDIA
+  driver.** On a machine where NVIDIA is the only GPU the `qs` wrapper pins
+  the EGL vendor, dropping about 110 MB of resident memory from the shell and
+  every helper it spawns; mixed and non-NVIDIA machines are unchanged.
+- **Two background pollers became subscriptions.** The tray watchdog listens
+  on the session bus instead of running three `busctl` calls every three
+  seconds, and the privacy indicator subscribes to PulseAudio and watches the
+  camera nodes with inotify instead of spawning `pactl` and `fuser` every two
+  seconds; both keep a slow poll as a safety net. Between them, about four
+  process spawns per second are gone.
+
+### Fixed
+- **Lyrics translations and romanizations from Glassy no longer go missing.**
+  The lyrics page renders them a few seconds after the lyrics, so a fetch
+  that ran first cached a result without them and the toggles never appeared
+  for that song. The shell now re-asks for just those fields while the panel
+  is open and folds them in without reloading.
+- **Presets from other people cannot run commands on your machine.** Applying
+  a preset skipped the `apps.*` entries only in one code path; they are now
+  dropped on every apply unless you pick "apps" explicitly, and preset names
+  can no longer point outside the presets directory.
+- **The experimental file deployer no longer overwrites `shellOverrides`.**
+  The yaml manifest used by `setup install --exp-files` now excludes
+  `hyprland/shellOverrides`, matching the default installer.
+
+## [1.0.0] — 2026-09-08
+
+The first stable release. Fifteen release candidates since 2026-09-01 closed
+out the 1.0 list; this one carries the fixes below on top of rc-15.
+
+### Fixed
+- **Lyrics from Glassy no longer show every line twice.** The lyrics page
+  now draws each line as a visible run plus a hidden copy for the sweep
+  animation, and the shell read both; it reads the visible run only, folds
+  any exact doubling, and re-fetches songs cached while the bug was live.
+- **Checking Wallpaper Engine compatibility no longer spawns a second
+  scanner or pops crash notifications.** When a wallpaper crashed the
+  renderer inside the scanner, Quickshell's own crash handler relaunched the
+  scanner from the start of the queue while the shell was already starting
+  its replacement; the two reported over each other and wallpapers after the
+  crash were marked broken. The scanner now runs without that handler.
+- **The wallpaper selector's header no longer shows a stray pill.** With
+  Wallpaper Engine selected the header drew a tall shadowed "Steam Workshop"
+  pill beside the source dropdown, and with Local an empty stub; the chip
+  rail now appears only for the online sources that have chips.
+- **Picking a Wallpaper Engine wallpaper themes from it again.** A
+  previously chosen accent colour stayed in force across Wallpaper Engine
+  picks (a static wallpaper pick already cleared it), so every WE wallpaper
+  produced the same palette and the preview was ignored. A WE pick now resets
+  the accent like any other wallpaper choice; the accent picker, presets and
+  the light/dark toggles keep their behaviour.
+- **New colours arrive on time and fade in.** After a wallpaper or accent
+  change the shell sometimes kept the previous palette until something else
+  nudged it, and when it did change it snapped. The theme loader now applies
+  each palette when the file has actually finished loading, and transitions
+  every change after startup.
+
+## [1.0.0-rc-15] — 2026-09-07
+
+### Changed
+- **The installer stops hoarding old renderers and caches.** Each Wallpaper
+  Engine pin used to leave the previous ~1.4 GB prebuilt behind (7 of them,
+  9.6 GB, on a machine that followed the pin since v0.2.0), plus a ~5 GB
+  source checkout once any run had fallen back to building. Settings > Update
+  Dots now keeps only the renderer the shell runs, drops the dead checkout
+  (also on the re-run with an unchanged pin, which is every update), clears
+  the QML compile cache (the next start recompiles what it loads, a few
+  seconds once), prunes crash dumps untouched for 30 days, and keeps five
+  install logs instead of all of them.
+
+### Fixed
+- **Dragging the Wallpaper Engine crop box no longer scrolls the sidebar.**
+  A vertical drag on the Fill crop picker moved the box and scrolled the
+  whole settings column with it; the picker now keeps the drag to itself.
+- **Shell memory no longer grows without bound.** The shell gained two to
+  three megabytes a minute while idle and around nine while in use - 2.6 GB
+  after a ten-hour session - because the QML engine's own garbage collector
+  never gave the JavaScript heap back. The shell now runs a full collection
+  every five minutes, which holds memory flat.
+- **The region selector opens sooner.** The overlay waited for grim to
+  PNG-encode the whole output before it could appear - about half a second
+  on a 5120x1440 screen. The frozen frame is now written as PPM (a tenth of
+  the encode, a third of the decode); saved files, the clipboard, the
+  annotator and the uploader still receive PNG.
+- **Snip buttons and clipboard history no longer launch a second shell.**
+  The bar's snip button, the Screen snip quick toggle, the recorder overlay
+  and the overview's image search each started another Quickshell process to
+  send one command back to the running shell, and every copy did the same
+  to refresh clipboard history. They now call in-process; the clipboard is
+  watched by the shell itself.
 
 ## [1.0.0-rc-14] — 2026-09-05
 

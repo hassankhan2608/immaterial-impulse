@@ -21,7 +21,7 @@ QuickToggleModel {
         interval: 300
         repeat: false
         onTriggered: {
-            Quickshell.execDetached(["qs", "-p", Quickshell.shellPath(""), "ipc", "call", "region", "screenshot"]);
+            GlobalStates.regionRequested("screenshot");
         }
     }
 

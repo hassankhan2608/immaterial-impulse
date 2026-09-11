@@ -734,7 +734,11 @@ Singleton {
                     property list<string> monitorExcludedTypes: ["GPU"]
                 }
                 property JsonObject palette: JsonObject {
-                    property string type: "auto" // Allowed: auto, scheme-content, scheme-expressive, scheme-fidelity, scheme-fruit-salad, scheme-monochrome, scheme-neutral, scheme-rainbow, scheme-tonal-spot
+                    property string type: "auto"
+                    // Which colour matugen lifts from the wallpaper. "dominant" is the
+                    // scorer's first pick (matugen's --source-color-index 0); the rest are
+                    // matugen's --prefer criteria over the same candidates.
+                    property string sourceMode: "dominant" // dominant | saturation | less-saturation | lightness | darkness | value // Allowed: auto, scheme-content, scheme-expressive, scheme-fidelity, scheme-fruit-salad, scheme-monochrome, scheme-neutral, scheme-rainbow, scheme-tonal-spot
                     property string accentColor: ""
                 }
                 // Shared defaults for Material 3 Expressive plugin widgets.
@@ -1235,7 +1239,10 @@ Singleton {
                 }
                 property JsonObject privacyIndicator: JsonObject {
                     property bool enable: true
-                    property int pollInterval: 2000 // ms
+                    // The safety-net poll behind the event sources
+                    // (pactl subscribe, inotify on /dev/video*); the
+                    // events carry the fast path.
+                    property int pollInterval: 10000 // ms
                     property bool showMic: true
                     property bool showCamera: true
                     property bool showScreencast: true
@@ -1460,6 +1467,10 @@ Singleton {
 
             property JsonObject notifications: JsonObject {
                 property int timeout: 7000
+                // A notification may ask for its own display time (expire_timeout).
+                // On, that wins over `timeout` above; off, every popup uses `timeout`
+                // - some apps send absurd values, or 0 for "never".
+                property bool respectAppTimeout: true
                 property string position: "top_right"
             }
 

@@ -21,8 +21,11 @@ hl.on("hyprland.start", function ()
 
     -- Clipboard: history
     --hl.exec_cmd("wl-paste --watch cliphist store")
-    hl.exec_cmd("wl-paste --type text --watch bash -c 'cliphist store && qs -c $qsConfig ipc call cliphistService update'")
-    hl.exec_cmd("wl-paste --type image --watch bash -c 'cliphist store && qs -c $qsConfig ipc call cliphistService update'")
+    -- The shell watches the clipboard itself (services/Cliphist.qml) and
+    -- refreshes on change; chaining `qs ... ipc call cliphistService update`
+    -- here started a second Quickshell process per copy.
+    hl.exec_cmd("wl-paste --type text --watch cliphist store")
+    hl.exec_cmd("wl-paste --type image --watch cliphist store")
 
     -- Cursor: theme/size come from the shell config (Settings > Cursor); the
     -- script's fallbacks match the values that used to be hardcoded here.

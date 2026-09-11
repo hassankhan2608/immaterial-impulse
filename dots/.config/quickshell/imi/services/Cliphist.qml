@@ -275,6 +275,27 @@ Singleton {
 
     Component.onCompleted: pinsFileView.reload()
 
+    // Refresh when the clipboard changes. Hyprland's exec-once used to chain
+    // `qs ... ipc call cliphistService update` after every `cliphist store`,
+    // which started a second Quickshell process per copy (77 ms of Qt
+    // start-up, a fork of the whole shell) to deliver one call. One resident
+    // wl-paste watcher inside the shell does it instead; the 250 ms debounce
+    // covers the store that Hyprland's watcher is finishing concurrently.
+    // The IPC target below stays for callers outside the process.
+    Process {
+        id: clipboardWatch
+        running: true
+        command: ["wl-paste", "--watch", "echo", "changed"]
+        stdout: SplitParser {
+            onRead: refreshDebounce.restart()
+        }
+    }
+    Timer {
+        id: refreshDebounce
+        interval: 250
+        onTriggered: root.refresh()
+    }
+
     IpcHandler {
         target: "cliphistService"
 

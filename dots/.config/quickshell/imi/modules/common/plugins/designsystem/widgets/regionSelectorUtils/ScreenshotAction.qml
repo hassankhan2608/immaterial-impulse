@@ -36,8 +36,11 @@ Singleton {
         
         const cropBase = `magick ${shellEscape(screenshotPath)} `
             + `-crop ${rw}x${rh}+${rx}+${ry}`
-        const cropToStdout = `${cropBase} -`
-        const cropInPlace = `${cropBase} '${shellEscape(screenshotPath)}'`
+        // The frozen frame is a PPM (TempScreenshotProcess); magick would
+        // otherwise inherit that container for its outputs and hand the
+        // clipboard, the annotator and the uploader a PPM. Name PNG.
+        const cropToStdout = `${cropBase} png:-`
+        const cropInPlace = `${cropBase} png:'${shellEscape(screenshotPath)}'`
         const cleanup = `rm '${shellEscape(screenshotPath)}'`
         const slurpRegion = `${rx},${ry} ${rw}x${rh}`
         

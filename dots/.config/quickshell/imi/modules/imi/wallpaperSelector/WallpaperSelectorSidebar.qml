@@ -338,6 +338,11 @@ ColumnLayout {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.SizeAllCursor
+                                    // The picker sits inside the sidebar's Flickable, which steals
+                                    // any press the moment the pointer travels past the drag
+                                    // threshold - so a vertical crop drag scrolled the whole column
+                                    // while the box moved. The gesture is ours from the press.
+                                    preventStealing: true
                                     function apply(mx, my) {
                                         const f = CropPicker.focusFromPointer(
                                             root.contentAspect, root.screenAspect,

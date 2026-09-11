@@ -12,6 +12,14 @@ pragma ComponentBehavior: Bound
 Singleton {
     id: root
     property bool barOpen: true
+    // Ask the region selector for an action ("screenshot", "search", "ocr",
+    // "record", "recordWithSound") from anywhere in the shell. Buttons used to
+    // do this by spawning `qs ... ipc call region <action>` at themselves: a
+    // second Quickshell process (77 ms of Qt start-up on this machine, a fork
+    // of the whole shell) to deliver one call back into this one. The
+    // selector's Scope in shell.qml listens; IPC and GlobalShortcut still work
+    // for callers outside the process.
+    signal regionRequested(string action)
     property bool crosshairOpen: false
     property bool sidebarLeftOpen: false
     // A path here opens the fullscreen image viewer on it; "" closes it.

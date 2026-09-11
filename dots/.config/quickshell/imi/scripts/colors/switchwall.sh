@@ -195,7 +195,25 @@ switch() {
     cursorposy=$(bc <<< "scale=0; ($cursorposy - $screeny) * $scale / 1")
     cursorposy_inverted=$((screensizey - cursorposy))
 
-    matugen_args=(--source-color-index 0)
+    # Which colour to lift from the image. "dominant" is the scorer's first
+    # pick; the other modes are matugen's --prefer criteria over the same
+    # candidates. matugen alone knows which candidate a criterion selects,
+    # so for those a dry run asks it, and the terminal generator is handed
+    # that hex as --color - otherwise the shell and the terminal would score
+    # the image independently and disagree.
+    source_mode="$(jq -r '.appearance.palette.sourceMode // "dominant"' "$SHELL_CONFIG_FILE" 2>/dev/null)"
+    case "$source_mode" in
+        saturation|less-saturation|lightness|darkness|value) matugen_args=(--prefer "$source_mode") ;;
+        *) source_mode="dominant"; matugen_args=(--source-color-index 0) ;;
+    esac
+    align_generator_with_matugen() { # $1 = image matugen will read
+        [[ "$source_mode" == "dominant" ]] && return 0
+        local preferred
+        preferred="$(matugen image "$1" --prefer "$source_mode" --dry-run --json hex 2>/dev/null \
+            | jq -r '.colors.source_color.dark.color // empty' 2>/dev/null)"
+        [[ "$preferred" =~ ^#[A-Fa-f0-9]{6}$ ]] && generate_colors_material_args=(--color "$preferred")
+        return 0
+    }
 
     if [[ "$color_flag" == "1" ]]; then
         matugen_args+=(color hex "$color")
@@ -270,6 +288,7 @@ switch() {
             if [ -f "$thumbnail" ]; then
                 matugen_args+=(image "$thumbnail")
                 generate_colors_material_args=(--path "$thumbnail")
+                align_generator_with_matugen "$thumbnail"
                 [[ -z "$coloronly" ]] && create_restore_script "$video_path"
             else
                 echo "Cannot create image to colorgen"
@@ -279,6 +298,7 @@ switch() {
         else
             matugen_args+=(image "$imgpath")
             generate_colors_material_args=(--path "$imgpath")
+            align_generator_with_matugen "$imgpath"
             # Update wallpaper path in config (skipped for color-only runs)
             [[ -z "$coloronly" ]] && set_wallpaper_path "$imgpath"
             remove_restore
@@ -450,10 +470,15 @@ main() {
         imgpath="$(kdialog --getopenfilename . --title 'Choose wallpaper')"
     fi
 
-    # A color-only run is transient (e.g. the lock screen recoloring); it must
-    # not wipe the user's configured accent color. When an accent is set it
-    # still wins over the image, same as a normal switch.
-    if [[ -n "$imgpath" && -z "$noswitch_flag" && -z "$coloronly_flag" ]]; then
+    # An explicit wallpaper pick resets the configured accent, on every path:
+    # a static switch (--image) and a Wallpaper Engine pick (--coloronly
+    # --image, which themes from the preview without tearing the live
+    # wallpaper down). --noswitch is the one flag that keeps the accent - the
+    # accent picker, the mode toggles and preset application all pass it.
+    # --coloronly used to be exempt as well, so a WE pick never cleared a
+    # stale accent and every WE wallpaper regenerated the same palette from
+    # it while the preview was ignored (2026-09-07).
+    if [[ -n "$imgpath" && -z "$noswitch_flag" ]]; then
         set_accent_color ""
         color_flag=""
         color=""

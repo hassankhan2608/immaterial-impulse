@@ -112,7 +112,7 @@ RowLayout {
         Layout.bottomMargin: Appearance.spacing.space50
         onClicked: {
             GlobalStates.overviewOpen = false;
-            Quickshell.execDetached(["qs", "-p", Quickshell.shellPath(""), "ipc", "call", "region", "search"]);
+            GlobalStates.regionRequested("search");
         }
         text: "image_search"
         StyledToolTip {

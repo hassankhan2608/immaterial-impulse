@@ -102,6 +102,27 @@ Scope {
         GlobalStates.regionSelectorOpen = true
     }
 
+    // In-process callers (bar button, quick toggle, recorder overlay, overview
+    // search). Deferred one event-loop turn so a caller that closes its own
+    // surface first (`GlobalStates.overlayOpen = false`) has that state
+    // applied before the selector's exclusive-focus layer comes up - the
+    // out-of-process spawn this replaces gave that ordering for free.
+    Connections {
+        target: GlobalStates
+        function onRegionRequested(action) {
+            Qt.callLater(() => {
+                switch (action) {
+                case "screenshot": root.screenshot(); break;
+                case "search": root.search(); break;
+                case "ocr": root.ocr(); break;
+                case "record": root.record(); break;
+                case "recordWithSound": root.recordWithSound(); break;
+                default: console.warn(`[RegionSelector] unknown region action: ${action}`);
+                }
+            });
+        }
+    }
+
     IpcHandler {
         target: "region"
 

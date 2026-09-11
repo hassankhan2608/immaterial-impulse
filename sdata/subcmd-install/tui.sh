@@ -353,6 +353,9 @@ on_cancel(){
 run_quiet_install(){
   local log="${XDG_CACHE_HOME:-$HOME/.cache}/immaterial-impulse/install-$(date +%Y%m%d-%H%M%S).log"
   mkdir -p "$(dirname "$log")"
+  # Keep the four newest logs plus this one. Every run wrote another ~600 KB
+  # that nothing ever read again (57 of them on one machine).
+  ls -1t "$(dirname "$log")"/install-*.log 2>/dev/null | tail -n +5 | xargs -r rm -f --
 
   clear; banner
   printf '\n  %sPreparing…%s enter your password if prompted (sudo, once).\n\n' "$C_DIM" "$C_RST"

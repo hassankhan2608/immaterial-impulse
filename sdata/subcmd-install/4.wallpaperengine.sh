@@ -111,6 +111,32 @@ write_stamp(){ # $1 = installed ref, $2 = qs binary path, $3 = WE lib dir
   printf '%s %s %s\n' "$1" "$2" "${3:-}" > "$STAMP_FILE"
 }
 
+# Keep only the prebuilt tree the wrapper points at. Every try_prebuilt run
+# extracts its ~1.4 GB tarball into a fresh $PREBUILT_ROOT/<ref> and used to
+# leave every earlier <ref> behind, so a machine that followed the pin from
+# v0.2.0 to v0.3.0 carried 9.6 GB of dead renderers under ~/.cache. Only
+# direct children of $PREBUILT_ROOT are touched, and only when a ref to keep
+# is named; an unset root or an empty ref is a no-op, never a wipe.
+prune_prebuilt(){ # $1 = ref to keep
+  local keep="$1" d name
+  [[ -n "$keep" && -d "$PREBUILT_ROOT" ]] || return 0
+  for d in "$PREBUILT_ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    d="${d%/}"; name="${d##*/}"
+    [[ "$name" == "$keep" ]] && continue
+    rm -rf -- "$d" && say "pruned stale prebuilt $name"
+  done
+}
+
+# The source tree only exists because some earlier run fell back to a source
+# build. Once a prebuilt is installed the wrapper no longer points into it,
+# and a future fallback re-clones anyway (build-we.sh rebuilds from scratch),
+# so the ~5 GB checkout is dead weight.
+prune_build_dir(){
+  [[ -d "$BUILD_DIR/.git" ]] || return 0
+  rm -rf -- "$BUILD_DIR" && say "removed the stale source build tree"
+}
+
 up_to_date(){
   [[ "${WE_FORCE_REBUILD:-0}" == "1" ]] && return 1
   [[ -f "$STAMP_FILE" ]] || return 1
@@ -249,6 +275,32 @@ $ld_line
 # QSGRenderThread, keeping animations responsive (teardown hitch drops to
 # <1s). Verified: WE still renders correctly under threaded on NVIDIA here.
 export QSG_RENDER_LOOP=threaded
+# --- egl vendor gate ---
+# glvnd loads every EGL vendor it finds and Qt initialises both, so on an
+# NVIDIA machine Mesa's llvmpipe stack (libgallium + libLLVM) sat in every
+# Quickshell process: 136 MB of RSS on a trivial window, 109 MB on the full
+# shell measured inside a nested Hyprland, which ran 90 s pinned with no EGL
+# or protocol errors and no Mesa mapped. Pin the vendor only when NVIDIA is
+# the only render device; a box with any other GPU keeps the default, since
+# Mesa drives that one. IMI_DRM_SYSFS points the check at a fake tree in
+# tests; IMI_WRAPPER_DRY_RUN prints the decision instead of starting the
+# shell.
+drm_sysfs="\${IMI_DRM_SYSFS:-/sys/class/drm}"
+nvidia_only=1; gpus_seen=0
+for vendor_file in "\$drm_sysfs"/card[0-9]/device/vendor "\$drm_sysfs"/card[0-9][0-9]/device/vendor; do
+  [ -r "\$vendor_file" ] || continue
+  gpus_seen=1
+  [ "\$(cat "\$vendor_file")" = "0x10de" ] || { nvidia_only=0; break; }
+done
+nvidia_json=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+if [ "\$gpus_seen" = 1 ] && [ "\$nvidia_only" = 1 ] && [ -r "\$nvidia_json" ]; then
+  export __EGL_VENDOR_LIBRARY_FILENAMES="\$nvidia_json"
+fi
+# --- end egl vendor gate ---
+if [ -n "\${IMI_WRAPPER_DRY_RUN:-}" ]; then
+  echo "__EGL_VENDOR_LIBRARY_FILENAMES=\${__EGL_VENDOR_LIBRARY_FILENAMES:-}"
+  exit 0
+fi
 exec "$qs_bin" "\$@"
 WRAPPER
   maybe_sudo install -Dm755 "$tmp" "$PREFIX/bin/quickshell"
@@ -309,6 +361,8 @@ try_prebuilt(){
 
   install_wrapper "$qs_bin" "$lib"
   write_stamp "$WE_REF" "$qs_bin" "$lib"
+  prune_prebuilt "$WE_REF"
+  prune_build_dir
   say "installed prebuilt $WE_REF (skipped the ~compile)."
   return 0
 }
@@ -335,6 +389,7 @@ source_build(){
   [[ -x "$QS_BIN" ]] || { say "build finished but $QS_BIN missing. Aborting." >&2; exit 1; }
   install_wrapper "$QS_BIN" "$WE_LIB_DIR"
   write_stamp "$WE_REF" "$QS_BIN" "$WE_LIB_DIR"
+  prune_prebuilt "$WE_REF"
 }
 
 if up_to_date; then
@@ -350,6 +405,12 @@ if up_to_date; then
   say "already installed at $WE_REF; refreshing the wrapper and skipping the rebuild."
   install_wrapper "$_stamp_bin" "$_stamp_lib"
   write_stamp "$WE_REF" "$_stamp_bin" "$_stamp_lib"
+  prune_prebuilt "$WE_REF"
+  # A re-run with an unchanged pin is the common case (every Update Dots), and
+  # it is where the first prune left the 5 GB checkout standing: only the
+  # fresh-prebuilt path dropped it. If the wrapper points into a prebuilt, the
+  # checkout is dead here too.
+  case "$_stamp_bin" in "$PREBUILT_ROOT"/*) prune_build_dir ;; esac
   exit 0
 fi
 if try_prebuilt; then exit 0; fi

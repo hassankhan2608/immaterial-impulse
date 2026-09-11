@@ -255,6 +255,16 @@ if ! bash "$SCRIPT_DIR/lint_region_selector_capture.sh"; then
     exit 1
 fi
 
+# The shell must not spawn a second Quickshell to reach its own IPC: six
+# buttons did `qs ... ipc call region ...` and Hyprland chained the same after
+# every clipboard store. lint_no_self_ipc_spawn.sh keeps them from coming
+# back.
+echo "Running no-self-IPC lint..."
+if ! bash "$SCRIPT_DIR/lint_no_self_ipc_spawn.sh"; then
+    echo "No-self-IPC lint failed."
+    exit 1
+fi
+
 # Static lint: spacing/padding/margin must use Appearance.spacing tokens, not
 # raw pixel literals in the token range.
 echo "Running Material icon lint..."
@@ -320,6 +330,31 @@ fi
 echo "Running sni watchdog planner tests..."
 if ! python3 "$SCRIPT_DIR/test_sni_watchdog.py"; then
     echo "SNI watchdog planner tests failed."
+    exit 1
+fi
+# The wallpaper's source colour is selectable (matugen --prefer), and the
+# terminal generator is handed matugen's pick so the two agree.
+echo "Running palette source mode tests..."
+if ! python3 "$SCRIPT_DIR/test_palette_source_mode.py"; then
+    echo "Palette source mode tests failed."
+    exit 1
+fi
+
+
+# The privacy indicator detects capture by subscription (pactl subscribe,
+# inotify on /dev/video*), with the poll as a slow safety net; it used to be
+# a spawn per second.
+echo "Running media capture contract tests..."
+if ! python3 "$SCRIPT_DIR/test_media_capture_contract.py"; then
+    echo "Media capture contract tests failed."
+    exit 1
+fi
+
+# Notification timeouts: `respectAppTimeout` off makes the shell's own
+# duration win over the app's expire_timeout (0 = never, absurd values).
+echo "Running notification timeout policy tests..."
+if ! python3 "$SCRIPT_DIR/test_notification_timeout_policy.py"; then
+    echo "Notification timeout policy tests failed."
     exit 1
 fi
 
@@ -1038,6 +1073,33 @@ if ! python3 "$SCRIPT_DIR/test_settings_row_grammar.py"; then
     exit 1
 fi
 
+# The shell's JavaScript heap is collected on a fixed cadence (shell.qml).
+# Without it the shell grew 2-3 MiB/min idle, 2.6 GB in ten hours; the pin
+# keeps the timer from being tidied away.
+echo "Running heap janitor test..."
+if ! python3 "$SCRIPT_DIR/test_heap_janitor.py"; then
+    echo "Heap janitor test failed."
+    exit 1
+fi
+
+# The installer's own tests (sdata/tests). They pin the install scripts, not
+# the shell, and until now nothing ran them: not this suite, not CI. They sit
+# outside the shell tree, so a deployed copy of this suite
+# (~/.config/quickshell/imi/tests) has no sdata beside it - skip there, fail
+# loudly anywhere the checkout is present.
+SDATA_TESTS="$SCRIPT_DIR/../../../../../sdata/tests"
+if [[ -d "$SDATA_TESTS" ]]; then
+    echo "Running installer (sdata) tests..."
+    for sdata_test in "$SDATA_TESTS"/test_*.py; do
+        if ! python3 "$sdata_test"; then
+            echo "Installer test $(basename "$sdata_test") failed."
+            exit 1
+        fi
+    done
+else
+    echo "Installer (sdata) tests skipped: no sdata/ beside this tree (deployed copy)."
+fi
+
 # Stage 8 of Edit Mode: the bar and the dock edited in place. What it pins is
 # silent on screen - a suspension that touches `visible` destroys a layer
 # surface, and an affordance wired into one bar orientation and not the other
@@ -1702,6 +1764,16 @@ if ! python3 "$SCRIPT_DIR/test_kboptions_migration_runtime.py"; then
     exit 1
 fi
 
+# A rewritten colors.json must reach Appearance promptly and animated. The
+# loader applied every post-startup palette from a 20 ms timer that read the
+# FileView before its async reload landed (stale palette, "takes a while")
+# and with animated=false (no transition). Brings its own headless weston.
+echo "Running theme reload runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_theme_reload_runtime.py"; then
+    echo "Theme reload runtime tests failed."
+    exit 1
+fi
+
 # The block is a set of paths into the theme's directory and at the apply
 # script sudo will accept; the directory was renamed and the script moved. A
 # wrong path here means the login screen silently stops following the
@@ -2028,6 +2100,15 @@ fi
 echo "Running media art-trim tests..."
 if ! python3 "$SCRIPT_DIR/test_media_art_trim.py"; then
     echo "Media art-trim tests failed."
+    exit 1
+fi
+
+# Glassy's translation/romanization land late; `lyrics.py --extras` re-asks
+# for just those fields and folds them into the cache, and the service polls
+# it while an incomplete Glassy result is on screen, merging in place.
+echo "Running lyrics extras refetch tests..."
+if ! python3 "$SCRIPT_DIR/test_lyrics_extras_refetch.py"; then
+    echo "Lyrics extras refetch tests failed."
     exit 1
 fi
 

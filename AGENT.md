@@ -228,6 +228,53 @@ a print can sit unflushed for several seconds before showing up, sometimes inter
 events in a way that looks like a stale/wrong value at first glance. If a debug print looks wrong,
 wait and re-check before concluding the code is broken.
 
+**The QML engine does not give the JavaScript heap back on its own; shell.qml collects it every
+five minutes.** The shell grew 2-3 MiB/min idle and ~9 MiB/min in use (2.6 GB in ten hours) with
+the driver, the WE module, the WE layer, GL itself (same growth on `QT_QUICK_BACKEND=software`)
+and jemalloc (in-use flat while RSS rose) all cleared by controls; the growth was QV4 chunks, and
+a shell calling `gc()` every 30 s stayed flat. Resource polling was the largest per-tick allocator
+(off: 0.3 MiB/min) but every timer-driven service contributes, so the collection is engine-wide
+and gated only by a live screen recording (one full collection is ~50 ms on the harness heap, more
+on a big one). Do not "tidy" that Timer away, and do not reach for per-service caps first when RSS
+climbs: reproduce in the nested harness (headless weston 5120x1440, fresh XDG dirs, a copy of
+config.json, `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`, RSS from `/proc/<pid>/status`
+every 30 s), and a `gc()` timer in a copied tree is the first discriminator. 31655e7c4 ("perf(shell): collect the JavaScript heap every five minutes").
+
+**Every Quickshell process here loaded Mesa's llvmpipe stack next to the NVIDIA driver; the `qs`
+wrapper pins the EGL vendor when NVIDIA is the only GPU.** glvnd loads every vendor it finds and Qt
+initialises both, so `libgallium` + `libLLVM` sat in the shell and in every `qs -p` helper it spawns
+(136 MB on a trivial window, ~110 MB on the full shell, measured in a nested Hyprland that ran the
+pinned shell 90 s with no EGL or protocol errors). The gate reads `/sys/class/drm/card*/device/vendor`
+and exports `__EGL_VENDOR_LIBRARY_FILENAMES` only when every card is `0x10de` and the NVIDIA json
+exists; a mixed box keeps the default because Mesa drives its other GPU. Nested **weston** cannot
+host a pinned shell (Wayland protocol error) - test wrapper changes in a nested Hyprland.
+`IMI_DRM_SYSFS` points the gate at a fake tree and `IMI_WRAPPER_DRY_RUN` prints the decision, which
+is how `sdata/tests/test_we_wrapper_env.py` exercises it. cb29df6d8 ("perf(wrapper): pin glvnd to NVIDIA when it is the only GPU").
+
+**A service that watches a state which changes a few times a day subscribes to it; a poll is the
+safety net, never the fast path.** The steady-state shell was spawning 4-5 processes per second:
+the tray watchdog ran three `busctl` calls plus a `pgrep` every 3 s and the privacy indicator
+`pactl` + `fuser` every 2 s. Both now block on an event stream (`busctl --user monitor --json=short
+--match ...`; `pactl subscribe` and `inotifywait -m -e open -e close /dev/video*`) with a settle
+timer and a slow poll (60 s / 10 s) for anything the stream misses. When adding a poller, ask what
+emits the change first; `tests/test_sni_watchdog.py` and `tests/test_media_capture_contract.py`
+pin the subscriptions. 82627cb23 ("perf(tray): the SNI watchdog listens on the bus instead of polling it"), 8c9ac38b8 ("perf(privacy): detect capture by subscription, poll only as a safety net").
+
+**Preset `apps.*` values are shell commands the shell runs; `presets.sh --apply` strips them unless
+`--only apps` is asked for, and names are validated before they touch the filesystem.** A shared
+preset could plant a launch command that ran on the next terminal/browser keybind; the strip now
+happens on every apply path (not only the `--only` one) and names must match `^[A-Za-z0-9._-]+$`
+so `../` cannot leave the presets directory. Keep both when touching `scripts/presets.sh` or
+`services/Presets.qml`; `tests/test_presets_apply_only.py` fails if either goes. 03ad7ece5 ("fix(presets): commands are opt-in on every apply path, and names cannot leave the directory").
+
+**Glassy's romanization/translation arrive seconds after the lyrics; `LyricsService` re-asks for
+them and merges IN PLACE.** A one-shot fetch that ran before `.blyrics--translated` existed cached a
+payload without it and the toggles never showed. `lyrics.py ... --extras` asks Glassy for just those
+fields and folds them into the cached payload by timestamp; the service polls it every 10 s (twelve
+times at most) while an incomplete Glassy result is on screen, mutates the loaded line objects and
+emits `lyricsLinesChanged()`. Reassigning `lyricsLines` there would reset the sweep - do not
+"simplify" the merge into a reload. b7f98e237 ("fix(lyrics): re-ask Glassy for late translations and merge them in").
+
 ## External binaries the shell drives
 
 **WE_REF pins the renderer, so a `WallpaperEngineSurface` property the shell reads may not exist in
@@ -440,6 +487,25 @@ from a successful parse, so a scan that fails outright still clears the queue.
 8b31496c3 ("feat(sounds): a testable XDG sound-theme resolver"),
 cbd8e707e ("feat(sounds): scan the sound-theme roots into one catalogue"),
 a3a8f65cf ("fix(sounds): play one resolved file instead of two guessed ones").
+
+**A configured accent wins over the image on every `switchwall.sh` run, so every path that means
+"the user picked a wallpaper" must clear it first.** `palette.accentColor` is written by the accent
+picker (`--color`), and a static switch (`--image`) resets it before theming. The Wallpaper Engine
+pick themes with `--coloronly --image <preview>` - color-only because the live wallpaper must not be
+torn down - and that flag was exempted from the reset by a comment about "transient" runs that
+described the lock screen, which uses `--lock-colors-only`. Result: a stale accent won on every WE
+pick, all outputs carried one palette, `path.txt` read "Null" (matugen ran in `color hex` mode).
+`--noswitch` is the only flag that keeps the accent (picker, mode toggles, presets pass it). When
+theming looks stuck across wallpapers, check `palette.accentColor` in config.json before the
+generators. a33f2a8d3 ("fix(theme): a Wallpaper Engine pick resets the accent like a static switch").
+**`FileView.loaded` is a property that stays true across reloads; react to the `loaded()` signal,
+never to `onLoadedChanged`, when a watched file is rewritten.** `MaterialThemeLoader` applied its
+startup palette from `onLoadedChanged` and every later one from a fixed timer that read `text()`
+before the asynchronous reload had landed - the previous palette went in and the new one waited for
+the next trigger - and it did so with `animated=false`, so no wallpaper change ever transitioned.
+`onLoaded` fires per completed load; guard for the empty or partial file that an in-place rewrite
+(matugen: truncate, then write) exposes on its first change event. `ThemeReloadRuntimeTest.qml`
+measures it: first change 20 ms, an intermediate value seen, settled 200 ms. afde22316 ("fix(theme): apply a rewritten palette on the load that finished, animated").
 
 **A pipeline of per-app steps run by a caller that does not stop on failure
 starves every step after the first broken one, silently.**
@@ -1761,6 +1827,23 @@ Two non-obvious behaviors have bitten this codebase before and are worth knowing
   with a one-shot migration guarded by its own `migrated*` flag, as `migrateDeadParallaxSwitches`
   and `migrateSplitCheatsheetButtons` do. Motivated by 65bd7696a ("feat(cheatsheet): draw a chord as
   one keycap per key").
+- **A helper the shell spawns as its own `qs -p` process runs with `QS_DISABLE_CRASH_HANDLER=1`.**
+  Quickshell's crash handler does not just dump: it relaunches the crashed process with the same
+  environment and the same stdio. For the compatibility scanner that meant a wallpaper crashing the
+  renderer produced a second scanner reading the original queue and writing verdicts into the
+  service's pipe while the service's own respawn ladder started its replacement; one of the two then
+  aborted in its log setup, wallpapers after the crash were recorded broken, and every death popped
+  a crash notification on the desk (2026-09-05). The parent owns retries for a helper it supervises;
+  the handler's relaunch is for the shell itself. `test_we_compat_wiring.py` pins it for the scanner.
+  249349043 ("fix(wallpaper): run the compatibility scanner without Quickshell's crash relaunch").
+- **Never spawn `qs` to call the shell's own IPC.** `Quickshell.execDetached(["qs", ..., "ipc",
+  "call", ...])` from inside the shell starts a second Quickshell - 77 ms of Qt start-up on a fast
+  machine and a fork of the shell's whole address space - to deliver one call back into the process
+  that spawned it; six buttons did this for the region selector and Hyprland's exec-once did it after
+  every clipboard store. In-process callers emit `GlobalStates.regionRequested(action)` (the selector
+  dispatches it a turn later so a caller's own surface has closed first); the clipboard is watched
+  by a resident `wl-paste --watch` in `Cliphist`. `IpcHandler`s and `GlobalShortcut`s remain for
+  callers outside the process. `lint_no_self_ipc_spawn.sh` pins it. b2a332f47 ("perf(region): request the selector in-process instead of spawning qs at ourselves").
 - **The region selector intentionally takes exclusive focus.** Dismissable panels normally close
   when `GlobalFocusGrab` is cleared, but the selector first sets
   `GlobalStates.settingsHeldForRegionSelector` so Settings can remain visible in screenshots without
@@ -3620,6 +3703,11 @@ arrays, etc.) rather than static declarations - e.g. the plugin system in
   trusting the process's output exists or is fresh; `rm -f`-ing the target path before launching the
   process (see `TempScreenshotProcess.qml`) turns a silent stale-reuse into an honest empty-file
   failure instead.
+  The same file is written as PPM, not PNG: the overlay cannot appear before grim finishes, and
+  grim's single-threaded level-6 PNG encode was ~570 ms at 5120x1440 against ~55 ms for PPM. magick
+  inherits the input container, so `ScreenshotAction` names `png:` on both crop outputs - drop that
+  and the clipboard, the annotator and the uploader get PPM; `lint_region_selector_capture.sh`
+  pins the pair. dd19a3e7f ("perf(region): write the frozen frame as PPM so the selector is not held behind a PNG encode").
 - **An overlay `Item` placed on top of an interactive control (e.g. a decorative `Flickable`-based
   mask drawn over a `TextField`/`TextArea`) will silently eat the clicks meant to focus that
   control**, unless the overlay is `enabled: false`. `ConfigTextArea`'s `password: true` mode draws
