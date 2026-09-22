@@ -121,6 +121,29 @@ def test_periodic_check_is_config_gated():
     ), "periodic Timer / availability probe must stay behind the enableCheck option"
 
 
+def test_the_bar_widget_is_a_view_of_the_service():
+    """The upgrade run and its outcome notification live in the service
+    (headless-widgets phase 1); the widget holds no Process and no Timer."""
+    widget = (ROOT / "modules" / "imi" / "bar" / "UpdatesCount.qml").read_text()
+    assert "Process {" not in widget and "Timer {" not in widget
+    assert "Updates.runUpgrade()" in widget and "Updates.checkNow()" in widget
+    source = UPDATES.read_text()
+    assert "function runUpgrade()" in source and "function checkNow()" in source
+    # The outcome itself is driven in tests/tst_updates_outcome.qml; here only
+    # the wiring: the timer fires the command the service builds.
+    assert "onTriggered: Quickshell.execDetached(root.outcomeCommand(root.count))" in source
+    assert "outcomeTimer.restart()" in source and "interval: 5000" in source
+    # The wording stays in the service (the extractor sees the literals): the
+    # upToDate arm is "System up to date", the other carries the count.
+    wording = source[source.index("function outcomeCommand(countAfter)"):]
+    wording = wording[:wording.index("}")]
+    assert re.search(r'upToDate\s*\?\s*Translation\.tr\("System up to date"\)', wording)
+    assert re.search(r':\s*Translation\.tr\("Update cancelled[^"]*"\)\.arg\(countAfter\)', wording)
+    assert "property alias upgrading" not in source, "a writable alias would bypass the re-entry guard"
+    # The upgrade never runs twice at once.
+    assert re.search(r"function runUpgrade\(\)\s*\{\s*if \(upgradeProc\.running\) return;", source)
+
+
 if __name__ == "__main__":
     import sys
     from contract_runner import run

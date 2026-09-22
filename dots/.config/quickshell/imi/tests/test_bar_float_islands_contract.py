@@ -41,7 +41,10 @@ class FloatIslandsContractTests(unittest.TestCase):
             self.assertIn("!root.centerOnly && populated", island, rel)
             for name in sections:
                 self.assertIn(f"id: {name}Island", text, f"{rel}: {name}")
-                self.assertIn(f"readonly property bool {name}IslandPainted: {name}Island.visible", text, f"{rel}: {name}")
+                # The horizontal bar's islands are painted by the frame in frame
+                # mode, and stand their own blur region down while they are.
+                on_frame = f" && !{name}Island.onFrame" if rel == "modules/imi/bar/Bar.qml" else ""
+                self.assertIn(f"readonly property bool {name}IslandPainted: {name}Island.visible{on_frame}", text, f"{rel}: {name}")
             # The full-width plate stands down for the islands.
             self.assertIn("&& !root.isFloatIslands", text.split("readonly property bool backgroundPainted", 1)[1].split("\n\n", 1)[0], rel)
 
@@ -54,9 +57,15 @@ class FloatIslandsContractTests(unittest.TestCase):
 
     def test_the_thickness_and_zone_are_floats(self):
         appearance = source("modules/common/Appearance.qml")
-        self.assertRegex(appearance, r"property real barHeight: \(" + re.escape(FLOATS) + r"\)")
+        # Except Islands in frame mode: each island is a piece of the Hug plate
+        # and the join carries the lift, so the float term stands down there.
+        self.assertRegex(appearance, r"property real barHeight: \(\(" + re.escape(FLOATS) + r"\) && !root\.sizes\.frameIslands\)")
         self.assertRegex(appearance, r"property real verticalBarWidth: \(" + re.escape(FLOATS) + r"\)")
-        self.assertIn("(" + FLOATS + ") ? Appearance.sizes.hyprlandGapsOut : 0", source("modules/imi/bar/Bar.qml"))
+        # The horizontal bar's zone is ONE token (Appearance.sizes.barReservedHeight,
+        # read by Bar.qml's reserver and by frame mode's authority); the float
+        # term lives in that token.
+        self.assertRegex(appearance, r"property real barReservedHeight: root\.sizes\.baseBarHeight\s*\n?\s*\+ \(\(Config\?\.options\.bar\.cornerStyle === 1 \|\| Config\?\.options\.bar\.cornerStyle === 4\) && !root\.sizes\.frameIslands \? root\.sizes\.hyprlandGapsOut : 0\)")
+        self.assertIn("? 0 : Appearance.sizes.barReservedHeight", source("modules/imi/bar/Bar.qml"))
         self.assertIn("(" + FLOATS + ") ? Appearance.sizes.hyprlandGapsOut : 0", source("modules/imi/verticalBar/VerticalBar.qml"))
 
     def test_the_surfaces_that_key_on_float_know_the_fifth_value(self):

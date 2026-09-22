@@ -202,20 +202,13 @@ Item {
                         fieldWidth: 300
                         singleLine: true
                     }
-                    RippleButton {
-                        implicitWidth: installLabel.implicitWidth + Appearance.spacing.space300
-                        implicitHeight: 44
+                    DialogButton {
                         enabled: !PluginManager.installing
-                        buttonRadius: Appearance.rounding.full
+                        buttonText: PluginManager.installing ? Translation.tr("Installing…") : Translation.tr("Install")
+                        colText: Appearance.colors.colOnLayer1
                         // ConfigTextArea.text is the row label; the field content is
                         // its `value` alias.
                         releaseAction: () => PluginManager.installFromManifest(manifestUrl.value.trim())
-                        contentItem: StyledText {
-                            id: installLabel
-                            anchors.centerIn: parent
-                            text: PluginManager.installing ? Translation.tr("Installing…") : Translation.tr("Install")
-                            color: Appearance.colors.colOnLayer1
-                        }
                     }
                 }
 
@@ -363,20 +356,33 @@ Item {
                     }
                 }
 
-                StyledText {
+                // The empty state is the shared placeholder, which fills and
+                // centres itself in whatever it is given - so inside this
+                // column it needs an item with a height of its own.
+                Item {
                     Layout.fillWidth: true
-                    visible: root.filteredPlugins.length === 0
-                    // Distinguish "nothing installed" from "the filters
-                    // excluded everything". availablePlugins starts empty and
-                    // fills in asynchronously as the manifest FileViews load,
-                    // so a page opened during the scan would otherwise blame a
-                    // filter the user never set.
-                    text: PluginManager.availablePlugins.length === 0
-                        ? Translation.tr("No widgets installed.")
-                        : Translation.tr("No widgets match these filters.")
-                    font.pixelSize: Appearance.font.pixelSize.small
-                    color: Appearance.colors.colSubtext
-                    wrapMode: Text.Wrap
+                    implicitHeight: noPluginsPlaceholder.visible ? 200 : 0
+
+                    PagePlaceholder {
+                        id: noPluginsPlaceholder
+                        shown: root.filteredPlugins.length === 0
+                        // Distinguish "nothing installed" from "the filters
+                        // excluded everything". availablePlugins starts empty and
+                        // fills in asynchronously as the manifest FileViews load,
+                        // so a page opened during the scan would otherwise blame a
+                        // filter the user never set.
+                        readonly property bool nothingInstalled:
+                            PluginManager.availablePlugins.length === 0
+                        icon: noPluginsPlaceholder.nothingInstalled ? "extension_off" : "filter_alt_off"
+                        shape: MaterialShape.Shape.Cookie7Sided
+                        title: noPluginsPlaceholder.nothingInstalled
+                            ? Translation.tr("No widgets installed")
+                            : Translation.tr("No matches")
+                        description: noPluginsPlaceholder.nothingInstalled
+                            ? Translation.tr("Browse the store to add one.")
+                            : Translation.tr("No widgets match these filters.")
+                        descriptionHorizontalAlignment: Text.AlignHCenter
+                    }
                 }
 
                 Repeater {
@@ -446,34 +452,24 @@ Item {
                                         // shell. Removal is gated on the plugin being
                                         // disabled so a running plugin is never pulled
                                         // out from under itself.
-                                        RippleButton {
+                                        IconButton {
                                             id: deleteButton
                                             visible: pluginCard.modelData._origin === "installed"
                                             enabled: !configSwitch.isEnabled && !PluginManager.uninstalling
                                             Layout.alignment: Qt.AlignVCenter
-                                            implicitWidth: 36
-                                            implicitHeight: 36
-                                            buttonRadius: Appearance.rounding.full
-                                            colBackground: "transparent"
+                                            // 36, not a density step: it stands
+                                            // beside the Update button in the
+                                            // same trailing row.
+                                            buttonSize: 36
+                                            buttonIcon: "delete"
+                                            colText: deleteButton.enabled
+                                                ? Appearance.colors.colError : Appearance.colors.colSubtext
                                             colRipple: Appearance.colors.colLayer2Active
                                             colBackgroundHover: Appearance.colors.colLayer2
+                                            tooltip: configSwitch.isEnabled
+                                                ? Translation.tr("Disable the widget before deleting")
+                                                : Translation.tr("Delete widget")
                                             onClicked: PluginManager.requestUninstall(pluginCard.modelData.id)
-
-                                            contentItem: MaterialSymbol {
-                                                horizontalAlignment: Text.AlignHCenter
-                                                verticalAlignment: Text.AlignVCenter
-                                                anchors.centerIn: parent
-                                                text: "delete"
-                                                iconSize: Appearance.font.pixelSize.larger
-                                                color: deleteButton.enabled
-                                                    ? Appearance.colors.colError : Appearance.colors.colSubtext
-                                            }
-
-                                            StyledToolTip {
-                                                text: configSwitch.isEnabled
-                                                    ? Translation.tr("Disable the widget before deleting")
-                                                    : Translation.tr("Delete widget")
-                                            }
                                         }
                                     ]
 

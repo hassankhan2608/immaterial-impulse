@@ -7,6 +7,11 @@
 
 CONFIG_DIR="$HOME/.config/immaterial-impulse"
 CONFIG_FILE="$CONFIG_DIR/config.json"
+# appearance.* lives in config.d/appearance.json since the config split
+# (stage 1). A preset stays ONE document (it is shared): --save folds the
+# file's appearance back in, --apply splits it back out. Until the shell has
+# split (no file yet), everything is config.json as before.
+APPEARANCE_FILE="$CONFIG_DIR/config.d/appearance.json"
 PLUGIN_STATE_FILE="$CONFIG_DIR/plugin-state.json"
 PRESETS_DIR="$CONFIG_DIR/presets"
 # Derive locations from the script itself, so this works regardless of where the
@@ -23,6 +28,14 @@ mkdir -p "$PRESETS_DIR"
 replace_if_changed() {
     local candidate="$1"
     local destination="$2"
+    # Never install a candidate that is not a JSON object: a failed jq
+    # leaves an empty file, and renaming that over config.json is the
+    # settings wipe this script must never cause.
+    if ! jq -e 'type == "object"' "$candidate" >/dev/null 2>&1; then
+        echo "Error: refusing to install $candidate over $destination: not a JSON object" >&2
+        rm -f "$candidate"
+        return 2
+    fi
 
     if [ -f "$destination" ] && cmp -s "$candidate" "$destination"; then
         rm -f "$candidate"
@@ -82,11 +95,27 @@ case "$action" in
         # key left in the file would also overwrite the recipient's own.
         # (The AI provider keys are not affected - those live in the keyring,
         # never in this document.)
-        jq --argjson pluginState "$plugin_state" \
+        if [ -f "$APPEARANCE_FILE" ]; then
+            # config.json * {appearance}: the split file is the live copy.
+            if ! config_doc="$(jq -s '.[0] * (.[1] | {appearance: (.appearance // {})})' "$CONFIG_FILE" "$APPEARANCE_FILE")"; then
+                echo "Error: could not read $CONFIG_FILE and $APPEARANCE_FILE; the preset was not saved" >&2
+                exit 1
+            fi
+        else
+            config_doc="$(cat "$CONFIG_FILE")"
+        fi
+        # Through a temp file and replace_if_changed, so a failed jq never
+        # leaves a 0-byte preset behind.
+        if ! printf '%s' "$config_doc" | jq --argjson pluginState "$plugin_state" \
             'del(._presetMeta, ._pluginState)
              | ._pluginState = $pluginState
              | if .bar.weather.apiKey? then .bar.weather.apiKey = "" else . end' \
-            "$CONFIG_FILE" > "$PRESETS_DIR/${name}.json"
+            > "$PRESETS_DIR/${name}.json.tmp"; then
+            echo "Error: could not build the preset; nothing was saved" >&2
+            rm -f "$PRESETS_DIR/${name}.json.tmp"
+            exit 1
+        fi
+        replace_if_changed "$PRESETS_DIR/${name}.json.tmp" "$PRESETS_DIR/${name}.json" || [ $? -eq 1 ] || exit 1
         if [ -n "$description" ]; then
             jq --arg desc "$description" '._presetMeta = {"description": $desc}' \
                 "$PRESETS_DIR/${name}.json" > "$PRESETS_DIR/${name}.json.tmp" \
@@ -213,7 +242,7 @@ case "$action" in
             fi
         fi
         current_enabled="$(jq -c '.plugins.enabled // []' "$CONFIG_FILE" 2>/dev/null || printf '[]')"
-        jq -s --argjson persistIds "$persist_ids" --argjson curEnabled "$current_enabled" \
+        if jq -s --argjson persistIds "$persist_ids" --argjson curEnabled "$current_enabled" \
             '.[0] * .[1] | del(._presetMeta, ._pluginState)
                 | if (.plugins.enabled? != null) and ($persistIds | length > 0) then
                     .plugins.enabled = (
@@ -221,8 +250,40 @@ case "$action" in
                         + ($persistIds | map(select(. as $x | ($curEnabled | index($x)) != null))))
                   else . end' \
             "$CONFIG_FILE" "$preset_file" \
-            > "${CONFIG_FILE}.tmp" \
-            && replace_if_changed "${CONFIG_FILE}.tmp" "$CONFIG_FILE" || true
+            > "${CONFIG_FILE}.merged"
+        then
+            :
+        else
+            echo "Error: could not merge the preset into $CONFIG_FILE; nothing was changed" >&2
+            rm -f "${CONFIG_FILE}.merged"
+            exit 1
+        fi
+        if [ -f "$APPEARANCE_FILE" ]; then
+            # The split: appearance goes to its own file (merged over what is
+            # there), everything else to config.json without it. Both temp
+            # files are built and checked before either rename.
+            if ! jq -s '.[0] * (.[1] | {appearance: (.appearance // {})})' "$APPEARANCE_FILE" "${CONFIG_FILE}.merged" \
+                    > "${APPEARANCE_FILE}.tmp" \
+                || ! jq 'del(.appearance)' "${CONFIG_FILE}.merged" > "${CONFIG_FILE}.tmp"; then
+                echo "Error: could not split the merged preset; nothing was changed" >&2
+                rm -f "${CONFIG_FILE}.merged" "${APPEARANCE_FILE}.tmp" "${CONFIG_FILE}.tmp"
+                exit 1
+            fi
+            rm -f "${CONFIG_FILE}.merged"
+            # A refusal (return 2) aborts before either file moves: both
+            # candidates are checked first, so the apply is all or nothing.
+            if ! jq -e 'type == "object"' "${APPEARANCE_FILE}.tmp" >/dev/null 2>&1 \
+                || ! jq -e 'type == "object"' "${CONFIG_FILE}.tmp" >/dev/null 2>&1; then
+                echo "Error: the split preset did not produce two JSON objects; nothing was changed" >&2
+                rm -f "${APPEARANCE_FILE}.tmp" "${CONFIG_FILE}.tmp"
+                exit 1
+            fi
+            replace_if_changed "${APPEARANCE_FILE}.tmp" "$APPEARANCE_FILE" || [ $? -eq 1 ] || exit 1
+            replace_if_changed "${CONFIG_FILE}.tmp" "$CONFIG_FILE" || [ $? -eq 1 ] || exit 1
+        else
+            mv "${CONFIG_FILE}.merged" "${CONFIG_FILE}.tmp"
+            replace_if_changed "${CONFIG_FILE}.tmp" "$CONFIG_FILE" || [ $? -eq 1 ] || exit 1
+        fi
         engine_path="$(jq -r '.wallpaperSelector.wallpaperEngine.activePath // empty' "$CONFIG_FILE")"
         engine_preview="$(jq -r '.wallpaperSelector.wallpaperEngine.activePreview // empty' "$CONFIG_FILE")"
         if [ -n "$engine_path" ] && [ -d "$engine_path" ] && [ -n "$engine_preview" ]; then

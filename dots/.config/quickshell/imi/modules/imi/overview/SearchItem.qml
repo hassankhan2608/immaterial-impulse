@@ -40,6 +40,13 @@ RippleButton {
     property var faviconPaths: ({})
     property var faviconReady: ({})
     property bool blurImage: entry?.blurImage ?? false
+    // The assistant's one-sentence answer for the Ask row, and whether one
+    // is on its way; the host that builds the row supplies both.
+    property string inlineAnswer: ""
+    property bool inlineAnswerPending: false
+    // Dimmed: the answer belongs to the previous question (kept so the row
+    // does not collapse while typing), or it is a failure note.
+    property bool inlineAnswerStale: false
     
     visible: root.entryShown
     property int horizontalMargin: Appearance.spacing.space125
@@ -259,6 +266,19 @@ RippleButton {
                     elide: Text.ElideRight
                     text: root.selected ? root.itemName : root.displayContent
                 }
+            }
+            StyledText { // The assistant's inline answer (the Ask row only)
+                // Fed by the host (SearchWidget binds it to AiInline), so a
+                // streaming answer never rebuilds the results list and this
+                // row stays presentational.
+                visible: root.inlineAnswer !== "" || root.inlineAnswerPending
+                Layout.fillWidth: true
+                font.pixelSize: Appearance.font.pixelSize.smaller
+                color: root.selected ? Appearance.colors.colOnPrimaryContainer : Appearance.colors.colSubtext
+                opacity: root.inlineAnswerStale ? 0.55 : 1
+                Behavior on opacity { animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this) }
+                wrapMode: Text.WordWrap
+                text: root.inlineAnswer !== "" ? root.inlineAnswer : Translation.tr("Thinking…")
             }
             StyledText { // Symbol tags / description
                 visible: root.itemTags !== "" && root.itemType === Translation.tr("Symbol")

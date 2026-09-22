@@ -6,6 +6,7 @@ import Quickshell.Hyprland
 import Quickshell.Wayland
 import qs
 import qs.modules.common
+import qs.services
 import qs.modules.common.widgets
 import qs.modules.common.functions
 import "bar_popup_unroll.js" as BarPopupUnroll
@@ -117,7 +118,7 @@ Scope {
             // its live size, so nothing about the parked square is stored.
             property var exitAnchor: null
             readonly property bool morphing: card.alongBarAnim.running || card.widthAnim.running
-                || card.openAnim.running
+                || card.heightAnim.running || card.openAnim.running
 
             readonly property var requested: {
                 const popup = GlobalStates.activeBarPopup;
@@ -142,8 +143,13 @@ Scope {
             // progress: the intent flips at the claim and the progress
             // follows, so the gate's two branches are entered by different
             // events and there is no ordering to get wrong.
+            // A landing card is still "open" to its contents: they ride the
+            // card down onto the band and leave with the submerge. Gated on
+            // `exiting` alone the sections left at the first frame of the
+            // exit and an empty plate landed and sank (footage, the Discord
+            // card: a click-opened, released popup).
             readonly property bool opening: overlayWindow.current !== null
-                && !overlayWindow.exiting
+                && !(overlayWindow.exiting && !overlayWindow.landing)
             readonly property bool contentsIn: Appearance.animation.contentsArrived(
                 card.openProgress, overlayWindow.opening)
             // Armed by a FRESH open only, in takeOver's from-idle branch. A
@@ -177,6 +183,7 @@ Scope {
 
             function takeOver(popup) {
                 exitTimer.stop();
+                overlayWindow.landing = false;
                 overlayWindow.exiting = false;
                 // No opacity or progress write here: retarget() drives the one
                 // scalar, one turn of the event loop from now, and it is the
@@ -228,7 +235,20 @@ Scope {
                     // a click landing on the card mid-morph is aimed at the
                     // content the pointer moved toward.
                     previous.contentItem.enabled = false;
-                    contentExit.target = previous.contentItem;
+                    // ...and a picture holds still. Left centred in the slot
+                    // - which is already the ARRIVING content's settled box -
+                    // a taller outgoing tree showed its middle band the moment
+                    // the slot shrank: the header cut away, the rows below it
+                    // jumping to the top, then the clip walking over them
+                    // (footage: weather to calendar). Pinned to the host's
+                    // top-left it keeps the top the user was reading and the
+                    // card's edge covers it from below and from the right.
+                    const leaving = previous.contentItem;
+                    leaving.anchors.centerIn = null;
+                    leaving.parent = contentHost;
+                    leaving.anchors.top = contentHost.top;
+                    leaving.anchors.left = contentHost.left;
+                    contentExit.target = leaving;
                     contentExit.restart();
                 }
 
@@ -267,6 +287,15 @@ Scope {
             // target is one frame away - the same zero-interval deferral, for
             // the same reason, as the popup window's own updatePosition().
             function retarget() {
+                // Never under a submerge: the write of openProgress below is
+                // the opening's, and a leaving card re-opened by it lands and
+                // then vanishes at the exit timer instead of submerging. The
+                // Privacy card resizes as its controls collapse on unpin,
+                // which retargets a content-driven card - dismissed by a
+                // click away, that collapse ran under its own exit (footage).
+                // While the card is still LANDING it may follow its content:
+                // the collapse and the landing are one motion there.
+                if (overlayWindow.exiting && !overlayWindow.landing) return;
                 const popup = overlayWindow.current;
                 const content = popup?.contentItem;
                 const target = popup?.hoverTarget;
@@ -284,7 +313,38 @@ Scope {
                     card.alongBar = Math.max(margin, Math.min(base, overlayWindow.height - cardHeight - margin - 15));
                 } else {
                     const base = target.QsWindow.mapFromItem(target, (target.width - cardWidth) / 2, 0).x;
-                    card.alongBar = Math.max(margin, Math.min(base, overlayWindow.width - cardWidth - margin - 10));
+                    let lo = margin, hi = overlayWindow.width - cardWidth - margin - 10;
+                    // A fused card sits on the FLAT stretch of its plate's inner
+                    // edge, between the corner radii: clamped to the screen it
+                    // ran past a floating plate's rounded corner, and its
+                    // fillet there had nothing to climb onto (seen live, the
+                    // right end of the bar). A card wider than the stretch is
+                    // centred on it.
+                    // In both states: clamped only while fused, the pin's
+                    // click sent the card back to the screen's clamp as it
+                    // lifted, and its still-forming neck hung past the plate's
+                    // corner for those frames (footage).
+                    const span = overlayWindow.joinSpan();
+                    const screenLo = lo, screenHi = hi;
+                    if (span) {
+                        lo = Math.max(lo, span.min);
+                        hi = Math.min(hi, span.max - cardWidth);
+                        // A card wider than the stretch: the plate stands on
+                        // it as a tab (cardOverhangs) - flush with a corner
+                        // island's outer edge, centred under the centre one or
+                        // the whole plate - and the screen bounds it. Centred
+                        // on the flat and bounded by the released card's
+                        // margin, the card's edge stopped 13 px short of the
+                        // island's, a notch under the island's outer corner.
+                        if (hi < lo) {
+                            const edges = overlayWindow.plateEdges ?? span;
+                            const flush = overlayWindow.islandSection === "right" ? edges.max - cardWidth
+                                : overlayWindow.islandSection === "left" ? edges.min
+                                : (edges.min + edges.max - cardWidth) / 2;
+                            lo = hi = Math.max(0, Math.min(flush, overlayWindow.width - cardWidth));
+                        }
+                    }
+                    card.alongBar = Math.max(lo, Math.min(base, hi));
                 }
 
                 card.width = cardWidth;
@@ -351,10 +411,41 @@ Scope {
                 overlayWindow.exiting = true;
                 if (overlayWindow.current?.contentItem)
                     overlayWindow.current.contentItem.enabled = false;
-                card.alongBar = anchor;
+                // A released card lands FIRST, then submerges (the grammar's
+                // close: swallow into the band, then sink). `exiting` alone
+                // turns the join attached; the collapse waits for it to
+                // settle, else the card shrank while still coming down and
+                // read as vanishing without ever fusing back (footage).
+                if (overlayWindow.joinsFrame && cardJoin.lift > 0.5) {
+                    overlayWindow.landing = true;
+                    return;
+                }
+                overlayWindow.submerge();
+            }
+            // The exit's second half: the card sinks into the band it sits on.
+            property bool landing: false
+            function submerge() {
+                overlayWindow.landing = false;
+                if (!overlayWindow.exiting) return;
+                const anchor = overlayWindow.anchorAlongBar();
+                if (anchor !== null && anchor !== undefined) card.alongBar = anchor;
                 card.width = card.parkedSize;
                 card.openProgress = 0;
                 exitTimer.restart();
+            }
+            // The landing is over when the gap is closed and the neck whole,
+            // not when the spring has stopped ringing: the last tenth of a
+            // pixel took half a second to settle, and the card sat fused and
+            // still for it before it sank (measured, 670 ms from dismiss to
+            // submerge).
+            Connections {
+                target: cardJoin
+                function onStateChanged() {
+                    if (overlayWindow.landing && cardJoin.lift < 0.75 && cardJoin.state.neck > 0.9) overlayWindow.submerge();
+                }
+                function onMovingChanged() {
+                    if (!cardJoin.moving && overlayWindow.landing) overlayWindow.submerge();
+                }
             }
 
             function finishExit() {
@@ -378,6 +469,7 @@ Scope {
                 overlayWindow.outgoing = null;
                 overlayWindow.current = null;
                 overlayWindow.exiting = false;
+                overlayWindow.landing = false;
 
                 card.animate = false;
                 card.openProgress = 0;
@@ -403,6 +495,8 @@ Scope {
                 const content = popup.contentItem;
                 if (content) {
                     content.anchors.centerIn = null;
+                    content.anchors.top = undefined;
+                    content.anchors.left = undefined;
                     content.parent = null;
                     content.opacity = 1;
                     content.enabled = true;
@@ -502,6 +596,12 @@ Scope {
             }
 
             function retargetNow() {
+                // Content-driven: the card follows the content in the same
+                // tick. (A deferral to the event loop was tried against what
+                // looked like a two-valued layout - it was the sandbox's
+                // grim, a screencast that flipped the Privacy card's "Screen"
+                // section on every frame grabbed - and it put the card's
+                // edge one frame behind the content: a shimmer.)
                 if (overlayWindow.current?.contentDrivesSize) overlayWindow.retarget();
                 else retargetTimer.restart();
             }
@@ -553,6 +653,218 @@ Scope {
                 ? Appearance.sizes.verticalBarWidth
                 : Appearance.sizes.barHeight
 
+            // The card and the frame (frame-pin-grammar.md, slice 2). Where
+            // the frame paints the bar's plate as its band the card can be
+            // FUSED to it - on the band's inner edge, no elevation gap, grown
+            // out of the band from nothing and submerged back into it - or
+            // RELEASED, today's card a gap off the band. "auto" follows how it
+            // was opened: hovered is fused, pinned by a click is released, and
+            // the click on a fused card is the lift and the cut. The frame
+            // paints the plate either way (the record below, published like
+            // the dock's under "barPopup"); this card stands down while it
+            // does and keeps the content, the input and the hover.
+            readonly property bool joinsFrame: FrameGeometry.popupsJoinBar && !overlayWindow.barVertical
+            // Islands: the card fuses to its section's island - the bar's
+            // record "barIsland:<section>", painted by the frame at rest and
+            // on the move like the plate - and the card is the drop as it is
+            // on the plate; the record names the section so the frame joins
+            // the card to that island's edge.
+            readonly property bool islandsMode: FrameGeometry.barIslands && !FrameGeometry.barCovers
+            function islandFor(target) {
+                let node = target;
+                while (node) {
+                    if (node.frameIsland !== undefined && node.frameIsland) return node.frameIsland;
+                    node = node.parent;
+                }
+                return null;
+            }
+            readonly property Item island: overlayWindow.islandsMode ? overlayWindow.islandFor(overlayWindow.current?.hoverTarget ?? null) : null
+            readonly property string islandSection: overlayWindow.island?.sectionName ?? ""
+            onIslandSectionChanged: {
+                overlayWindow.takeBarInner();
+                overlayWindow.publishTab();
+            }
+            // The flat stretch of the plate the card fuses to - the bar's plate
+            // or its section's island - between the inner-edge corner radii,
+            // in this window's x; null where nothing is joined. Taken up with
+            // barInner (below), never bound: this window publishes into the
+            // map it would read.
+            property var plateSpan: null
+            // The plate's whole extent along the bar, corners included - what
+            // a card wider than the plate lines its own edge up with.
+            property var plateEdges: null
+            function joinSpan() { return overlayWindow.joinsFrame ? overlayWindow.plateSpan : null; }
+            // An island narrower than the card: the card carries no neck -
+            // fillets at corners past the island's ends would climb onto
+            // nothing - and the island stands on it as a TAB instead: the card
+            // flush with a corner island's outer edge, centred under the
+            // centre one, and every corner where the two meet square (the
+            // island's away-from-band corners, Bar.qml; the card's corner on
+            // the flush side, below), so the pair is one silhouette rather
+            // than a pill resting on a card with a notch at each end (seen
+            // in the sandbox: Resources alone on the right island).
+            readonly property bool cardOverhangs: overlayWindow.plateSpan !== null
+                && (overlayWindow.plateSpan.max - overlayWindow.plateSpan.min) < card.width
+            // How much of the tab is held, per corner, from the geometry
+            // alone: whole while the card is fused and grown, and gone as the
+            // card lifts off or sinks away (tabBase); and for each corner where
+            // the two meet, by how far the card still runs past it - flush or
+            // beyond is square, a corner the card ends a window-rounding
+            // short of is round again. The exit collapses the card's width
+            // toward its widget while it sinks, so its edge leaves the
+            // island's; a hold read off cardOverhangs alone kept the island's
+            // corners square over nothing until the card was gone (burst).
+            readonly property real tabBase: cardJoin.travel <= 0 || overlayWindow.plateEdges === null ? 0
+                : (1 - Math.min(1, cardJoin.lift / cardJoin.travel))
+                  * Math.pow(Math.min(1, card.height / Math.max(1, cardJoin.meniscus)), 2)
+            // An island's corner over the card: `over` is how far the card
+            // runs past it (0 flush, negative short).
+            function tabHoldOver(over: real): real {
+                return Math.max(0, Math.min(1, 1 + over / Appearance.rounding.windowRounding));
+            }
+            readonly property real tabHoldLeft: overlayWindow.tabBase * overlayWindow.tabHoldOver((overlayWindow.plateEdges?.min ?? 0) - card.x)
+            readonly property real tabHoldRight: overlayWindow.tabBase * overlayWindow.tabHoldOver((card.x + card.width) - (overlayWindow.plateEdges?.max ?? 0))
+            // The card's own corner under an island's: square while the
+            // island's edge is within the corner's radius of it, else the
+            // island's square corner would stand over the card's rounding.
+            function cardHoldAt(distance: real): real {
+                return overlayWindow.tabBase * Math.max(0, 1 - Math.abs(distance) / Math.max(1, card.radius));
+            }
+            readonly property real cardHoldLeft: overlayWindow.plateEdges === null ? 0 : overlayWindow.cardHoldAt(overlayWindow.plateEdges.min - card.x)
+            readonly property real cardHoldRight: overlayWindow.plateEdges === null ? 0 : overlayWindow.cardHoldAt(overlayWindow.plateEdges.max - (card.x + card.width))
+            function publishTab() {
+                const name = overlayWindow.modelData?.name ?? "";
+                const l = overlayWindow.tabHoldLeft, r = overlayWindow.tabHoldRight;
+                const held = (l > 0.001 || r > 0.001) && overlayWindow.islandSection !== "";
+                const mine = GlobalStates.barPopupTab?.screen === name;
+                if (held) GlobalStates.barPopupTab = { screen: name, section: overlayWindow.islandSection, left: l, right: r };
+                else if (mine) GlobalStates.barPopupTab = null;
+            }
+            onTabHoldLeftChanged: overlayWindow.publishTab()
+            onTabHoldRightChanged: overlayWindow.publishTab()
+            // The plate moved (the bar's lift, its slide) or the card's state
+            // turned: place the card again on what it now joins - never while
+            // it is leaving. A pinned card dismissed turns fused as it goes,
+            // and a retarget then wrote openProgress back to 1 under the exit,
+            // so the card landed and vanished instead of submerging (footage).
+            function replaceCard() {
+                if (overlayWindow.current) overlayWindow.retarget();
+            }
+            onBarInnerChanged: overlayWindow.replaceCard()
+            onPlateSpanChanged: overlayWindow.replaceCard()
+            onWantsFusedChanged: overlayWindow.replaceCard()
+            // The bar's plate is itself a join on the frame and may be lifted
+            // off the band (frame-pin-grammar.md, the bar row) or slid out by
+            // auto-hide; a popup fuses to the plate's inner edge wherever that
+            // is, read off the bar's record - the same number the frame paints
+            // the join against (Frame.qml joinBandEdgeFor). Measured from the
+            // bar's screen edge; the bar's thickness where there is no record.
+            // Taken up from the event loop, not bound: this window publishes
+            // its own record into the same map, and a binding on the map was
+            // a loop (barInner -> the card's y -> the record -> the map ->
+            // barInner) whether it held the record or only a number derived
+            // from it. Frame.qml takes the map up the same way.
+            property real barInner: overlayWindow.barThickness
+            function takeBarInner() {
+                const joins = GlobalStates.frameJoins[overlayWindow.modelData?.name ?? ""] ?? null;
+                // The plate's record, or the hovered section's island's.
+                const b = joins?.bar ?? (overlayWindow.islandsMode ? joins?.["barIsland:" + overlayWindow.islandSection] ?? null : null);
+                overlayWindow.barInner = !b ? overlayWindow.barThickness
+                    : overlayWindow.barEdge === "bottom" ? overlayWindow.height - b.plate.y : b.plate.y + b.plate.height;
+                if (!b) { overlayWindow.plateSpan = null; overlayWindow.plateEdges = null; return; }
+                const edges = { min: b.plate.x, max: b.plate.x + b.plate.width };
+                const hadEdges = overlayWindow.plateEdges;
+                if (!hadEdges || hadEdges.min !== edges.min || hadEdges.max !== edges.max) overlayWindow.plateEdges = edges;
+                const bottom = overlayWindow.barEdge === "bottom";
+                const rl = bottom ? b.radii.topLeft : b.radii.bottomLeft, rr = bottom ? b.radii.topRight : b.radii.bottomRight;
+                // ...less the fillet's own spread along the plate (about half
+                // the meniscus at the band): the card's edge stopped at the
+                // radius, and the fillet beyond it climbed onto the corner's
+                // curve and ended in the air (seen live, twice).
+                const spread = cardJoin.meniscus * 0.5;
+                const span = { min: b.plate.x + rl + spread, max: b.plate.x + b.plate.width - rr - spread };
+                const was = overlayWindow.plateSpan;
+                if (!was || was.min !== span.min || was.max !== span.max) overlayWindow.plateSpan = span;
+            }
+            Connections {
+                target: GlobalStates
+                function onFrameJoinsChanged() { Qt.callLater(overlayWindow.takeBarInner); }
+            }
+            onBarThicknessChanged: overlayWindow.takeBarInner()
+            readonly property string popupsLook: String(Config.options.appearance.frame.popups ?? "auto")
+            readonly property bool wantsFused: overlayWindow.popupsLook === "fused"
+                || (overlayWindow.popupsLook === "auto" && !(overlayWindow.current?.pinnedOpen ?? false))
+            // ...and on the way out whatever it was: a released card lands
+            // and swallows into the band before it submerges.
+            readonly property bool joinAttached: !overlayWindow.joinsFrame || overlayWindow.wantsFused || overlayWindow.exiting
+            readonly property bool cardFused: overlayWindow.joinsFrame && overlayWindow.joinAttached
+            FrameJoin {
+                id: cardJoin
+                anchors.fill: parent
+                plate: card
+                edge: overlayWindow.barEdge
+                attached: overlayWindow.joinAttached
+                travel: Appearance.sizes.elevationMargin
+                bandInset: overlayWindow.barInner
+                color: FrameGeometry.color
+                active: overlayWindow.joinsFrame
+                paintsLocally: false
+                paintsAtRest: true
+            }
+            // The plate's own colour: the band's while fused, the card's
+            // while released, and the change rides the card's colour tier so
+            // the lift and the tint move together.
+            property color platePaint: cardJoin.fused
+                ? FrameGeometry.color
+                : ColorUtils.transparentize(Appearance.colors.colLayer1Base, Appearance.backgroundTransparency)
+            Behavior on platePaint { animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this) }
+            readonly property var frameJoinRecord: {
+                if (!cardJoin.active || !cardJoin.painting || !overlayWindow.modelData) return null;
+                // Nothing to paint for a card with no height - and the neck
+                // grows and shrinks with the card: a fused card is a drop
+                // that grows out of the band and sinks back into it, so its
+                // fillets are as tall as it is. Held whole to the end, a
+                // collapsed card left a stalk under the bar until the exit
+                // timer ran out (measured, ~200 ms).
+                if (card.height <= 3) return null;
+                const grown = Math.pow(Math.min(1, card.height / Math.max(1, cardJoin.meniscus)), 2);
+                // The card's corners at the band square off under an
+                // island's edge (cardHoldLeft/Right, the tab).
+                const heldL = card.radius * (1 - overlayWindow.cardHoldLeft), heldR = card.radius * (1 - overlayWindow.cardHoldRight);
+                const bottom = overlayWindow.barEdge === "bottom";
+                return {
+                    edge: overlayWindow.barEdge,
+                    section: overlayWindow.islandSection,
+                    plate: { x: card.x, y: card.y, width: card.width, height: card.height },
+                    radii: { topLeft: bottom ? card.radius : heldL,
+                             topRight: bottom ? card.radius : heldR,
+                             bottomRight: bottom ? heldR : card.radius,
+                             bottomLeft: bottom ? heldL : card.radius },
+                    gap: cardJoin.state.gap,
+                    neck: overlayWindow.cardOverhangs ? 0 : cardJoin.state.neck * grown,
+                    bulge: overlayWindow.cardOverhangs ? 0 : cardJoin.state.bulge * grown,
+                    meniscus: cardJoin.meniscus, blendPerPixel: cardJoin.blendPerPixel,
+                    climbFraction: cardJoin.climbFraction, color: overlayWindow.platePaint,
+                    // The released card's border, fading in with the lift.
+                    strokeWidth: Appearance.borderWidth.standard * Math.min(1, cardJoin.lift / Math.max(1, cardJoin.travel)),
+                    strokeColor: Appearance.colors.colLayer0Border
+                };
+            }
+            function publishFrameJoin(record) {
+                const name = overlayWindow.modelData?.name ?? "";
+                if (!name) return;
+                GlobalStates.publishFrameJoin(name, "barPopup", record);
+            }
+            onFrameJoinRecordChanged: publishFrameJoin(frameJoinRecord)
+            Component.onCompleted: {
+                overlayWindow.takeBarInner();
+                publishFrameJoin(frameJoinRecord);
+            }
+            Component.onDestruction: {
+                publishFrameJoin(null);
+                if (GlobalStates.barPopupTab?.screen === (overlayWindow.modelData?.name ?? "")) GlobalStates.barPopupTab = null;
+            }
+
             SequentialAnimation {
                 id: contentEnter
                 property Item item: null
@@ -590,7 +902,7 @@ Scope {
 
             StyledRectangularShadow {
                 target: card
-                visible: card.visible
+                visible: card.visible && !card.plateOnFrame
                 opacity: card.opacity
                 // A cached shadow renders to an offscreen texture, which a card
                 // whose size changes every frame invalidates every frame.
@@ -626,7 +938,7 @@ Scope {
 
                 width: 0
                 height: BarPopupUnroll.cardHeight(card.openHeight, card.heroHeight,
-                    card.parkedSize, overlayWindow.exiting, card.openProgress)
+                    card.parkedSize, overlayWindow.exiting, card.openProgress, overlayWindow.cardFused)
                 // Bindings, not assignments, and that is what the driver bought.
                 // On the bottom and right edges the bar-adjacent coordinate is a
                 // function of the animating size, which is why this used to be
@@ -640,11 +952,14 @@ Scope {
                         ? overlayWindow.width - overlayWindow.barThickness - Appearance.sizes.elevationMargin - card.width
                         : overlayWindow.barThickness + Appearance.sizes.elevationMargin)
                     : card.alongBar
+                // The gap off the bar: the elevation margin, or - where the
+                // frame joins the card - the join's lift, nothing while fused.
+                readonly property real offBar: overlayWindow.joinsFrame ? cardJoin.lift : Appearance.sizes.elevationMargin
                 y: overlayWindow.barVertical
                     ? card.alongBar
                     : (overlayWindow.barEdge === "bottom"
-                        ? overlayWindow.height - overlayWindow.barThickness - Appearance.sizes.elevationMargin - card.height
-                        : overlayWindow.barThickness + Appearance.sizes.elevationMargin)
+                        ? overlayWindow.height - overlayWindow.barInner - card.offBar - card.height
+                        : overlayWindow.barInner + card.offBar)
                 // Clamped because the spatial tier overshoots past 1 and
                 // undershoots below 0 on the way back; the geometry keeps the
                 // overshoot deliberately, an alpha cannot use it.
@@ -658,9 +973,14 @@ Scope {
                 // surface above PopupBlurThreshold's line, which already sits
                 // below the bar's body - fainter than this card, since the bar
                 // thins colLayer0 by its own opacity as well.
-                color: ColorUtils.transparentize(Appearance.colors.colLayer1Base, Appearance.backgroundTransparency)
+                // Stood down while the frame paints the plate (the same
+                // silhouette in the same colour, and a translucent fill drawn
+                // twice is darker); the content stays.
+                readonly property bool plateOnFrame: overlayWindow.joinsFrame && cardJoin.drawsPlate
+                color: card.plateOnFrame ? "transparent"
+                    : ColorUtils.transparentize(Appearance.colors.colLayer1Base, Appearance.backgroundTransparency)
                 radius: Appearance.rounding.normal + 4
-                border.width: Appearance.borderWidth.standard
+                border.width: card.plateOnFrame ? 0 : Appearance.borderWidth.standard
                 border.color: Appearance.colors.colLayer0Border
 
                 // Every tier is taken WHOLE - duration, easing type and curve
@@ -672,6 +992,7 @@ Scope {
                 readonly property NumberAnimation openAnim: Appearance.animation.elementMove.numberAnimation.createObject(card)
                 readonly property NumberAnimation alongBarAnim: Appearance.animation.elementMove.numberAnimation.createObject(card)
                 readonly property NumberAnimation widthAnim: Appearance.animation.elementMove.numberAnimation.createObject(card)
+                readonly property NumberAnimation heightAnim: Appearance.animation.elementMove.numberAnimation.createObject(card)
 
                 // The only Behavior on the driver, and the one tier serves both
                 // directions. A Behavior's animation cannot be swapped after
@@ -683,15 +1004,36 @@ Scope {
                     enabled: card.animate
                     animation: card.openAnim
                 }
+                // See StyledPopup.contentDrivesSize: a popup animating its
+                // own size must not be chased by the card - through the
+                // landing too, where the card still follows its collapsing
+                // content frame by frame (a Behavior restarted from every
+                // frame's write never left 384; traced) - but not the
+                // submerge, where the card is the shell's again: the Privacy
+                // card dismissed mid-collapse had its width snap to the
+                // parked square while its height was still shrinking, a thin
+                // drip under the bar (footage).
+                readonly property bool followsContent: (overlayWindow.current?.contentDrivesSize ?? false)
+                    && !(overlayWindow.exiting && !overlayWindow.landing)
                 Behavior on alongBar {
-                    // See StyledPopup.contentDrivesSize: a popup animating its
-                    // own size must not be chased by the card.
-                    enabled: card.animate && !(overlayWindow.current?.contentDrivesSize ?? false)
+                    enabled: card.animate && !card.followsContent
                     animation: card.alongBarAnim
                 }
                 Behavior on width {
-                    enabled: card.animate && !(overlayWindow.current?.contentDrivesSize ?? false)
+                    enabled: card.animate && !card.followsContent
                     animation: card.widthAnim
+                }
+                // The open height morphs only across a takeover, on the width's
+                // tier: assigned, the card lost its bottom third in one frame
+                // when a shorter popup took over (weather to calendar: 324 to
+                // 216 with no frame between, traced) and the blur it left
+                // behind snapped with it - a flash. An entrance keeps its
+                // unroll (the height rides the driver from the parked square,
+                // no outgoing tree there), a content-driven card keeps
+                // following, and the exit's collapse rides the driver too.
+                Behavior on openHeight {
+                    enabled: card.animate && overlayWindow.outgoing !== null && !card.followsContent
+                    animation: card.heightAnim
                 }
 
                 HoverHandler {

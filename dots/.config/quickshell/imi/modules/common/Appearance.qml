@@ -419,10 +419,20 @@ Singleton {
         // than rounded to a Material one so the panels move exactly as they
         // did when Hyprland moved them.
         readonly property list<real> panelSlideDecel: [0.05, 0.9, 0.1, 1.05, 1, 1]
+        // The split (docs/proposals/motion-split.md §4): one body becoming
+        // two, or two becoming one. Two segments joined at the scalar's
+        // midpoint, which IS the seam - `standardAccel` scaled into the
+        // first half (the reach into the seam accelerates) and `standard`
+        // into the second (the withdrawal from it decelerates). Measured off
+        // the reference frame by frame; no single curve in this catalogue
+        // fits either direction (`emphasized` inflects at 17% where the seam
+        // is at 50%), and this one fits both.
+        readonly property list<real> split: [0.15, 0, 0.5, 0.5, 0.5, 0.5, 0.6, 0.5, 0.5, 1, 1, 1]
         readonly property real expressiveFastSpatialDuration: 350
         readonly property real expressiveDefaultSpatialDuration: 500
         readonly property real expressiveSlowSpatialDuration: 650
         readonly property real expressiveEffectsDuration: 200
+        readonly property real splitDuration: 800
     }
 
     // The motion vocabulary every interactive element passes through, in one
@@ -525,6 +535,12 @@ Singleton {
         }
         function scaleVelocity(base: int): int {
             return MotionPolicy.scaleVelocity(base, motion.multiplier, motion.reduceMotion);
+        }
+        // For a solver rather than a curve: the seconds to advance its physics
+        // by this frame. 0 means do not advance it at all - reduce motion -
+        // and the caller puts its state at the target instead.
+        function scaleStep(seconds: real): real {
+            return MotionPolicy.scaleStep(seconds, motion.multiplier, motion.reduceMotion);
         }
         // One spelling of "these N things arrive in sequence". A cascade asks
         // for a step as a fraction of a catalogued duration, ranks its members
@@ -639,6 +655,37 @@ Singleton {
             }
         }
 
+        // The transient overlays' enter and leave (OverlayLifecycle): a
+        // scrim-and-card arrival a touch quicker than a panel's, and a leave
+        // short enough that the surface outliving its flag is never felt.
+        property QtObject overlayEnter: QtObject {
+            property int duration: motion.scale(300)
+            property int type: Easing.BezierSpline
+            property list<real> bezierCurve: animationCurves.emphasizedDecel
+            property int velocity: motion.scaleVelocity(650)
+            property Component numberAnimation: Component {
+                NumberAnimation {
+                    alwaysRunToEnd: true
+                    duration: root.animation.overlayEnter.duration
+                    easing.type: root.animation.overlayEnter.type
+                    easing.bezierCurve: root.animation.overlayEnter.bezierCurve
+                }
+            }
+        }
+        property QtObject overlayExit: QtObject {
+            property int duration: motion.scale(180)
+            property int type: Easing.BezierSpline
+            property list<real> bezierCurve: animationCurves.emphasizedAccel
+            property int velocity: motion.scaleVelocity(650)
+            property Component numberAnimation: Component {
+                NumberAnimation {
+                    alwaysRunToEnd: true
+                    duration: root.animation.overlayExit.duration
+                    easing.type: root.animation.overlayExit.type
+                    easing.bezierCurve: root.animation.overlayExit.bezierCurve
+                }
+            }
+        }
         property QtObject elementMoveFast: QtObject {
             property int duration: motion.scale(animationCurves.expressiveEffectsDuration)
             property int type: Easing.BezierSpline
@@ -673,6 +720,67 @@ Singleton {
                 easing.type: root.animation.elementMoveFaster.type
                 easing.bezierCurve: root.animation.elementMoveFaster.bezierCurve
             }}
+        }
+
+        // One body becoming two, or two becoming one (the guideline's
+        // "Split"): one scalar per direction, 0 fused and 1 apart, on the
+        // two-segment curve above. `splitSeam` is where on that scalar the
+        // outlines touch or part - the join of the curve's two segments, so
+        // an adopter keys the neck and a corner on it rather than on a
+        // second timer that has to agree with the duration. `splitNeckReach`
+        // is how far into the settle half the neck bridges before it pinches
+        // off, as a fraction of the scalar's VALUE: the reference's neck lasts
+        // 165 ms of an 800 ms motion, from the seam at 0.5 of the time to the
+        // pinch at 0.7, and on this curve - whose settle half is front-loaded
+        // - 0.7 of the time is 0.9 of the value, i.e. 0.8 of the settle half.
+        // The bodies settle apart for the rest. Both are fractions of the
+        // scalar, so a 5 px lift and a 100 px one take the same shape.
+        readonly property real splitSeam: 0.5
+        readonly property real splitNeckReach: 0.8
+        // The split is WATER, not a pair of eased halves: a drop meeting a
+        // pond, and leaving it (docs/proposals/motion-split.md §4). One
+        // spring carries the whole gesture, and its overshoot is the liquid:
+        // past the far end the drop is still pulling away and STRETCHES, past
+        // the near end it has flattened INTO the surface and squashes, and
+        // the ripple back is the surface settling. A spring rather than a
+        // curve because the event the eye reads - the moment surface tension
+        // goes - is not a time, it is a distance: the neck pinches at a gap
+        // (dock_geometry.js), and a spring re-targeted mid-gesture carries
+        // its own velocity through, where a curve restarts from a standstill.
+        // Stiffness scales as 1/multiplier^2: a spring's period goes as
+        // sqrt(mass/spring), so that is what makes the Motion slider a speed.
+        readonly property real splitSpring: 3.2
+        readonly property real splitDamping: 0.16
+        readonly property real splitMass: 0.9
+        property QtObject split: QtObject {
+            property int duration: motion.scale(animationCurves.splitDuration)
+            property int type: Easing.BezierSpline
+            property list<real> bezierCurve: animationCurves.split
+            // The water spring. `mass` and `damping` are the shape of the
+            // ripple and do not scale; the stiffness carries the speed.
+            readonly property real spring: motion.splitSpring
+                / Math.max(0.04, motion.multiplier * motion.multiplier)
+            readonly property real damping: motion.splitDamping
+            readonly property real mass: motion.splitMass
+            readonly property real epsilon: 0.004
+            // The whole tier, so a call site takes it whole. Under reduce
+            // motion a spring is exactly the wrong thing to hand someone who
+            // asked for less movement, so the tier answers with the floor.
+            property Component springAnimation: Component {
+                SpringAnimation {
+                    spring: root.animation.split.spring
+                    damping: root.animation.split.damping
+                    mass: root.animation.split.mass
+                    epsilon: root.animation.split.epsilon
+                }
+            }
+            property Component numberAnimation: Component {
+                NumberAnimation {
+                    duration: root.animation.split.duration
+                    easing.type: root.animation.split.type
+                    easing.bezierCurve: root.animation.split.bezierCurve
+                }
+            }
         }
 
         property QtObject elementResize: QtObject {
@@ -755,8 +863,13 @@ Singleton {
     sizes: QtObject {
         property real baseBarHeight: 40
         // Float (1) and Float Islands (4) both hold their plates a gap off the
-        // edge and the windows, inside the surface.
-        property real barHeight: (Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4) ?
+        // edge and the windows, inside the surface - except Islands in frame
+        // mode, where each island is a piece of the Hug plate on the bar's
+        // join (frame-pin-grammar.md, the bar row): the plate's height, the
+        // plate's zone, the lift carried by the join rather than by margins.
+        readonly property bool frameIslands: (Config?.options.appearance.frame.enable ?? false)
+            && Config?.options.bar.cornerStyle === 4
+        property real barHeight: ((Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4) && !root.sizes.frameIslands) ?
             (baseBarHeight + root.sizes.hyprlandGapsOut * 2) : baseBarHeight
         // M3E bar widget-pill geometry: the pill is inset from the bar by
         // barPillMargin top and bottom, giving barPillHeight. Shared by BarGroup
@@ -851,6 +964,15 @@ Singleton {
         // of that is a copy that drifts. Checked against the live compositor at
         // cornerStyle 3 with auto-hide off: `hyprctl layers` reports
         // `quickshell:bar` at y=5 h=63, which is these two.
+        // What the bar's BarExclusiveZoneReserver asks for while the bar is
+        // shown (its `zone`), and what it settles to (zone + edgeMargin) -
+        // i.e. where the compositor starts placing windows on the bar's
+        // edge. Bar.qml and FrameGeometry both read these; a second copy of
+        // either expression is a copy that drifts.
+        property real barReservedHeight: root.sizes.baseBarHeight
+            + ((Config?.options.bar.cornerStyle === 1 || Config?.options.bar.cornerStyle === 4) && !root.sizes.frameIslands ? root.sizes.hyprlandGapsOut : 0)
+        property real barExclusiveZone: root.sizes.barReservedHeight
+            + ((Config?.options.bar.bottom ?? false) ? root.sizes.barBottomMargin : root.sizes.barDetachMargin)
         property real barSurfaceHeight: root.sizes.barHeight
             + root.rounding.screenRounding + root.sizes.barDetachInset
         property real barSurfaceMargin: Config?.options.bar.bottom

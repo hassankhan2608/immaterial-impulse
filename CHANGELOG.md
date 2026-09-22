@@ -11,7 +11,255 @@ own repo; the installer pins which revision it builds.
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-09-21
+
+### Fixed
+- Frame mode, Islands style: a bar widget's popup wider than its island now lines up flush
+  with a corner island's outer edge (centred under the middle one) and the island stands on
+  it as a tab, its corners on the card squared off, instead of a pill resting on the card
+  with a notch under each corner. The corners round back as the card sinks away.
+- Frame mode, Islands style: an island the frame paints no longer blurs its backdrop twice
+  (its body read a shade lighter than its corners), and notification cards keep clear of a
+  floating island's lift like they do the plate's.
+- Frame mode: a released surface keeps its 1 px border - the pinned popup card, the floating
+  bar plate and islands, the floating dock - fading in as it lifts off the frame's band.
+
+## [1.3.0] — 2026-09-21
+
 ### Added
+- Frame mode, stage 4 - the pin grammar (docs/proposals/frame-pin-grammar.md): what
+  sits against the frame is either fused to it (one outline, one blur, transient) or
+  released as its own card (pinned, persistent). A bar widget's popup opened by
+  hovering grows out of the bar's band and sinks back into it; pinning it by a
+  click lifts it off. A notification at a left or right position arrives fused to
+  the band on that edge, emerging from it, and sinks back into it when it times out
+  or is closed; its new Pin button - or a drag away from the band - lifts it off
+  and keeps it, and unpinning (the button, or a drag back) lands it and restarts
+  its clock. Dragging a fused card is elastic and never dismisses. The dock
+  follows its own pin under the new `Auto` (pinned floats, unpinned sits on the
+  band); your existing Attached or Floating choice is kept. The bar itself hugs the
+  frame while a window is open and floats over an empty workspace as an island - by the
+  compositor's gap, corners rounding; pin it with `qs -c imi ipc call bar togglePin` to
+  keep it floating. In frame mode Hug and Float are states, not styles: the Bar style row
+  becomes Plate / Islands / M3 with a Bar state row (Auto / Hug / Float) beside it, and the
+  Islands style follows the same state, each island rising out of the band, and its widget
+  popups fuse to their island and release on a pin like the plate's do. Settings >
+  Appearance > Frame gains a row each for popups and notifications.
+
+## [1.2.0] — 2026-09-20
+
+### Added
+- **The assistant can change things, after you approve.** Eight reviewed
+  tools: `write_file` / `append_file` (inside the folders you allowed, the
+  previous contents kept as `.bak`), `set_clipboard`, `set_wallpaper` (a path
+  or random), `set_accent`, `set_palette_source`, `set_color_scheme` and
+  `add_todo`. Each raises the same approve/reject card as a shell command,
+  with a one-line summary of the change; nothing runs before you approve, and
+  `set_shell_config` now goes through that card too.
+- The launcher can answer short questions inline. With Settings > Services >
+  Search > "Answer short questions inline" on, a `@question` of three or
+  more words gets a one-sentence answer under the Ask row after a pause in
+  typing, streamed from the selected model; Enter carries the answer into
+  the chat so the conversation continues from it. Off by default, and even
+  on, only a model on this machine answers unless "Inline answers may use
+  my cloud key" is on as well, because keystroke-driven cloud calls cost
+  money and send what you type.
+- `qs -c imi ipc call settings page "<page id>[:<section>]"` opens Settings on a page,
+  at a section - what the launcher's settings results already do, now scriptable
+  (`settings page "appearance:Frame"`); an unknown page id is refused with a log
+  line instead of opening whatever page was last shown.
+- Frame mode (Settings > Appearance > Frame, off by default): the bar, a band along every
+  screen edge and rounded inner corners are drawn as one connected surface in the bar's
+  colour, so the shell reads as a frame around your windows instead of floating islands.
+  The band is as thick as the compositor's outer gap (or a set number of pixels), takes
+  no input and reserves nothing; a pinned dock sits on the band as a tab in the frame's
+  colour, or floats a gap above it (Settings > Appearance > Frame > Dock). Best
+  with the Hug bar style. Not yet framed in this first
+  slice: the vertical bar, a bar hidden by auto-hide or absent from a screen's list.
+- Modes & Routines (ported from the p3drovfx fork): named modes (Sleep, Work,
+  Focus, Gaming, Theater, Presentation, Relax ship as presets) that apply a set
+  of actions - do not disturb, night light, keep awake, power profile, media,
+  brightness, audio devices, Hyprland presets, launching apps and more - and
+  revert them when the mode ends; routines that fire once or hold while a
+  trigger lasts (schedule, an app or game in front, battery, Wi-Fi, idle,
+  headphones, the phone's reach, resources, weather, updates, a shortcut). A
+  manager overlay (Super + Y; `qs -c imi ipc call modes ...`) edits both; the
+  active mode shows as a bar pill (the "Mode" widget in the layout editor), a
+  quick-panel toggle in both panel styles, and a brief banner on start and end.
+  Settings > Modes & Routines holds automation on/off, where the mode shows,
+  automatic ends, game detection and the data. State survives a config reset.
+  Not ported from the fork: screen shaders, keyboard backlight, earbuds ANC,
+  sounds, workspace profiles, DNS-over-TLS, calendar triggers, the lock-screen
+  pill.
+- Accounts (Settings > Accounts): sign in to Google with an OAuth client of
+  your own; the shell then shows your selected calendars' events in the sidebar
+  calendar (and to the assistant's `list_events`), your Google Tasks lists in
+  the sidebar to-do next to the local list (add, complete, delete write
+  through), and the inbox's unread count in a new bar "Mail" widget. Proton
+  VPN gets a quick-panel toggle (both panel styles) driven through the
+  official app's own session - connect to the fastest server, disconnect,
+  the server name as status. Calendar feeds (ICS links: Google's secret
+  address, Proton Calendar share links) finally have settings rows. Secrets
+  live in the keyring; nothing is sent to the shell's helpers on a command
+  line. Not built: Proton Mail (needs Proton Bridge), Proton Pass (no API).
+
+### Changed
+- Frame mode is one surface per screen that paints the dock's plate and, in the
+  Hug bar style, the bar's plate as its band: dock, band and bar are one outline
+  under one blur, and the blur under the join follows the meniscus to the pixel.
+  Groundwork for glass.
+- Dock: an icon arriving or leaving, the media tile and the separators take their
+  room on the fluid's own spring rather than a tween, and the plate, the meniscus
+  and the blur breathe with them. The motion speed slider and reduce motion now
+  reach the join's physics too.
+- Developer mode: the cheatsheet has a "Frame join" tab showing every surface's
+  join at true size (also `qs -p bench_frame_join.qml`).
+- Frame mode's dock switch (Settings > Appearance > Frame > Dock) is a motion now: the
+  pill lifts off the frame's band and sinks back onto it - a neck in the band's colour
+  bridging the seam, the outward corners rounding as the gap opens, the border and
+  the pill's own colour arriving once it is free - instead of jumping between the two
+  looks in one frame. Windows re-tile by the gap on the compositor's own animation. The
+  motion is measured off a dynamic-island reference (`docs/proposals/motion-split.md`)
+  and is the base for everything that docks into the frame from here on; the Motion
+  speed slider and reduce motion reach it. The neck is a distance field in one shader,
+  the way the reference builds it, so the seam is covered once (the drawn path left a
+  hairline); and a switch reversed mid-motion comes back in a time proportional to how
+  far it got, never under the effects tier, instead of taking the whole 800 ms.
+- The typing test's settings page is drawn in the settings grammar (sections,
+  grouped rows, the shell's switch, slider and choice rows) instead of its own
+  row kit; the phone tab's navigation cards, app rows and the Intelligence
+  panel's model and session rows draw with the shell's catalogue row; persona
+  and distro choices are the shell's chips.
+- Empty states across Settings (plugins, store, profile, Hyprland, cursor,
+  icon packs), the overview's clipboard strip, the online wallpaper grid and
+  the to-do list are the shell's page placeholder; the element tiles' corner
+  labels are badges; the wallpaper resolution picker is a labelled choice
+  row; the profile avatar, cursor theme, icon pack and colour scheme cards
+  are real buttons (hover, press, ripple); the Wi-Fi and Tailscale dialogs'
+  lists and the code block's scrollbar are the shell's; the to-do field is
+  the shell's field.
+- The Wi-Fi password prompt is the shell's masked field (the one the lock
+  screen and polkit use); the system prompt, user agent and autostart command
+  fields and the welcome screen's locale field are the shell's own fields.
+  Six shared widgets nothing used, or that drew a second design system, are
+  gone: `MaterialTextField`, `MaterialTextArea`, `MaterialPill`, `Fab`,
+  `VibrantToolbarButton`, `StyledPopupMenu`.
+- Three shapes that had no widget now have one: the floating plate under
+  the tray and dock menus, the sidebars, the on-screen keyboard, the drop
+  shelf, the search widget and the Modes editor's popups (`PopupPlate`); the
+  bar's standalone pills - submap, timer, mode, record, privacy - (one
+  `BarStandalonePill`); and the settings pages' glyph-text-action rows
+  (`ConfigActionRow`).
+- One icon button and one text button across the shell. Forty-odd
+  hand-drawn icon buttons (eight different sizes) are the new `IconButton`;
+  the settings pages', sidebars' and dialogs' text pills are `DialogButton`;
+  the Modes editor's own small button and icon button are gone. Two send
+  buttons (Intelligence, Anime) had a pointer area sitting over them that
+  swallowed the press: they ripple and fire again.
+- One close button for whole surfaces: the Settings window, the cheatsheet
+  and the Modes manager close with the same 40 px button, glyph and tooltip
+  (they had three shapes, one of them spinning on hover).
+- **The Modes & Routines editor is drawn with the shell's own controls.**
+  Its text fields are the shell's pill field (`ToolbarTextField`, which grew
+  an opt-in focus ring and a leading glyph), its removable chips are
+  `FilterChip`, its kind menu, icon picker and suggestion menu share one
+  popup plate, and every switch row (Invert, For at least, Delay, the
+  editors' options) is the shell's `ConfigSwitch`: icon, label, description,
+  trailing switch, the whole row flips it. Segmented choices in the forms
+  carry a label and sit at the form's width like a settings row. Section
+  headers sit on the rows' own columns; "overnight" no longer runs past the
+  card's edge; an every-day schedule shows every day selected; the icon
+  picker's grid fades at its edge; the Activity header keeps its shape when
+  the first entry arrives.
+- Appearance settings now live in their own file, `~/.config/immaterial-impulse/config.d/appearance.json`,
+  instead of inside `config.json` (the first step of splitting the config by domain: a
+  slider on the Appearance page no longer rewrites and re-reads the whole 40 KB file). The
+  move happens once, on the first start; the old `config.json` is kept beside it as
+  `config.json.pre-split-<date>`, which is what to hand back to an older release if you
+  downgrade. Presets keep their single-file shape and split on apply; `switchwall`,
+  `applycolor` and presets read the new file.
+
+### Fixed
+- Frame mode: the dock's plate no longer keeps its old width when an item appears
+  or disappears, catching up at some random later moment - two rendering traps,
+  a repaint lost while another window animates and a shader's own move never
+  reaching the scene graph, both told in docs/proposals/frame-one-surface.md.
+- Frame mode: the faint off-coloured regions beside the dock's meniscus are gone
+  (the blur region overshot the concave fillet), and the join no longer costs a
+  fifth of a frame per field at 240 Hz.
+- Settings > Services: the AI system prompt has a field made for long text
+  (label above, full width, grows to ten lines, then scrolls inside with the
+  caret kept in view) instead of a one-line value field it could not fit in.
+- Dock: an unpinned dock that had slid off the edge no longer leaves a frosted
+  silhouette over the window where it rests (the blur region did not follow the
+  slide; it is now published only while the dock is fully shown).
+- Frame mode with a pinned dock: the band no longer floats as a thin line
+  above the dock with wallpaper under it, nor swells to the dock's whole
+  height; it stays thin and the dock sits on it as a tab (or floats a gap
+  above it, by choice). The bands no longer overlap at the corners, where
+  the translucent colour painted twice read darker, and they show on a cold
+  start with the mode on (a round on the Bottom layer put them under the
+  wallpaper whenever the wallpaper came up after them).
+- Settings: the Modes overview and the Google client instructions are rows
+  with their action, not banners; notices carry a little more padding.
+- Modes manager: choosing another mode, routine or template, or switching tab,
+  fades and settles the page in the way a settings page does instead of
+  swapping it in one frame. Settings > Modes & Routines: the Presets,
+  Activity and "Where it lives" rows carry the row glyph and inset like every
+  other row, and the banner choice is a labelled row with its explanation on
+  the hint line.
+- **Update Dots no longer leaves a `hyprlock.conf.new` / `hypridle.conf.new`
+  identical to your file.** The legacy files step wrote the backup copy
+  whenever the file existed; it now compares first, and removes a stale
+  identical `.new` from an earlier update.
+
+
+## [1.1.0] — 2026-09-14
+
+The first feature release after 1.0. The assistant learns to look (files,
+clipboard, wallpaper, to-dos, calendar), to search your own documents, to be
+asked from the launcher, to be dictated to, and to manage local Ollama models;
+the overlays leave the way they arrive; the installer gains backup/restore, a
+lifecycle test that found three defects, and an NVIDIA-only EGL pin that
+drops ~110 MB from every shell process.
+
+### Added
+- **The assistant can look at your files, clipboard, wallpaper, to-dos and
+  calendar.** Six new read-only tools (`read_file`, `list_directory`,
+  `get_clipboard`, `get_wallpaper`, `list_todos`, `list_events`) for every
+  provider that supports tools. File access works only inside the folders you
+  list under Settings > Services > AI > "Folders the assistant may read"
+  (empty by default), never reads hidden files or binaries, and caps what it
+  returns; clipboard access has its own switch. Nothing here can change
+  anything.
+- **Ask the assistant from the launcher.** Type `@` and a question in the
+  overview to get an "Ask <model>" row; Enter opens the Intelligence tab with
+  the answer streaming. Optionally (Settings > Services > Search) a query of
+  four or more words that matches no app, setting or action offers the same
+  row last. The row appears only while the selected model is usable, and
+  nothing is sent before Enter. The prefix is configurable.
+- **Manage local Ollama models from the model browser.** The assistant's
+  Browse view gains an Ollama page: whether the daemon is running (with a
+  Start button), what is installed and loaded, a curated library with a pull
+  per size that shows the download size and your free disk before it starts
+  and streams its progress, a "pull anything by name" field, removal with a
+  confirm, and a hint whether a size fits your GPU memory. Pulled models
+  appear in the model picker at once; removed ones leave it.
+- **The assistant can search your own documents.** Name folders under
+  Settings > Services > AI > Documents and index them; the model gains a
+  `search_documents` tool, and a Documents toggle in the composer attaches
+  matching passages to every message with the source files as chips under
+  the reply. Everything stays on this machine: the default embedder is an
+  offline keyword index, or pick a local Ollama embedding model. Hidden
+  files, key and config directories and `.noindex` subtrees are never
+  indexed, and removing a folder forgets it at once.
+- **Dictate to the assistant.** A mic chip in the composer (or a key bound to
+  `qs ipc call ai dictate toggle`) records until pressed again and puts the
+  transcript in the composer for editing, or sends it at once if you prefer.
+  Transcription runs on this machine with `faster-whisper` (installed into
+  the shell's venv; the model is fetched only from the Settings button) or
+  whisper.cpp; a provider engine is opt-in and says that audio leaves the
+  machine. The privacy indicator lights for the whole recording.
 - **Backup and restore your configuration.** `./setup backup` archives the
   files an update never touches and the repo cannot reproduce (the shell's
   config, plugins and presets, `hypr/custom`, `hyprland/shellOverrides`,
@@ -27,6 +275,11 @@ own repo; the installer pins which revision it builds.
   uses the configured duration, including ones an app marked "never dismiss".
 
 ### Changed
+- **The desktop menu, the screenshot toast and the drop shelf now leave the
+  way they arrive.** They faded or scaled in but vanished in one frame; each
+  now plays a short leave motion, stops taking input the moment it is
+  dismissed, and the drop shelf gains an entrance it never had. Both follow
+  the motion speed setting and collapse under reduce-motion.
 - **The shell no longer loads Mesa's software renderer beside the NVIDIA
   driver.** On a machine where NVIDIA is the only GPU the `qs` wrapper pins
   the EGL vendor, dropping about 110 MB of resident memory from the shell and
@@ -39,6 +292,12 @@ own repo; the installer pins which revision it builds.
   process spawns per second are gone.
 
 ### Fixed
+- **The experimental yaml installer (`setup install --exp-files`) works on a
+  fresh machine.** Its first pattern aborted because rsync had no parent
+  directory to land in, it never created `hyprland/shellOverrides`, and it
+  left a pre-lua `hyprland.conf` in place. An installer lifecycle test now
+  runs both file steps twice against a throwaway home and asserts what an
+  update keeps and what it owns.
 - **Lyrics translations and romanizations from Glassy no longer go missing.**
   The lyrics page renders them a few seconds after the lyrics, so a fetch
   that ran first cached a result without them and the toggles never appeared
@@ -3780,7 +4039,10 @@ illogical-impulse), collecting the work done to date:
   (`Super`+`/`).
 - This changelog and versioning.
 
-[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/XephyLon/immaterial-impulse/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/XephyLon/immaterial-impulse/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/XephyLon/immaterial-impulse/compare/v1.1.0...v1.2.0
 [0.32.0]: https://github.com/XephyLon/immaterial-impulse/compare/v0.31.2...v0.32.0
 [0.31.2]: https://github.com/XephyLon/immaterial-impulse/compare/v0.31.1...v0.31.2
 [0.31.1]: https://github.com/XephyLon/immaterial-impulse/compare/v0.31.0...v0.31.1

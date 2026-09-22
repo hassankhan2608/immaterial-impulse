@@ -95,12 +95,21 @@ Scope {
         }
     }
 
+    // The toast outlives its path by the leave motion; a newer screenshot
+    // replaying the entrance on a surface that stays alive is replay().
+    OverlayLifecycle {
+        id: toastLife
+        wanted: root.currentPath !== ""
+    }
+    Region { id: toastNoInput }
+
     LazyLoader {
         id: panelLoader
-        active: root.currentPath !== ""
+        active: toastLife.alive
 
         PanelWindow {
             id: popupWindow
+            mask: root.currentPath !== "" ? null : toastNoInput
             readonly property bool hovered: hoverHandler.hovered
             screen: Quickshell.screens.find(s => s.name === Hyprland.focusedMonitor?.name) ?? Quickshell.screens[0]
             anchors { bottom: true; left: true }
@@ -120,12 +129,12 @@ Scope {
 
                 HoverHandler { id: hoverHandler }
 
-                // Re-run the entrance motion when a new screenshot replaces
-                // the one on display (the window itself is not recreated).
+                // Re-run the entrance when a new screenshot replaces the one
+                // on display (the window itself is not recreated).
                 Connections {
                     target: root
                     function onCurrentPathChanged() {
-                        if (root.currentPath !== "") enterAnimation.restart();
+                        if (root.currentPath !== "") toastLife.replay();
                     }
                 }
 
@@ -133,26 +142,9 @@ Scope {
                     id: content
                     anchors.centerIn: parent
                     spacing: Appearance.spacing.space100
-
-                    Component.onCompleted: enterAnimation.restart()
-
-                    // Entrance motion: tokens only (durations/easings come
-                    // from Appearance.animation, never raw literals).
-                    ParallelAnimation {
-                        id: enterAnimation
-                        NumberAnimation {
-                            target: content; property: "opacity"; from: 0; to: 1
-                            duration: Appearance.animation.elementMoveEnter.duration
-                            easing.type: Appearance.animation.elementMoveEnter.type
-                            easing.bezierCurve: Appearance.animation.elementMoveEnter.bezierCurve
-                        }
-                        NumberAnimation {
-                            target: content; property: "scale"; from: 0.92; to: 1
-                            duration: Appearance.animation.elementMoveFast.duration
-                            easing.type: Appearance.animation.elementMoveFast.type
-                            easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve
-                        }
-                    }
+                    // Enter and leave from the lifecycle's one scalar.
+                    opacity: toastLife.progress
+                    scale: 0.92 + 0.08 * toastLife.progress
 
                     Rectangle {
                         Layout.preferredWidth: previewImage.paintedWidth + Appearance.spacing.space100 * 2
@@ -200,38 +192,46 @@ Scope {
 
                             // Filled (secondary-container) primary actions; Discard
                             // below stays background-less per the design.
-                            RippleButton {
+                            IconButton {
+                                // Squircle, not a circle: these three read as one
+                                // action bar, and the radius is what groups them.
                                 buttonRadius: Appearance.rounding.normal
                                 // 44: square action-button dimension (no Appearance.sizes
                                 // token exists for this; matches DiscordVoicePopup's 44).
-                                implicitWidth: 44; implicitHeight: 44
+                                buttonSize: 44
+                                iconSize: 22
+                                buttonIcon: "save"
+                                colText: Appearance.colors.colOnSecondaryContainer
                                 colBackground: Appearance.colors.colSecondaryContainer
                                 colBackgroundHover: Appearance.colors.colSecondaryContainerHover
                                 colRipple: Appearance.colors.colSecondaryContainerActive
+                                tooltip: Translation.tr("Save to Pictures")
                                 onClicked: root.saveCurrent()
-                                MaterialSymbol { anchors.centerIn: parent; text: "save"; iconSize: 22; color: Appearance.colors.colOnSecondaryContainer }
-                                StyledToolTip { text: Translation.tr("Save to Pictures") }
                             }
-                            RippleButton {
+                            IconButton {
                                 visible: root.editorBinary !== ""
                                     || (Config.options.screenshotResult?.editorCommand ?? []).length > 0
                                 buttonRadius: Appearance.rounding.normal
-                                implicitWidth: 44; implicitHeight: 44
+                                buttonSize: 44
+                                iconSize: 22
+                                buttonIcon: "edit"
+                                colText: Appearance.colors.colOnSecondaryContainer
                                 colBackground: Appearance.colors.colSecondaryContainer
                                 colBackgroundHover: Appearance.colors.colSecondaryContainerHover
                                 colRipple: Appearance.colors.colSecondaryContainerActive
+                                tooltip: Translation.tr("Annotate")
                                 onClicked: root.editCurrent()
-                                MaterialSymbol { anchors.centerIn: parent; text: "edit"; iconSize: 22; color: Appearance.colors.colOnSecondaryContainer }
-                                StyledToolTip { text: Translation.tr("Annotate") }
                             }
-                            RippleButton {
+                            IconButton {
                                 buttonRadius: Appearance.rounding.normal
-                                implicitWidth: 44; implicitHeight: 44
+                                buttonSize: 44
+                                iconSize: 22
+                                buttonIcon: "delete"
+                                colText: Appearance.colors.colError
                                 colBackgroundHover: Appearance.colors.colErrorContainerHover
                                 colRipple: Appearance.colors.colErrorContainerActive
+                                tooltip: Translation.tr("Discard")
                                 onClicked: root.releaseCurrent()
-                                MaterialSymbol { anchors.centerIn: parent; text: "delete"; iconSize: 22; color: Appearance.colors.colError }
-                                StyledToolTip { text: Translation.tr("Discard") }
                             }
                     }
                     }

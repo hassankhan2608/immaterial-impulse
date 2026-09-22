@@ -450,5 +450,116 @@ class PresetTests(unittest.TestCase):
             self.assertEqual(saved.get("bar", {}).get("weather", {}).get("apiKey", ""), "")
 
 
+    def test_a_split_appearance_file_round_trips_through_one_preset_document(self):
+        """config split, stage 1: the preset stays one document; --save folds
+        config.d/appearance.json in, --apply writes appearance back to that
+        file and everything else to config.json without an appearance key."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config_dir = home / ".config/immaterial-impulse"
+            script_dir = home / ".config/quickshell/imi/scripts"
+            (config_dir / "config.d").mkdir(parents=True)
+            (script_dir / "wallpapers").mkdir(parents=True)
+            (script_dir / "colors").mkdir(parents=True)
+            (config_dir / "config.json").write_text(json.dumps({
+                "background": {"wallpaperPath": "/tmp/w.jpg"},
+                "bar": {"cornerStyle": 1},
+                "wallpaperSelector": {"wallpaperEngine": {"activePath": ""}},
+            }))
+            (config_dir / "config.d/appearance.json").write_text(json.dumps({
+                "appearance": {"iconTheme": "saved-theme", "fakeScreenRounding": 2}}))
+            (config_dir / "plugin-state.json").write_text(json.dumps({"version": 2}))
+            for helper in (script_dir / "wallpapers/wallpaper-engine.sh", script_dir / "colors/switchwall.sh"):
+                helper.write_text("#!/usr/bin/env bash\nexit 0\n")
+                helper.chmod(0o755)
+            presets = script_dir / "presets.sh"
+            shutil.copy(PRESETS, presets)
+            presets.chmod(0o755)
+            env = dict(os.environ, HOME=str(home))
+            subprocess.run(["bash", str(presets), "--save", "look"], env=env, check=True)
+            preset = json.loads((config_dir / "presets/look.json").read_text())
+            self.assertEqual(preset["appearance"]["iconTheme"], "saved-theme", "save folds the split file in")
+            self.assertEqual(preset["bar"]["cornerStyle"], 1)
+            # Change both files, then apply: the preset's values come back to
+            # their own files.
+            (config_dir / "config.d/appearance.json").write_text(json.dumps({
+                "appearance": {"iconTheme": "changed", "fakeScreenRounding": 0, "extra": True}}))
+            (config_dir / "config.json").write_text(json.dumps({
+                "background": {"wallpaperPath": "/tmp/w.jpg"},
+                "bar": {"cornerStyle": 3},
+                "wallpaperSelector": {"wallpaperEngine": {"activePath": ""}},
+            }))
+            subprocess.run(["bash", str(presets), "--apply", "look"], env=env, check=True)
+            appearance = json.loads((config_dir / "config.d/appearance.json").read_text())["appearance"]
+            self.assertEqual(appearance["iconTheme"], "saved-theme")
+            self.assertEqual(appearance["fakeScreenRounding"], 2)
+            self.assertTrue(appearance["extra"], "keys the preset does not carry survive, as in config.json")
+            main = json.loads((config_dir / "config.json").read_text())
+            self.assertEqual(main["bar"]["cornerStyle"], 1)
+            self.assertNotIn("appearance", main, "apply never writes appearance into config.json once split")
+
+    def _split_home(self, directory):
+        home = Path(directory)
+        config_dir = home / ".config/immaterial-impulse"
+        script_dir = home / ".config/quickshell/imi/scripts"
+        (config_dir / "config.d").mkdir(parents=True)
+        (script_dir / "wallpapers").mkdir(parents=True)
+        (script_dir / "colors").mkdir(parents=True)
+        (config_dir / "plugin-state.json").write_text(json.dumps({"version": 2}))
+        for helper in (script_dir / "wallpapers/wallpaper-engine.sh", script_dir / "colors/switchwall.sh"):
+            helper.write_text("#!/usr/bin/env bash\nexit 0\n")
+            helper.chmod(0o755)
+        presets = script_dir / "presets.sh"
+        shutil.copy(PRESETS, presets)
+        presets.chmod(0o755)
+        return home, config_dir, presets, dict(os.environ, HOME=str(home))
+
+    def test_a_failed_merge_changes_neither_file(self):
+        """The whole point of the split is a smaller blast radius: a
+        malformed config.json (a half-written file) must leave both files
+        byte-identical after --apply, never a 0-byte config.json."""
+        with tempfile.TemporaryDirectory() as directory:
+            home, config_dir, presets, env = self._split_home(directory)
+            (config_dir / "config.json").write_text('{"bar": {"cornerStyle": 1}, "wallpaperSelec')  # cut mid-write
+            (config_dir / "config.d/appearance.json").write_text(json.dumps({"appearance": {"iconTheme": "keep"}}))
+            (config_dir / "presets").mkdir()
+            (config_dir / "presets/look.json").write_text(json.dumps({"bar": {"cornerStyle": 3}, "appearance": {"iconTheme": "new"}}))
+            before_main = (config_dir / "config.json").read_bytes()
+            before_app = (config_dir / "config.d/appearance.json").read_bytes()
+            result = subprocess.run(["bash", str(presets), "--apply", "look"], env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0, "a failed merge is reported")
+            self.assertEqual((config_dir / "config.json").read_bytes(), before_main)
+            self.assertEqual((config_dir / "config.d/appearance.json").read_bytes(), before_app)
+            self.assertEqual(sorted(p.name for p in config_dir.glob("config.json*")), ["config.json"], "no temp file left")
+
+    def test_only_appearance_subkeys_apply_against_the_split_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, config_dir, presets, env = self._split_home(directory)
+            (config_dir / "config.json").write_text(json.dumps({"bar": {"cornerStyle": 1}, "background": {"wallpaperPath": "/w"},
+                                                                 "wallpaperSelector": {"wallpaperEngine": {"activePath": ""}}}))
+            (config_dir / "config.d/appearance.json").write_text(json.dumps({"appearance": {"iconTheme": "mine", "fakeScreenRounding": 0}}))
+            (config_dir / "presets").mkdir()
+            (config_dir / "presets/look.json").write_text(json.dumps({"bar": {"cornerStyle": 3},
+                "appearance": {"iconTheme": "preset", "fakeScreenRounding": 2}}))
+            subprocess.run(["bash", str(presets), "--apply", "look", "--only", "appearance:fakeScreenRounding"], env=env, check=True)
+            appearance = json.loads((config_dir / "config.d/appearance.json").read_text())["appearance"]
+            self.assertEqual(appearance, {"iconTheme": "mine", "fakeScreenRounding": 2}, "only the named sub-key moved")
+            main = json.loads((config_dir / "config.json").read_text())
+            self.assertEqual(main["bar"]["cornerStyle"], 1, "a top-level key not named stays")
+            self.assertNotIn("appearance", main)
+
+    def test_before_the_split_a_preset_still_applies_into_config_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, config_dir, presets, env = self._split_home(directory)
+            (config_dir / "config.d").rmdir()
+            (config_dir / "config.json").write_text(json.dumps({"bar": {"cornerStyle": 1}, "appearance": {"iconTheme": "old"},
+                                                                 "wallpaperSelector": {"wallpaperEngine": {"activePath": ""}}}))
+            (config_dir / "presets").mkdir()
+            (config_dir / "presets/look.json").write_text(json.dumps({"appearance": {"iconTheme": "preset"}}))
+            subprocess.run(["bash", str(presets), "--apply", "look"], env=env, check=True)
+            main = json.loads((config_dir / "config.json").read_text())
+            self.assertEqual(main["appearance"]["iconTheme"], "preset", "no split file yet: config.json is still the home")
+            self.assertFalse((config_dir / "config.d").exists())
+
 if __name__ == "__main__":
     unittest.main()

@@ -157,21 +157,20 @@ Item { // Wrapper
         }
     }
 
-    StyledRectangularShadow {
-        target: searchWidgetContent
-    }
-    Rectangle { // Background
+    PopupPlate { // Background
         id: searchWidgetContent
+        // The list scrolls inside the plate; the root clips as the Rectangle did.
+        clip: true
         anchors {
             top: parent.top
             horizontalCenter: parent.horizontalCenter
             topMargin: Appearance.sizes.elevationMargin
         }
-        clip: true
         implicitWidth: columnLayout.implicitWidth
         implicitHeight: columnLayout.implicitHeight
         radius: searchBar.height / 2 + searchBar.verticalPadding
         color: Appearance.colors.colBackgroundSurfaceContainer
+        bordered: false
 
         Behavior on implicitHeight {
             id: searchHeightBehavior
@@ -260,35 +259,22 @@ Item { // Wrapper
                 id: clipboardEmptyState
                 visible: root.showResults && root.clipboardMode && appResults.count === 0
                 Layout.fillWidth: true
-                implicitHeight: 120
+                // The shared placeholder's shape is taller than the bare glyph
+                // this used to draw, so the strip grew one step to hold it.
+                implicitHeight: 160
 
                 readonly property bool isFilteredSearch: Cliphist.entries.length > 0 && root.clipboardSearching
 
-                ColumnLayout {
-                    anchors.centerIn: parent
-                    spacing: Appearance.spacing.space50
-
-                    MaterialSymbol {
-                        Layout.alignment: Qt.AlignHCenter
-                        iconSize: 48
-                        color: Appearance.m3colors.m3outline
-                        text: clipboardEmptyState.isFilteredSearch ? "search_off" : "content_paste"
-                    }
-                    StyledText {
-                        Layout.alignment: Qt.AlignHCenter
-                        font.pixelSize: Appearance.font.pixelSize.normal
-                        font.weight: Font.DemiBold
-                        color: Appearance.m3colors.m3outline
-                        horizontalAlignment: Text.AlignHCenter
-                        text: clipboardEmptyState.isFilteredSearch ? Translation.tr("No results found") : Translation.tr("Clipboard is empty")
-                    }
-                    StyledText {
-                        Layout.alignment: Qt.AlignHCenter
-                        font.pixelSize: Appearance.font.pixelSize.small
-                        color: Appearance.m3colors.m3outline
-                        horizontalAlignment: Text.AlignHCenter
-                        text: clipboardEmptyState.isFilteredSearch ? Translation.tr("Try a different search") : Translation.tr("Copy something to see it here")
-                    }
+                PagePlaceholder {
+                    // The launcher is as tall as its results, so on a short
+                    // screen this strip is the first thing squeezed.
+                    dropIconWhenCramped: true
+                    shown: clipboardEmptyState.visible
+                    icon: clipboardEmptyState.isFilteredSearch ? "search_off" : "content_paste"
+                    shape: MaterialShape.Shape.Cookie7Sided
+                    title: clipboardEmptyState.isFilteredSearch ? Translation.tr("No results found") : Translation.tr("Clipboard is empty")
+                    description: clipboardEmptyState.isFilteredSearch ? Translation.tr("Try a different search") : Translation.tr("Copy something to see it here")
+                    descriptionHorizontalAlignment: Text.AlignHCenter
                 }
             }
 
@@ -347,6 +333,14 @@ Item { // Wrapper
                     anchors.left: parent?.left
                     anchors.right: parent?.right
                     entry: modelData
+                    // The Ask row's inline answer, bound straight to
+                    // AiInline here so a streaming answer never rebuilds
+                    // the list (the builder never names AiInline).
+                    readonly property bool isAskRow: modelData?.id === "ask-assistant"
+                        && AiInline.question === (modelData?.name ?? "")
+                    inlineAnswer: isAskRow ? (AiInline.answer !== "" ? AiInline.answer : AiInline.errorNote) : ""
+                    inlineAnswerPending: isAskRow && AiInline.busy
+                    inlineAnswerStale: isAskRow && (AiInline.stale || (AiInline.answer === "" && AiInline.errorNote !== ""))
                     imageEntry: searchItem.cliphistRawString !== "" && Cliphist.entryIsImage(searchItem.cliphistRawString)
                     faviconPaths: {
                         const paths = {};
@@ -359,7 +353,7 @@ Item { // Wrapper
                     Component.onCompleted: urls.forEach(url => Favicons.request(url))
                     onActivated: GlobalStates.overviewOpen = false
                     clearBtnHasFocus: root.clearBtnHasFocus
-                    query: StringUtils.cleanOnePrefix(root.searchingText, [Config.options.search.prefix.action, Config.options.search.prefix.app, Config.options.search.prefix.clipboard, Config.options.search.prefix.emojis, Config.options.search.prefix.symbols, Config.options.search.prefix.math, Config.options.search.prefix.shellCommand, Config.options.search.prefix.webSearch])
+                    query: StringUtils.cleanOnePrefix(root.searchingText, [Config.options.search.prefix.action, Config.options.search.prefix.app, Config.options.search.prefix.clipboard, Config.options.search.prefix.emojis, Config.options.search.prefix.symbols, Config.options.search.prefix.math, Config.options.search.prefix.shellCommand, Config.options.search.prefix.webSearch, Config.options.search.prefix.ai])
 
                     Keys.onPressed: event => {
                         if (event.key === Qt.Key_Tab) {

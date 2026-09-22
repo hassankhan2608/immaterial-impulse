@@ -103,6 +103,8 @@ hl.layer_rule({ match = { namespace = ".*" }, xray = false})
 hl.layer_rule({ match = { namespace = "walker" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "selection" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "overview" }, no_anim = true})
+-- The frame bands stay mapped and only change colour; no map animation.
+hl.layer_rule({ match = { namespace = "quickshell:frame" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "anyrun" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "indicator.*" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "osk" }, no_anim = true})
@@ -153,6 +155,14 @@ hl.layer_rule({ match = { namespace = "quickshell:.*" }, blur = true})
 hl.layer_rule({ match = { namespace = "quickshell:.*" }, ignore_alpha = 0.05})
 hl.layer_rule({ match = { namespace = "quickshell:bar" }, animation = "slide"})
 hl.layer_rule({ match = { namespace = "quickshell:actionCenter" }, no_anim = true})
+-- The Modes & Routines manager and its start/end banner: the shell animates
+-- both itself (a scale/opacity entrance on the card), so the compositor's
+-- map animation stays out; blur is scoped to the card through a
+-- WindowBlurRegion, so the catch-all blur above must not frost the shadow.
+hl.layer_rule({ match = { namespace = "quickshell:modes" }, no_anim = true})
+hl.layer_rule({ match = { namespace = "quickshell:modes" }, blur = false})
+hl.layer_rule({ match = { namespace = "quickshell:modeFlashPopup" }, no_anim = true})
+hl.layer_rule({ match = { namespace = "quickshell:modeFlashPopup" }, blur = false})
 -- The subject selector: a full-screen surface that is transparent everywhere
 -- except one toolbar, because the wallpaper and the widgets it is judging are
 -- the real ones underneath it. Under the catch-all above that is the worst
@@ -247,6 +257,17 @@ hl.layer_rule({ match = { namespace = "quickshell:verticalBar" }, blur = false})
 -- translucent on the surface to scope a blur to.
 hl.layer_rule({ match = { namespace = "quickshell:background" }, blur = false})
 hl.layer_rule({ match = { namespace = "quickshell:dock" }, blur = false})
+-- Frame mode's bands take the same treatment, and here it is not about a
+-- shadow: the band is the SAME translucent colour as the bar's plate and the
+-- dock's tab, and those two are blurred through a region while the band was
+-- blurred whole-surface off the catch-all. Two mechanisms at two thresholds on
+-- surfaces that are meant to read as one piece of chrome, which is what a
+-- frame-coloured band beside a frame-coloured dock made visible - measured over
+-- a white backdrop, the band and the dock's own meniscus at (142,143,145)
+-- against the plate's (82,81,84). Frame.qml publishes the region;
+-- tests/lint_blur_region_pairing.py fails the suite while only one half is
+-- present, which is how this was found.
+hl.layer_rule({ match = { namespace = "quickshell:frame" }, blur = false})
 -- And the transient surfaces, which were the last panels still frosting their
 -- own shadow (#89): every OSD indicator sits in an elevation margin, and the
 -- overview surface carries two shadowed cards (the search widget and the

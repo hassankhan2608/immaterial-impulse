@@ -10,6 +10,8 @@ import Quickshell
 Item {
     id: root
     required property var taskList
+    // "local" acts on Todo (index-resolved); "google" on GoogleTasks by id.
+    property string source: "local"
     property string emptyPlaceholderIcon
     property string emptyPlaceholderText
     property int todoListItemSpacing: Appearance.spacing.space50
@@ -102,6 +104,10 @@ Item {
                         TodoItemActionButton {
                             Layout.fillWidth: false
                             onClicked: {
+                                if (root.source === "google") {
+                                    GoogleTasks.completeTask(todoItem.modelData.id);
+                                    return;
+                                }
                                 const index = todoItem.resolveIndex();
                                 if (index === -1)
                                     return;
@@ -122,6 +128,10 @@ Item {
                         TodoItemActionButton {
                             Layout.fillWidth: false
                             onClicked: {
+                                if (root.source === "google") {
+                                    GoogleTasks.deleteTask(todoItem.modelData.id);
+                                    return;
+                                }
                                 const index = todoItem.resolveIndex();
                                 if (index !== -1)
                                     Todo.deleteItem(index);
@@ -141,33 +151,15 @@ Item {
         }
     }
 
-    Item {
-        // Placeholder when list is empty
-        visible: opacity > 0
-        opacity: taskList.length === 0 ? 1 : 0
-        anchors.fill: parent
-
-        Behavior on opacity {
-            animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
-        }
-
-        ColumnLayout {
-            anchors.centerIn: parent
-            spacing: Appearance.spacing.space100
-
-            MaterialSymbol {
-                Layout.alignment: Qt.AlignHCenter
-                iconSize: 55
-                color: Appearance.m3colors.m3outline
-                text: emptyPlaceholderIcon
-            }
-            StyledText {
-                Layout.alignment: Qt.AlignHCenter
-                font.pixelSize: Appearance.font.pixelSize.normal
-                color: Appearance.m3colors.m3outline
-                horizontalAlignment: Text.AlignHCenter
-                text: emptyPlaceholderText
-            }
-        }
+    // Placeholder when list is empty. The shared placeholder carries the same
+    // fade this used to spell out for itself.
+    PagePlaceholder {
+        // The list shares the sidebar column with a bottom widget group of
+        // fixed height, so on a short screen the shape is what gives way.
+        dropIconWhenCramped: true
+        shown: root.taskList.length === 0
+        icon: root.emptyPlaceholderIcon
+        shape: MaterialShape.Shape.Ghostish
+        title: root.emptyPlaceholderText
     }
 }

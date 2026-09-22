@@ -16,11 +16,165 @@ MouseArea { // Notification group area
     // Which backend this card is drawn for. The default is the shell's own
     // freedesktop service, so a call site that says nothing is unchanged.
     property NotificationController controller: NotificationController {}
-    property var notifications: notificationGroup?.notifications ?? []
+    // The group as last SEEN: on the way out the lookup behind
+    // `notificationGroup` goes empty while the delegate is still sliding
+    // (the list keeps it for the remove transition), and a card that read
+    // the live lookup collapsed to a 24 px stub with no text and changed
+    // its frame key mid-slide - the sink into the band became a jump.
+    property var shownGroup: notificationGroup
+    onNotificationGroupChanged: if (root.notificationGroup) root.shownGroup = root.notificationGroup
+    property var notifications: shownGroup?.notifications ?? []
     property int notificationCount: notifications.length
     property bool multipleNotifications: notificationCount > 1
     property bool expanded: false
     property bool popup: false
+
+    // The frame (frame-pin-grammar.md, slice 3). A popup card on the frame's
+    // left or right band is FUSED to it - on the band's inner edge, its
+    // band-side corners filled by the meniscus, the frame painting the plate
+    // - until it is PINNED: the Pin button lifts it off (the elevation gap,
+    // the neck cutting) and keeps it. Unpinning is the close: it lands and
+    // swallows back into the band, then times out and slides into it. All
+    // frame facts come through the controller; the edge and the screen come
+    // from the list.
+    readonly property string frameEdge: root.popup ? (root.ListView.view?.frameEdge ?? "") : ""
+    readonly property string screenName: root.ListView.view?.screenName ?? ""
+    readonly property string frameLook: root.controller.frameNotificationsLook
+    readonly property bool joinsFrame: root.popup && root.controller.frameEnabled
+        && root.frameEdge !== "" && root.frameLook !== "released"
+    property bool pinned: false
+    property bool closing: false
+    readonly property bool joinAttached: root.frameLook === "fused" || !root.pinned || root.closing
+    readonly property bool plateOnFrame: root.joinsFrame && cardJoin.drawsPlate
+    // The card's offset off the band along the edge's normal: the lift.
+    readonly property real liftOffset: root.frameEdge === "right" ? -(cardJoin.lift + root.dragPull)
+        : root.frameEdge === "left" ? cardJoin.lift + root.dragPull : 0
+    readonly property string joinKey: "notification:" + (root.shownGroup?.appName ?? "")
+    function pin(): void {
+        root.pinned = true;
+        leaveHideTimer.stop();
+        root.notifications.forEach(notif => root.controller.cancelTimeout(notif));
+    }
+    // Unpinning fuses the card back (it lands on the band) and puts it back
+    // on the clock; closing is the x, or the timeout when it comes.
+    function unpin(): void {
+        root.pinned = false;
+        root.notifications.forEach(notif => root.controller.resumeTimeout(notif));
+    }
+
+    // --- dragging, where the frame paints (frame-pin-grammar.md §2) -------
+    // Away from the band the pull is elastic - it stiffens toward a limit
+    // and never lets go of the card - and past a threshold it pins. Toward
+    // the band the card follows the hand all the way: the join forms as it
+    // nears (the neck below rides how close it is), it touches, and pushed
+    // on past the band's edge it goes under. Released, it goes where it is
+    // nearest: past the edge by a little, it slides the rest of the way in
+    // and closes; nearer the band than its pinned rest, it lands and
+    // unpins; otherwise it springs back to where it was.
+    property real dragPull: 0
+    readonly property real dragLimit: Appearance.sizes.elevationMargin * 1.5
+    readonly property real dragThreshold: Appearance.sizes.elevationMargin
+    readonly property real dragCloseDepth: Math.max(root.dragThreshold * 3, root.width * 0.15)
+    // The gap the hand is holding: the join's own plus the pull, negative
+    // once the card is inside the band.
+    readonly property real dragGap: cardJoin.state.gap + root.dragPull
+    // The bridge as the hand brings the card in: from the join's own neck
+    // to whole at the band, so the meniscus grows with the approach and the
+    // landing on release starts from what was already drawn.
+    readonly property real dragNeck: root.dragPull < 0
+        ? Math.max(cardJoin.state.neck, Math.min(1, 1 - Math.max(0, root.dragGap) / Math.max(1, cardJoin.travel)))
+        : cardJoin.state.neck
+    function elastic(d: real): real {
+        const limit = root.dragLimit;
+        return limit * Math.tanh(d / limit);
+    }
+    function frameDragUpdate(diffX: real): void {
+        const away = root.frameEdge === "right" ? -diffX : diffX;
+        root.dragPull = away >= 0 ? root.elastic(away) : away;
+    }
+    function frameDragRelease(diffX: real): void {
+        const away = root.frameEdge === "right" ? -diffX : diffX;
+        const gap = root.dragGap, neck = root.dragNeck;
+        if (gap <= -root.dragCloseDepth) {
+            // Under the band already: slide the rest of the way in and close.
+            root.leaveWithAnimation(root.leavesLeft, () => root.notifications.forEach(notif => root.controller.timeout(notif)));
+            root.dragPull = 0;
+            return;
+        }
+        root.dragPull = 0;
+        if (!root.pinned && away >= root.dragThreshold) root.pin();
+        else if (root.pinned && gap < cardJoin.travel / 2) root.unpin();
+        cardJoin.disturb(gap, neck);
+    }
+    FrameJoin {
+        id: cardJoin
+        anchors.fill: parent
+        plate: background
+        edge: root.frameEdge !== "" ? root.frameEdge : "right"
+        attached: root.joinAttached
+        travel: Appearance.sizes.elevationMargin
+        bandInset: 0
+        color: root.controller.frameColor
+        active: root.joinsFrame
+        paintsLocally: false
+        paintsAtRest: true
+        onMovingChanged: {
+            if (cardJoin.moving || !root.closing) return;
+            root.closing = false;
+            const then = root.pendingLeave;
+            root.pendingLeave = null;
+            root.leaveWithAnimation(root.leavesLeft,
+                then ?? (() => root.notifications.forEach(notif => root.controller.timeout(notif))));
+        }
+    }
+    // The plate's colour: the band's while fused, the card's while released,
+    // the change on the card's colour tier.
+    property color platePaint: cardJoin.fused ? root.controller.frameColor : Appearance.colors.colBackgroundSurfaceContainer
+    Behavior on platePaint { animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this) }
+    readonly property var frameJoinRecord: {
+        if (!cardJoin.active || !cardJoin.painting || !root.screenName) return null;
+        // Read so a move re-evaluates this: the card's place in the list,
+        // the list's scroll, the card's own offset. mapToItem(null) is the
+        // window, which is the screen for a surface anchored on every edge.
+        root.x; root.y; root.width; root.height; background.x; background.y; background.width; background.height;
+        root.ListView.view?.contentY; root.ListView.view?.x; root.ListView.view?.y; root.opacity;
+        const at = background.mapToItem(null, 0, 0);
+        return {
+            edge: root.frameEdge,
+            plate: { x: at.x, y: at.y, width: background.width, height: background.height },
+            radii: { topLeft: background.radius, topRight: background.radius,
+                     bottomRight: background.radius, bottomLeft: background.radius },
+            gap: root.dragGap, neck: root.dragNeck, bulge: cardJoin.state.bulge,
+            meniscus: cardJoin.meniscus, blendPerPixel: cardJoin.blendPerPixel,
+            climbFraction: cardJoin.climbFraction, color: root.platePaint
+        };
+    }
+    // Withdrawn under the screen and key it was PUBLISHED under: by the time
+    // a delegate is destroyed its list is gone (no screen name) and its group
+    // may be (no app name), and a withdrawal that recomputed either missed -
+    // the frame kept painting a plate with no card in it.
+    property string publishedScreen: ""
+    property string publishedKey: ""
+    function publishFrameJoin(record): void {
+        if (record) {
+            if (!root.screenName || !root.popup) return;
+            if (root.publishedScreen && (root.publishedScreen !== root.screenName || root.publishedKey !== root.joinKey))
+                root.controller.publishFrameJoin(root.publishedScreen, root.publishedKey, null);
+            root.controller.publishFrameJoin(root.screenName, root.joinKey, record);
+            root.publishedScreen = root.screenName;
+            root.publishedKey = root.joinKey;
+        } else if (root.publishedScreen) {
+            root.controller.publishFrameJoin(root.publishedScreen, root.publishedKey, null);
+            root.publishedScreen = "";
+            root.publishedKey = "";
+        }
+    }
+    onFrameJoinRecordChanged: publishFrameJoin(frameJoinRecord)
+    Component.onCompleted: {
+        if (root.popup && root.joinsFrame) root.emergeFromBand();
+        publishFrameJoin(frameJoinRecord);
+    }
+    Component.onDestruction: publishFrameJoin(null)
     property real padding: Appearance.spacing.space150
     implicitHeight: background.implicitHeight
 
@@ -36,10 +190,64 @@ MouseArea { // Notification group area
         dragIndexDiff == 2 ? (parentDragDistance * 0.1) : 0
 
     function destroyWithAnimation(left = false) {
+        root.leaveWithAnimation(left, null);
+    }
+    // Slides the card out - toward the left, or the right - and then runs
+    // `then`, or discards without one. A fused card leaves INTO its band
+    // (frame-pin-grammar.md): the same slide, aimed at the band's side.
+    function leaveWithAnimation(left, then): void {
         root.qmlParent.resetDrag()
         background.anchors.leftMargin = background.anchors.leftMargin; // Break binding
         destroyAnimation.left = left;
+        destroyAnimation.then = then ?? null;
         destroyAnimation.running = true;
+    }
+    readonly property bool leavesLeft: root.frameEdge === "left"
+    // Arriving, a fused card EMERGES from its band: it starts inside the
+    // band and slides out to its place on the same curve it leaves by,
+    // instead of the list's pop-in (which scaled the frame's plate from
+    // its centre). `enterOffset` rides the margin the lift and the drag
+    // already ride.
+    property real enterOffset: 0
+    // Up while the card emerges, so the margin's own Behavior stands aside:
+    // a Behavior whose target moves every frame restarts every frame and
+    // never ticks - the card sat in the band until the run was over, then
+    // eased out late, with one frame at its final place before it started.
+    property bool entering: false
+    NumberAnimation {
+        id: enterAnim
+        target: root
+        property: "enterOffset"
+        to: 0
+        duration: Appearance.animation.elementMove.duration
+        easing.type: Appearance.animation.elementMove.type
+        easing.bezierCurve: Appearance.animation.elementMove.bezierCurve
+        onFinished: root.entering = false
+    }
+    function emergeFromBand(): void {
+        root.entering = true;
+        root.enterOffset = (root.leavesLeft ? -1 : 1) * ((root.ListView.view?.width ?? root.width) + root.dismissOvershoot);
+        enterAnim.restart();
+    }
+    // Dismissal, for a card the frame paints: a released card lands on the
+    // band first (the swallow), then the card slides into it, then `then` -
+    // the timeout or the discard. Outside frame mode there is nothing to
+    // animate against and `then` runs at once.
+    property var pendingLeave: null
+    function dismissWithAnimation(then): void {
+        if (!root.joinsFrame) {
+            if (then) then();
+            return;
+        }
+        if (!cardJoin.fused) {
+            root.pendingLeave = then ?? null;
+            root.closing = true;
+            return;
+        }
+        root.leaveWithAnimation(root.leavesLeft, then);
+    }
+    function timeOutWithAnimation(): void {
+        root.dismissWithAnimation(() => root.notifications.forEach(notif => root.controller.timeout(notif)));
     }
 
     hoverEnabled: true
@@ -53,9 +261,7 @@ MouseArea { // Notification group area
         interval: Config.options?.notifications?.hideDelayOnLeave ?? 200
         onTriggered: {
             if (root.containsMouse) return;
-            root.notifications.forEach(notif => {
-                root.controller.timeout(notif);
-            });
+            root.timeOutWithAnimation();
         }
     }
 
@@ -66,7 +272,7 @@ MouseArea { // Notification group area
             root.notifications.forEach(notif => {
                 root.controller.cancelTimeout(notif);
             });
-        } else {
+        } else if (!root.pinned) {
             leaveHideTimer.restart();
         }
     }
@@ -74,6 +280,7 @@ MouseArea { // Notification group area
     SequentialAnimation { // Drag finish animation
         id: destroyAnimation
         property bool left: true
+        property var then: null
         running: false
 
         NumberAnimation {
@@ -85,6 +292,12 @@ MouseArea { // Notification group area
             easing.bezierCurve: Appearance.animation.elementMove.bezierCurve
         }
         onFinished: () => {
+            if (destroyAnimation.then) {
+                const then = destroyAnimation.then;
+                destroyAnimation.then = null;
+                Qt.callLater(then);
+                return;
+            }
             root.notifications.forEach((notif) => {
                 Qt.callLater(() => {
                     root.controller.discard(notif);
@@ -123,10 +336,16 @@ MouseArea { // Notification group area
         }
 
         onDragDiffXChanged: () => {
-            root.qmlParent.dragDistance = dragDiffX;
+            if (root.joinsFrame) root.frameDragUpdate(dragDiffX);
+            else root.qmlParent.dragDistance = dragDiffX;
         }
 
         onDragReleased: (diffX, diffY) => {
+            if (root.joinsFrame) {
+                root.frameDragRelease(diffX);
+                dragManager.resetDrag();
+                return;
+            }
             if (Math.abs(diffX) > root.dragConfirmThreshold)
                 root.destroyWithAnimation(diffX < 0);
             else 
@@ -141,18 +360,23 @@ MouseArea { // Notification group area
 
     StyledRectangularShadow {
         target: background
-        visible: popup
+        visible: popup && !root.plateOnFrame
     }
     Rectangle { // Background of the notification
         id: background
         anchors.left: parent.left
         width: parent.width
-        color: popup ? Appearance.colors.colBackgroundSurfaceContainer : Appearance.colors.colLayer2
+        // Stood down while the frame paints the plate: the same silhouette
+        // in the same colour, and a translucent fill drawn twice is darker.
+        color: root.plateOnFrame ? "transparent"
+            : popup ? Appearance.colors.colBackgroundSurfaceContainer : Appearance.colors.colLayer2
         radius: Appearance.rounding.normal
-        anchors.leftMargin: root.xOffset
+        anchors.leftMargin: root.xOffset + root.liftOffset + root.enterOffset
 
         Behavior on anchors.leftMargin {
-            enabled: !dragManager.dragging
+            // Off while the join moves the card: a Behavior whose target
+            // moves every frame restarts every frame and never ticks.
+            enabled: !dragManager.dragging && !cardJoin.moving && !root.entering
             NumberAnimation {
                 duration: Appearance.animation.elementMove.duration
                 easing.type: Appearance.animation.elementMove.type
@@ -181,9 +405,9 @@ MouseArea { // Notification group area
             NotificationAppIcon { // Icons
                 Layout.alignment: Qt.AlignTop
                 Layout.fillWidth: false
-                image: root?.multipleNotifications ? "" : notificationGroup?.notifications[0]?.image ?? ""
-                appIcon: root.notificationGroup?.appIcon
-                summary: root.notificationGroup?.notifications[root.notificationCount - 1]?.summary
+                image: root?.multipleNotifications ? "" : shownGroup?.notifications[0]?.image ?? ""
+                appIcon: root.shownGroup?.appIcon
+                summary: root.shownGroup?.notifications[root.notificationCount - 1]?.summary
                 urgency: root.notifications.some(n => n.urgency === NotificationUrgency.Critical.toString()) ? 
                     NotificationUrgency.Critical : NotificationUrgency.Normal
             }
@@ -191,7 +415,7 @@ MouseArea { // Notification group area
             ColumnLayout { // Content
                 Layout.fillWidth: true
                 spacing: expanded ? (root.multipleNotifications ? 
-                    (notificationGroup?.notifications[root.notificationCount - 1].image != "") ? 35 : 
+                    (shownGroup?.notifications[root.notificationCount - 1].image != "") ? 35 : 
                     5 : 0) : 0
                 // spacing: 00
                 Behavior on spacing {
@@ -209,7 +433,7 @@ MouseArea { // Notification group area
                     RowLayout {
                         id: topTextRow
                         anchors.left: parent.left
-                        anchors.right: expandButton.left
+                        anchors.right: pinButton.left
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: Appearance.spacing.space100
                         StyledText {
@@ -217,8 +441,8 @@ MouseArea { // Notification group area
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                             text: (topRow.showAppName ?
-                                notificationGroup?.appName :
-                                notificationGroup?.notifications[0]?.summary) || ""
+                                shownGroup?.appName :
+                                shownGroup?.notifications[0]?.summary) || ""
                             font.pixelSize: topRow.showAppName ?
                                 topRow.fontSize :
                                 Appearance.font.pixelSize.small
@@ -231,9 +455,45 @@ MouseArea { // Notification group area
                             // Layout.fillWidth: true
                             Layout.rightMargin: Appearance.spacing.space150
                             horizontalAlignment: Text.AlignLeft
-                            text: NotificationUtils.getFriendlyNotifTimeString(notificationGroup?.time)
+                            text: NotificationUtils.getFriendlyNotifTimeString(shownGroup?.time)
                             font.pixelSize: topRow.fontSize
                             color: Appearance.colors.colSubtext
+                        }
+                    }
+                    // Pinned means released and kept (frame-pin-grammar.md):
+                    // the card lifts off the band and stops timing out.
+                    // Unpinning is the dismissal. Only for a popup card; the
+                    // sidebar's list has nothing to pin.
+                    RippleButton {
+                        id: pinButton
+                        visible: root.popup
+                        anchors.right: expandButton.left
+                        anchors.rightMargin: pinButton.visible ? Appearance.spacing.space50 : 0
+                        anchors.verticalCenter: parent.verticalCenter
+                        implicitHeight: expandButton.implicitHeight
+                        implicitWidth: pinButton.visible ? expandButton.implicitHeight : 0
+                        buttonRadius: Appearance.rounding.full
+                        colBackground: root.pinned ? Appearance.colors.colPrimaryContainer
+                            : ColorUtils.mix(Appearance.colors.colLayer2, Appearance.colors.colLayer2Hover, 0.5)
+                        colBackgroundHover: root.pinned ? Appearance.colors.colPrimaryContainerHover : Appearance.colors.colLayer2Hover
+                        colRipple: root.pinned ? Appearance.colors.colPrimaryContainerActive : Appearance.colors.colLayer2Active
+                        onClicked: root.pinned ? root.unpin() : root.pin()
+                        // Sized like the expand button's content: an Item
+                        // the control can measure, the glyph centred in it.
+                        contentItem: Item {
+                            anchors.centerIn: parent
+                            implicitWidth: pinIcon.implicitWidth
+                            implicitHeight: pinIcon.implicitHeight
+                            MaterialSymbol {
+                                id: pinIcon
+                                anchors.centerIn: parent
+                                text: "keep"
+                                iconSize: Appearance.font.pixelSize.normal
+                                color: root.pinned ? Appearance.colors.colOnPrimaryContainer : Appearance.colors.colOnLayer2
+                            }
+                        }
+                        StyledToolTip {
+                            text: root.pinned ? Translation.tr("Unpin") : Translation.tr("Pin: keep it here")
                         }
                     }
                     NotificationGroupExpandButton {

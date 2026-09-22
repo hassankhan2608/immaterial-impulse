@@ -177,17 +177,19 @@ Item {
     property var pages: {
         let list = [
             { name: Translation.tr("Quick"), id: "quick", icon: "instant_mix", component: Qt.resolvedUrl("pages/QuickConfig.qml"), sections: [Translation.tr("Wallpaper & Colors"), Translation.tr("Bar & Screen")], searchTerms: [Translation.tr("Shell opacity"), Translation.tr("Transparency")] },
-            { name: Translation.tr("Appearance"), id: "appearance", icon: "palette", component: Qt.resolvedUrl("pages/AppearanceConfig.qml"), sections: [Translation.tr("Icon pack"), Translation.tr("Motion"), Translation.tr("Fonts"), Translation.tr("Terminal"), Translation.tr("Color generation")] },
+            { name: Translation.tr("Appearance"), id: "appearance", icon: "palette", component: Qt.resolvedUrl("pages/AppearanceConfig.qml"), sections: [Translation.tr("Icon pack"), Translation.tr("Frame"), Translation.tr("Motion"), Translation.tr("Fonts"), Translation.tr("Terminal"), Translation.tr("Color generation")], searchTerms: [Translation.tr("Floating dock"), Translation.tr("Attached dock")] },
             { name: Translation.tr("Cursor"), id: "cursor", icon: "arrow_selector_tool", component: Qt.resolvedUrl("pages/CursorConfig.qml"), sections: [Translation.tr("Pointer"), Translation.tr("Pointer behavior")] },
             { name: Translation.tr("Wallpaper & Desktop"), id: "wallpaper-desktop", icon: "texture", component: Qt.resolvedUrl("pages/BackgroundConfig.qml"), sections: [Translation.tr("Wallpaper"), Translation.tr("Wallpaper selector")], searchTerms: [Translation.tr("Parallax"), Translation.tr("Depth"), Translation.tr("Centered wallpaper")] },
             { name: Translation.tr("Bar & Dock"), id: "bar-dock", icon: "toast", iconRotation: 180, component: Qt.resolvedUrl("pages/BarConfig.qml"), sections: [Translation.tr("Screens"), Translation.tr("Bar layout"), Translation.tr("Positioning & Styles"), Translation.tr("Privacy"), Translation.tr("Tray"), Translation.tr("Divider"), Translation.tr("Utility buttons"), Translation.tr("Workspaces"), Translation.tr("Resources"), Translation.tr("Media"), Translation.tr("Tooltips"), Translation.tr("Dock")], searchTerms: [Translation.tr("Show bar on"), Translation.tr("Buttons & Media"), Translation.tr("Center")] },
             { name: Translation.tr("Sidebars & Panels"), id: "sidebars-panels", icon: "side_navigation", component: Qt.resolvedUrl("pages/SidebarsPanelsConfig.qml"), sections: [Translation.tr("Left Sidebar"), Translation.tr("Right Sidebar"), Translation.tr("Overview"), Translation.tr("Overlay"), Translation.tr("On-screen display"), Translation.tr("Drop shelf")], searchTerms: [Translation.tr("Quick toggles"), Translation.tr("Sliders"), Translation.tr("Corner open"), Translation.tr("Default Settings"), Translation.tr("Floating Image"), Translation.tr("Crosshair")] },
+                        { name: Translation.tr("Modes & Routines"), id: "modes", icon: "tune", component: Qt.resolvedUrl("pages/ModesConfig.qml"), sections: [Translation.tr("General"), Translation.tr("Where the active mode shows"), Translation.tr("Automatic ends"), Translation.tr("Game detection"), Translation.tr("Data")], searchTerms: [Translation.tr("Presets"), Translation.tr("When a mode starts or ends"), Translation.tr("Always a game"), Translation.tr("Activity"), Translation.tr("Where it lives")] },
+            { name: Translation.tr("Accounts"), id: "accounts", icon: "account_circle", component: Qt.resolvedUrl("pages/AccountsConfig.qml"), sections: [Translation.tr("Google"), Translation.tr("Proton"), Translation.tr("Calendar feeds")], searchTerms: [Translation.tr("Sign in"), Translation.tr("What the shell reads"), Translation.tr("VPN"), Translation.tr("Calendar, Mail and Pass"), Translation.tr("ICS links")] },
             { name: Translation.tr("Notifications"), id: "notifications", icon: "notifications", component: Qt.resolvedUrl("pages/NotificationsConfig.qml"), sections: [Translation.tr("Notifications")] },
             { name: Translation.tr("Lock & Idle"), id: "lock-idle", icon: "lock", component: Qt.resolvedUrl("pages/LockIdleConfig.qml"), sections: [Translation.tr("Lock screen"), Translation.tr("Keep awake"), Translation.tr("Screensaver"), Translation.tr("Work safety")], searchTerms: [Translation.tr("Security"), Translation.tr("Style: General"), Translation.tr("Style: Blurred")] },
             { name: Translation.tr("Capture"), id: "capture", icon: "screen_record", component: Qt.resolvedUrl("pages/CaptureConfig.qml"), sections: [Translation.tr("Screen recorder"), Translation.tr("Screenshot popup"), Translation.tr("Region selector (screen snipping/Google Lens)"), Translation.tr("Save paths")], searchTerms: [Translation.tr("Instant replay"), Translation.tr("Hint target regions"), Translation.tr("Google Lens"), Translation.tr("Rectangular selection"), Translation.tr("Circle selection")] },
             { name: Translation.tr("General"), id: "general", icon: "browse", component: Qt.resolvedUrl("pages/GeneralConfig.qml"), sections: [Translation.tr("Time"), Translation.tr("Battery"), Translation.tr("Audio"), Translation.tr("Sounds"), Translation.tr("Cheatsheet"), Translation.tr("Developer"), Translation.tr("Language")] },
             { name: Translation.tr("Devices & Phone"), id: "devices-phone", icon: "smartphone", component: Qt.resolvedUrl("pages/PhoneConfig.qml"), sections: [Translation.tr("Phone panel"), Translation.tr("Contacts"), Translation.tr("Screen mirroring")], searchTerms: [Translation.tr("Connection"), Translation.tr("Mirror options"), Translation.tr("App Mode")] },
-            { name: Translation.tr("Services"), id: "services", icon: "cloud", component: Qt.resolvedUrl("pages/ServicesConfig.qml"), sections: [Translation.tr("AI"), Translation.tr("Networking"), Translation.tr("Music Recognition"), Translation.tr("Search"), Translation.tr("System updates (Arch only)"), Translation.tr("Clight"), Translation.tr("Weather")], searchTerms: [Translation.tr("Custom OpenAI-compatible Providers"), Translation.tr("Phone Connect"), Translation.tr("Prefixes"), Translation.tr("File search"), Translation.tr("Web search")] },
+            { name: Translation.tr("Services"), id: "services", icon: "cloud", component: Qt.resolvedUrl("pages/ServicesConfig.qml"), sections: [Translation.tr("AI"), Translation.tr("Networking"), Translation.tr("Music Recognition"), Translation.tr("Search"), Translation.tr("System updates (Arch only)"), Translation.tr("Clight"), Translation.tr("Weather")], searchTerms: [Translation.tr("Custom OpenAI-compatible Providers"), Translation.tr("Folders the assistant may read"), Translation.tr("Documents"), Translation.tr("Dictation"), Translation.tr("Phone Connect"), Translation.tr("Prefixes"), Translation.tr("Inline answers"), Translation.tr("File search"), Translation.tr("Web search")] },
             { name: Translation.tr("Widgets"), id: "widgets", icon: "widgets", component: Qt.resolvedUrl("pages/PluginsPage.qml"), sections: [Translation.tr("Placement & canvas"), Translation.tr("Widget settings"), Translation.tr("Available Widgets")], searchTerms: [Translation.tr("Show widgets on"), Translation.tr("Canvas")] },
             { name: Translation.tr("Hyprland"), id: "hyprland", icon: "select_window_2", component: Qt.resolvedUrl("pages/HyprlandConfig.qml"), sections: [Translation.tr("Displays"), Translation.tr("Layout"), Translation.tr("Input"), Translation.tr("Keybinds"), Translation.tr("Visual & Aesthetics"), Translation.tr("Blur"), Translation.tr("Autostart Apps"), Translation.tr("Animations")], searchTerms: [Translation.tr("Keyboard"), Translation.tr("Touchpad"), Translation.tr("Add a shortcut")] },
             { name: Translation.tr("About"), id: "about", icon: "info", component: Qt.resolvedUrl("pages/About.qml"), sections: [] }
@@ -371,22 +373,12 @@ Item {
                     }
                 }
 
-                RippleButton {
+                IconButton {
                     visible: root.navigationQuery.length > 0
-                    implicitWidth: 32
-                    implicitHeight: 32
-                    buttonRadius: Appearance.rounding.full
-                    colBackground: "transparent"
+                    buttonIcon: "close"
+                    buttonSize: 32
                     colRipple: Appearance.colors.colLayer2Active
                     onClicked: settingsSearchField.text = ""
-                    contentItem: MaterialSymbol {
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        anchors.centerIn: parent
-                        text: "close"
-                        iconSize: Appearance.font.pixelSize.large
-                        color: Appearance.colors.colOnLayer1
-                    }
                 }
             }
         }
@@ -520,43 +512,31 @@ Item {
                         opacity: 0.15
                     }
 
-                    RippleButton {
+                    RippleButtonWithIcon {
                         id: fab
                         Layout.fillWidth: true
                         implicitHeight: 42
                         property bool justCopied: false
-                        buttonText: justCopied ? Translation.tr("Path copied") : Translation.tr("Config file")
+                        buttonText: justCopied ? Translation.tr("Path copied") : Translation.tr("Config folder")
                         buttonRadius: Appearance.rounding.full
                         colBackground: Appearance.colors.colSecondaryContainer
                         colBackgroundHover: Appearance.colors.colSecondaryContainerHover
                         colRipple: Appearance.colors.colSecondaryContainerActive
+                        materialIcon: fab.justCopied ? "check" : "edit"
+                        materialIconFill: false
+                        // The label goes with the rail; the glyph stays, so the
+                        // collapsed rail shows a square icon button.
+                        mainText: navRail.expanded ? fab.buttonText : ""
+                        // The folder, not config.json: appearance lives in
+                        // config.d/appearance.json since the config split, so
+                        // a hand edit has two files to choose from.
                         downAction: () => {
-                            Qt.openUrlExternally(`${Directories.config}/immaterial-impulse/config.json`);
+                            Qt.openUrlExternally(`${Directories.config}/immaterial-impulse`);
                         }
                         altAction: () => {
-                            Quickshell.clipboardText = CF.FileUtils.trimFileProtocol(`${Directories.config}/immaterial-impulse/config.json`);
+                            Quickshell.clipboardText = CF.FileUtils.trimFileProtocol(`${Directories.config}/immaterial-impulse`);
                             fab.justCopied = true;
                             revertTextTimer.restart()
-                        }
-                        contentItem: RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: Appearance.spacing.space150
-                            anchors.rightMargin: Appearance.spacing.space150
-                            spacing: Appearance.spacing.space100
-
-                            MaterialSymbol {
-                                text: fab.justCopied ? "check" : "edit"
-                                iconSize: Appearance.font.pixelSize.larger
-                                color: Appearance.colors.colOnSecondaryContainer
-                            }
-                            StyledText {
-                                Layout.fillWidth: true
-                                visible: navRail.expanded
-                                text: fab.buttonText
-                                color: Appearance.colors.colOnSecondaryContainer
-                                font.pixelSize: Appearance.font.pixelSize.small
-                                elide: Text.ElideRight
-                            }
                         }
                         Timer {
                             id: revertTextTimer

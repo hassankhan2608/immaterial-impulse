@@ -84,33 +84,14 @@ Scope {
 
         // Hyprland draws no server-side decorations, so the window carries its
         // own close affordance.
-        RippleButton {
+        CloseButton {
             id: closeButton
             anchors {
                 top: parent.top
                 right: parent.right
                 margins: Appearance.spacing.space150
             }
-            implicitWidth: 32
-            implicitHeight: 32
-            buttonRadius: Appearance.rounding.full
-            colBackground: "transparent"
-            colBackgroundHover: Appearance.colors.colLayer1Hover
-            colRipple: Appearance.colors.colLayer1Active
             onClicked: GlobalStates.settingsOpen = false
-
-            contentItem: MaterialSymbol {
-                verticalAlignment: Text.AlignVCenter
-                anchors.centerIn: parent
-                horizontalAlignment: Text.AlignHCenter
-                text: "close"
-                iconSize: Appearance.font.pixelSize.larger
-                color: Appearance.colors.colOnLayer0
-            }
-
-            StyledToolTip {
-                text: Translation.tr("Close")
-            }
         }
     }
 
@@ -119,6 +100,28 @@ Scope {
         function toggle(): void { GlobalStates.settingsOpen = !GlobalStates.settingsOpen; }
         function open(): void   { GlobalStates.settingsOpen = true; }
         function close(): void  { GlobalStates.settingsOpen = false; }
+        // Open on a page, optionally at a section: "appearance", or
+        // "appearance:Frame" - the same "<page id>[:<section>]" the launcher's
+        // settings results and the desktop menu hand GlobalStates.settingsPage.
+        // The id is resolved against the catalogue first (test_settings_page_ids
+        // wants every link built from a page's `id`), so a typo is a log line
+        // here rather than the window silently opening on whatever page was
+        // last shown.
+        //   qs -c imi ipc call settings page "appearance:Frame"
+        function page(target: string): void {
+            const parts = String(target).split(":");
+            const entry = settingsContent.pages.find(p => p.id === parts[0]);
+            if (!entry) {
+                console.warn(`[Settings] ipc page: no page with id "${parts[0]}" (ids: ${settingsContent.pages.map(p => p.id).join(", ")})`);
+                return;
+            }
+            const section = parts.length > 1 ? ":" + parts.slice(1).join(":") : "";
+            // Open first, then the page on the next tick - the launcher's
+            // order: the content consumes settingsPage once it is up, and a
+            // section jump needs the page laid out to have somewhere to go.
+            GlobalStates.settingsOpen = true;
+            Qt.callLater(() => { GlobalStates.settingsPage = entry.id + section; });
+        }
     }
 
     GlobalShortcut {

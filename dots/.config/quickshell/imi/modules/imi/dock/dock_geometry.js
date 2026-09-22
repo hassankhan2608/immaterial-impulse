@@ -170,6 +170,366 @@ function popupAnchorSides(edge) {
     return { edges: [inwardSide(e), axisStart], gravity: [inwardSide(e), axisEnd] };
 }
 
+// How far the whole dock surface moves in from the screen edge in frame mode
+// (services/FrameGeometry.qml). The pill sits `gapsOut` inside its surface;
+// the frame's band owns that gap. The surface sits where the ATTACHED tab
+// needs it: in by band minus gap (nothing at all when the band is the gap,
+// which it is by default; a little OUT when the band is thinner than the
+// gap - a negative layer-shell margin, the same device the dead-pixel
+// workaround uses). Floating is not a second surface position: the pill
+// lifts inside the surface by `splitTravel`, so the attached <-> floating
+// switch never reconfigures the surface and can be drawn as a motion
+// (docs/proposals/motion-split.md §6). The compositor adds a margin on the
+// anchored edge to the exclusive zone on its own, so the reservation follows
+// without a second number. Outside frame mode the dock is where it always was.
+function frameOffset(frameOn, band, gapsOut) {
+    if (!frameOn) return 0;
+    var b = Number(band) || 0;
+    var g = Number(gapsOut) || 0;
+    return b - g;
+}
+
+// ---- the split (docs/proposals/motion-split.md §6) -------------------------
+//
+// The band is the island and the pill is the child. Attached is the joined
+// state (the tab fused with the band), floating is the apart state (a gap
+// above it), and the pill is the one body that travels: it lifts off the band
+// by the compositor's gap - that IS the distance between "on the band" and "a
+// gap above it", whatever the band's thickness - and sinks back onto it. One
+// scalar drives a direction (Appearance.animation.split), 0 fused, 1 apart;
+// everything below is arithmetic on that scalar, kept here so
+// tests/tst_dock_geometry.qml can pin it.
+
+// The lift: the gap, while the frame is on and the dock reserves its edge. An
+// unpinned dock never reserves and never lifts - its hover sliver has to stay
+// AT the screen edge (Dock.qml) - so at the default band it takes the look
+// change alone.
+function splitTravel(frameOn, reserves, gapsOut) {
+    if (!frameOn || !reserves) return 0;
+    return Number(gapsOut) || 0;
+}
+
+// What the dock reserves beyond the attached zone: the lift, while the pill
+// is up OR asked to go up. The surface no longer moves for the switch, so
+// the zone is what keeps windows a gap away from a floating pill, and it
+// reserves the UNION of where the pill is and where it is going: it steps at
+// the start of a lift (windows move away, the pill lifts into the space)
+// and at the end of a landing (the pill lands, then the windows follow it
+// in). Stepping at the start of a landing put the windows against the
+// still-floating pill for the length of the motion. Two steps per gesture at
+// most - a boolean that flips, never a per-frame write - and tiled windows
+// travel on the compositor's own animation.
+function splitZoneExtra(travel, apartTarget, progress) {
+    var t = Number(travel) || 0;
+    if (t <= 0) return 0;
+    return (apartTarget || (Number(progress) || 0) > 0) ? t : 0;
+}
+
+// The pill lifts into its own inward elevation margin. A gap bigger than that
+// margin would lift the pill out of its surface, so the dock grows across
+// its axis by exactly the shortfall - nothing at the defaults (gap 5,
+// elevation 10).
+function splitRoom(gapsOut, elevationMargin) {
+    var g = Number(gapsOut) || 0;
+    var e = Number(elevationMargin) || 0;
+    return Math.max(0, g - e);
+}
+
+// The pill's margin pair with a lift applied: outward grows by the lift,
+// inward shrinks by it (and carries the room), so the sum is the box's
+// thickness whatever the scalar says. `rest` is `margins()`'s answer.
+//
+// `press` is the water (`splitPress`): a squash takes it off the INWARD side,
+// so the pill flattens against the band it is resting on rather than sinking
+// through it, and a stretch adds to the inward side, so the drop elongates
+// toward the surface it is leaving. Either way the outward side - where the
+// pill meets the band - stays put, which is what keeps the neck's field and
+// the pill's own edge agreeing about where the join is.
+function liftedMargins(edge, rest, room, lift, press) {
+    var e = normalizedEdge(edge);
+    var p = Number(press) || 0;
+    var inward = (Number(rest[inwardSide(e)]) || 0) + (Number(room) || 0) - (Number(lift) || 0)
+        + Math.max(0, -p) - Math.max(0, p);
+    var outward = (Number(rest[outwardSide(e)]) || 0) + (Number(lift) || 0);
+    return directedSides(e, inward, outward);
+}
+
+// Where the icons go so they ride the pill: the strip is centred in the
+// dock's box and the pill is not, once it has lifted (or the box has room),
+// so the strip takes the difference as a centre offset along the across
+// axis - inward by the lift, outward by half the room.
+function liftOffset(edge, room, lift) {
+    var along = (Number(room) || 0) / 2 - (Number(lift) || 0);
+    var v = inwardVector(edge);
+    return { x: -v.x * along, y: -v.y * along };
+}
+
+// Which of the pill's corners stay round, as a function of how far apart
+// the pill and the band are: 0 is the fused tab (the outward pair squared -
+// that seam is where the tab grows out of the band, and a rounded seam is a
+// pill resting on a line), 1 is the free pill. The outward pair rounds over
+// the NECK'S span - from `seam`, where the outlines part, to the pinch-off
+// `reach` of the way through the settle - because the rounding is the
+// seam's own shape opening: the neck's flank exposes the corner as it
+// narrows, and a corner still square once exposed hovered over a lit gap
+// (rounding to rest did that). The inward pair never moves. A look with no
+// lift passes seam 0 and reach 1 and rounds over its whole scalar. Clamped:
+// the scalar's curve may leave the unit box, and a negative radius is not a
+// corner.
+function cornerRadiiAt(edge, radius, apart, seam, reach) {
+    var sm = Math.max(0, Math.min(0.999, Number(seam) || 0));
+    var rc = Math.max(0.001, Math.min(1, reach === undefined ? 1 : (Number(reach) || 0)));
+    var a = Math.max(0, Math.min(1, ((Number(apart) || 0) - sm) / ((1 - sm) * rc)));
+    var r = { topLeft: radius, topRight: radius, bottomLeft: radius, bottomRight: radius };
+    var out = outwardSide(edge);
+    var rounded = radius * a;
+    if (out === "bottom") { r.bottomLeft = rounded; r.bottomRight = rounded; }
+    else if (out === "top") { r.topLeft = rounded; r.topRight = rounded; }
+    else if (out === "left") { r.topLeft = rounded; r.bottomLeft = rounded; }
+    else { r.topRight = rounded; r.bottomRight = rounded; }
+    return r;
+}
+
+// The outward corners' span on the scalar when a neck is drawn. The neck's
+// blend is nothing at the pill's ends (it tapers to zero there), so the ends
+// leave the band as soon as the lift outruns the field's reach into it. The
+// pill's field reaches FIELD_REACH - lift below the pill, so its edge climbs
+// at twice the lift; this takes the ends as open once that edge is half a
+// pixel above the band's (lift 1.25 px). It is an approximation of the
+// shader, not its exact threshold: the band's zero-crossing sits a ramp
+// inside the band and the coverage ramp is a device pixel wide, so the ends
+// start to show a little earlier (the frame scan finds one threshold frame
+// with the corner still square), and at a pixel ratio above 1 slightly
+// earlier still. For the default 5 px lift that is a quarter of the way in,
+// before the seam; a corner that waited for the seam sat square over a lit
+// gap for several frames (measured). The span never starts after the seam: for
+// a lift of about 2 px or less the ends are still touching at the seam and
+// the corners start there. It ends at the pinch the neck pinches at. With
+// no travel there is no neck: the whole scalar.
+function cornerSpan(travel, seam, reach) {
+    var t = Number(travel) || 0;
+    if (t <= 0) return { seam: 0, reach: 1 };
+    var sm = Math.max(0, Math.min(0.999, Number(seam) || 0));
+    var rc = Math.max(0.001, Math.min(1, Number(reach) || 0));
+    var pinch = sm + (1 - sm) * rc;
+    var open = Math.min(sm, (FIELD_REACH + 0.5) / 2 / t);
+    return { seam: open, reach: (pinch - open) / (1 - open) };
+}
+
+// The two ends of cornerRadiiAt, for a caller with no scalar.
+function cornerRadii(edge, radius, attached) {
+    return cornerRadiiAt(edge, radius, attached ? 0 : 1, 0, 1);
+}
+
+// The neck's waist on the scalar: the pill's full width up to the seam (the
+// fused outline stretching - the reference's swell), narrowing to nothing at
+// the pinch-off, which sits `reach` of the way through the settle half
+// (Appearance.animation.splitNeckReach, set from the reference's 165 ms of
+// neck in the time domain). Past the pinch there is no neck: the bodies
+// settle APART.
+function neckWaist(width, apart, seam, reach) {
+    var rc = Number(reach) || 0;
+    if (rc <= 0) return 0;
+    var sm = Math.max(0, Math.min(0.999, Number(seam) || 0));
+    var span = (1 - sm) * rc;
+    var t = Math.max(0, Math.min(1, ((Number(apart) || 0) - sm) / span));
+    return (Number(width) || 0) * (1 - t);
+}
+
+// A direction's duration from part way: the tier times the distance left,
+// never under the floor (the effects tier). The source shortens a merge
+// this way (motion-split.md §1, `max(220, 820 * progress)`); here it is
+// both directions, because a Behavior re-targeted
+// mid-flight otherwise takes the whole tier to cover a tenth of the way, and
+// a lift reversed at 1% would be a jump without the floor. Clamped to the
+// unit box: the curve may overshoot, and a distance over 1 is a whole
+// direction.
+function splitDuration(base, floor, from, to) {
+    var b = Number(base) || 0;
+    var f = Number(floor) || 0;
+    var d = Math.min(1, Math.abs((Number(to) || 0) - (Number(from) || 0)));
+    return Math.max(f, Math.round(b * d));
+}
+
+// The blend's radius - the neck as a distance field (motion-split.md §1,
+// §6): the smooth-minimum of the pill's field and the band's, whose radius
+// is what bridges the two. It has to be ZERO at rest, since a blend against
+// a fused tab fillets the tab's sides where the Rectangle that takes over
+// draws none - a pop at the hand-over - and it grows to its full value at
+// the seam, held through the settle where the waist does the narrowing. In
+// LIFTS: a polynomial smooth-minimum bridges a gap of g once its radius
+// passes 2g, and the gap at the seam is half the lift, so four lifts keeps
+// the full waist bridged to the seam with room for the flanks.
+var BLEND_LIFTS = 4;
+// WATER (motion-split.md §4). The spring's scalar is 0 fused, 1 apart, and
+// it overshoots both ends; what lies outside [0, 1] is the liquid.
+//
+// Below 0 the drop has flattened INTO the surface: there is no lift to give,
+// so the excursion becomes a squash across the pill's thickness. Above 1 it
+// is still pulling away from a surface that has not let go: a stretch. Both
+// are a FRACTION of the excursion, not the whole of it - a pill squashed by
+// the spring's full first undershoot lost a third of its thickness, which
+// reads as a dropped frame rather than water.
+var PRESS_SHARE = 0.55;
+// Where surface tension goes, as a share of the travel: the neck bridges the
+// gap up to here and is gone past it. The event the eye reads is this
+// distance, not a time, which is why nothing below takes a progress.
+var PINCH_SHARE = 0.55;
+// The meniscus: the blend the field keeps while the pill is AT REST on the
+// band, so the tab's sides flare into it instead of meeting it at a right
+// angle. Water never makes that angle, and a square join was the first thing
+// a user called out about the attached look.
+// Measured against a flat light wallpaper with the field tinted: a blend of
+// 25 flares the pill's base nine pixels each side over fourteen of height,
+// so the flare runs about k/2.8. Fourteen gives five pixels, which reads as
+// a drop sitting in its own contact ring without looking like a puddle.
+var MENISCUS = 14;
+// How wide the blend's taper is, as a multiple of the pill's length. The
+// taper exists so a stretching neck narrows to a bridge at the middle - but
+// the blend it scales is ALSO the meniscus at rest, and a taper the pill's
+// own width puts the flare where the two are already fused and NOTHING at
+// the pill's ends, which is the only place a flare can be seen. Wider than
+// the pill at rest, narrower than it by the pinch: the flare is flat across
+// the base while fused, and a bridge by the time it lets go.
+var WAIST_REST = 2.5;
+// The field's coverage ramp, in pixels either side of the outline: a
+// Rectangle's own antialiasing is about a pixel wide, and the hand-over
+// between the two must not change the edge.
+var BLEND_SOFTNESS = 0.75;
+function neckBlend(travel, apart, seam) {
+    var t = Number(travel) || 0;
+    if (t <= 0) return 0;
+    var sm = Math.max(0.001, Number(seam) || 0);
+    var rise = Math.max(0, Math.min(1, (Number(apart) || 0) / sm));
+    return BLEND_LIFTS * t * rise;
+}
+
+// --- water -----------------------------------------------------------------
+
+// The pill's lift, in pixels, from the spring's scalar: the travel it has
+// covered, and never less than nothing (the surface is where the lift stops;
+// the rest of an undershoot is `splitPress` below).
+function splitLift(travel, progress) {
+    var t = Number(travel) || 0;
+    return Math.max(0, t * (Number(progress) || 0));
+}
+
+// The press: what the spring asked for beyond either end, as pixels across
+// the pill's thickness. NEGATIVE squashes (the drop flattened into the
+// surface), POSITIVE stretches (it is still pulling away). Zero in between,
+// which is all of a gesture that does not overshoot.
+function splitPress(travel, progress) {
+    var t = Number(travel) || 0;
+    var p = Number(progress) || 0;
+    if (t <= 0) return 0;
+    if (p < 0) return -PRESS_SHARE * t * -p;
+    if (p > 1) return PRESS_SHARE * t * (p - 1);
+    return 0;
+}
+
+// Where surface tension goes: the gap, in pixels, at which the neck lets go.
+function pinchGap(travel) {
+    return PINCH_SHARE * (Number(travel) || 0);
+}
+
+// The neck's waist at a GAP: the pill's whole width while they are fused,
+// thinning as the gap opens and gone at the pinch. Cubed, so the bridge
+// holds nearly its width through most of the stretch and then goes quickly -
+// which is what surface tension looks like, and what makes the break an
+// event rather than a fade.
+function neckWaistAtGap(width, gap, pinch) {
+    var w = Number(width) || 0;
+    var pn = Number(pinch) || 0;
+    if (w <= 0 || pn <= 0) return 0;
+    var u = Math.max(0, Math.min(1, (Number(gap) || 0) / pn));
+    return w * WAIST_REST * (1 - u);
+}
+
+// The blend radius at a GAP: enough to bridge it (a polynomial
+// smooth-minimum needs about twice the gap), plus the meniscus it keeps at
+// rest, and nothing at all past the pinch.
+function neckBlendAtGap(gap, pinch, meniscus) {
+    var g = Math.max(0, Number(gap) || 0);
+    var pn = Number(pinch) || 0;
+    var rest = meniscus === undefined ? MENISCUS : (Number(meniscus) || 0);
+    if (pn <= 0) return 0;
+    if (g > pn) return 0;
+    return rest + BLEND_LIFTS * g;
+}
+
+// How round the pill's outward corners are at a GAP: square while anything
+// still bridges them, rounding over what is left of the travel once the neck
+// has gone. A corner that rounds while the neck is still attached rounds
+// against a fillet the blend is already drawing.
+function cornerRoundAtGap(gap, pinch, travel) {
+    var t = Number(travel) || 0;
+    var pn = Number(pinch) || 0;
+    var g = Math.max(0, Number(gap) || 0);
+    if (t <= 0) return 1;
+    if (g <= pn) return 0;
+    if (t <= pn) return 1;
+    return Math.max(0, Math.min(1, (g - pn) / (t - pn)));
+}
+
+// How far the pill's FIELD reaches into the band: FIELD_REACH less the
+// lift. The blend is nothing at rest, so for the first pixels of a lift it
+// cannot bridge even the sub-pixel gap the coverage ramp exposes as a
+// hairline (measured: a 51 on a 21 body along the whole seam); the reach
+// keeps the union seamless until the blend is big enough to take over, and
+// is gone by then, so past the pinch the field's pill is the Rectangle's.
+// Two pixels: the band's field edge sits one ramp inside the band (the
+// shader), so a pixel of reach alone left the first frames a ramp short. A
+// scalar, extended in the shader, so nothing is built per frame.
+var FIELD_REACH = 2;
+function fieldReach(lift) {
+    return Math.max(0, FIELD_REACH - (Number(lift) || 0));
+}
+
+// The shader's box, from the pill's: the pill, the lift down to the band
+// (the pill's REST outward edge, since the pill moved and the band did not),
+// and `pad` along the band at both ends. The pad is the meniscus: a flare
+// spreads OUTWARD from the pill's ends, and a box the pill's own width drew
+// it outside the item, where nothing is rasterised - measured, a pill whose
+// width never changed within a pixel while the blend was 25. It used to be
+// right that nothing was needed there, when the waist never outgrew the
+// pill.
+// Boxed, never anchored. `bandEdge` is the band's inner edge in the box's
+// own frame along the across axis, and `normal` points INTO the band, so the
+// shader's field for the band is one half-plane.
+function blendBox(edge, pill, lift, pad) {
+    var e = normalizedEdge(edge);
+    var l = Number(lift) || 0;
+    var p = Math.max(0, Number(pad) || 0);
+    if (isVertical(e)) {
+        var box = { x: pill.x, y: pill.y - p, width: pill.width + l, height: pill.height + p * 2 };
+        if (e === "left") { box.x = pill.x - l; box.bandEdge = 0; box.normal = { x: -1, y: 0 }; }
+        else { box.bandEdge = pill.width + l; box.normal = { x: 1, y: 0 }; }
+        return box;
+    }
+    var box = { x: pill.x - p, y: pill.y, width: pill.width + p * 2, height: pill.height + l };
+    if (e === "top") { box.y = pill.y - l; box.bandEdge = 0; box.normal = { x: 0, y: -1 }; }
+    else { box.bandEdge = pill.height + l; box.normal = { x: 0, y: 1 }; }
+    return box;
+}
+
+// How much room the flare needs past the pill's ends: the meniscus it keeps
+// at rest, and the reach the field already adds.
+function blendPad() {
+    return MENISCUS + FIELD_REACH;
+}
+
+// The shader's box for a whole motion, from the dock's box and the REST
+// margins: the pill at full lift through `blendBox`. Nothing in it moves
+// while the scalar does, so the item holds still and only its uniforms
+// change per frame; a box built from the moving pill moved the item and
+// rebuilt two objects every frame.
+function splitBox(edge, width, height, rest, room, travel) {
+    var m = liftedMargins(edge, rest, room, travel);
+    var w = Number(width) || 0, h = Number(height) || 0;
+    var full = { x: m.left, y: m.top, width: w - m.left - m.right, height: h - m.top - m.bottom };
+    return blendBox(edge, full, travel, blendPad());
+}
+
 // The direction a dock icon lifts on hover and bounces on launch: inward, so
 // the icon rises out of the dock rather than into the screen edge. One vector
 // instead of four call sites each choosing an axis and a sign.
@@ -198,6 +558,23 @@ function barEdge(barVertical, barBottom) {
 
 // The sign the reveal travels in: a bottom dock hides DOWNWARD (positive y),
 // a top dock upward. Callers animate one number and multiply.
+// Where the dock's SURFACE sits on its screen, from what the compositor was
+// asked for: anchored along its edge, its outward layer-shell margin from
+// that edge (frameOffset, which may be negative), spanning the other axis
+// from 0. The frame surface needs the plate in screen coordinates to draw it
+// (frame-one-surface.md, stage 2), and a layer surface knows nothing of its
+// own position - this is the arithmetic that stands in for it. Measured
+// against `hyprctl layers`: a bottom dock 75 tall with a -3 margin on a
+// 1440-tall screen is at y 1368.
+function surfaceOrigin(edge, screenWidth, screenHeight, surfaceWidth, surfaceHeight, outwardMargin) {
+    var e = normalizedEdge(edge);
+    var m = Number(outwardMargin) || 0;
+    if (e === "top") return { x: 0, y: m };
+    if (e === "bottom") return { x: 0, y: (Number(screenHeight) || 0) - (Number(surfaceHeight) || 0) - m };
+    if (e === "left") return { x: m, y: 0 };
+    return { x: (Number(screenWidth) || 0) - (Number(surfaceWidth) || 0) - m, y: 0 };
+}
+
 function hideDirection(edge) {
     var e = normalizedEdge(edge);
     if (e === "bottom" || e === "right") return 1;

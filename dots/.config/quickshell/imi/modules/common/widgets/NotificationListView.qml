@@ -11,6 +11,25 @@ StyledListView { // Scrollable window
     property bool popup: false
     // See NotificationGroup. Handed to every card this view builds.
     property NotificationController controller: NotificationController {}
+    // The frame's band this list's cards fuse to ("left" / "right", empty for
+    // none) and the screen they are on, both from the host: a card publishes
+    // its plate for the frame under the screen's name, and slides INTO the
+    // band on its way out (frame-pin-grammar.md, slice 3).
+    property string frameEdge: ""
+    property string screenName: ""
+    removeToLeft: root.frameEdge === "left"
+    // A card fusing to a band arrives by emerging from it (NotificationGroup
+    // `emergeFromBand`), not by the list's pop-in, which scaled the frame's
+    // plate from its centre.
+    add: Transition {
+        animations: (root.frameEdge === "" && root.animateAppearance) ? [
+            Appearance?.animation.elementMove.numberAnimation.createObject(this, {
+                properties: root.popin ? "opacity,scale" : "opacity",
+                from: 0,
+                to: 1,
+            }),
+        ] : []
+    }
 
     spacing: Appearance.spacing.space50
 
@@ -52,6 +71,17 @@ StyledListView { // Scrollable window
     // Recomputed on membership changes only: a Region tracks its item's
     // geometry itself, so cards resizing or sliding need no rebuild.
     property var cardItems: []
+    // The delegate showing a notification, for a host that has to take it
+    // out before the model does (a timed-out card sliding into the band).
+    function cardFor(id): var {
+        const children = root.contentItem?.children ?? [];
+        for (let i = 0; i < children.length; i++) {
+            const card = children[i];
+            if (card?.notifications?.some(n => n.notificationId === id))
+                return card;
+        }
+        return null;
+    }
 
     function refreshCardItems(): void {
         let items = [];

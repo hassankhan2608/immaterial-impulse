@@ -5,6 +5,7 @@ import qs.modules.common.functions
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "updates_outcome.js" as UpdatesOutcome
 
 /*
  * System updates service. Currently only supports Arch.
@@ -24,6 +25,45 @@ Singleton {
         if (!available) return;
         print("[Updates] Checking for system updates")
         checkUpdatesProc.running = true;
+    }
+
+    // The bar widget's two gestures, moved here so the widget is a view:
+    // a manual check with a notification, and the upgrade run in a terminal
+    // followed by the outcome notification 5 s after it exits (the count
+    // needs that long to be re-read).
+    function checkNow() {
+        root.refresh();
+        Quickshell.execDetached(["notify-send", Translation.tr("Updates"), Translation.tr("Checking for updates..."), "-a", "Shell"]);
+    }
+    function runUpgrade() {
+        if (upgradeProc.running) return;
+        upgradeProc.running = true;
+    }
+    // The outcome notification for the count read after an upgrade run:
+    // decided by updates_outcome.js (tests/tst_updates_outcome.qml drives
+    // it), worded here. The two commands are the bar widget's old ones
+    // byte for byte: "up to date" carried no urgency flag, "cancelled"
+    // carried `-u normal`.
+    function outcomeCommand(countAfter) {
+        const body = UpdatesOutcome.outcome(countAfter).upToDate
+            ? Translation.tr("System up to date")
+            : Translation.tr("Update cancelled — %1 updates still pending").arg(countAfter);
+        return UpdatesOutcome.command(countAfter, Translation.tr("Updates"), body);
+    }
+
+    Process {
+        id: upgradeProc
+        command: ["kitty", "--hold", "fish", "-i", "-l", "-c", "yay -Syu --combinedupgrade=false"]
+        onExited: (exitCode, exitStatus) => {
+            root.refresh();
+            outcomeTimer.restart();
+        }
+    }
+    Timer {
+        id: outcomeTimer
+        interval: 5000
+        repeat: false
+        onTriggered: Quickshell.execDetached(root.outcomeCommand(root.count))
     }
 
     Timer {

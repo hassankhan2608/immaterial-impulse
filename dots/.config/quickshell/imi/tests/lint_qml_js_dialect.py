@@ -48,7 +48,29 @@ BANNED = (
         re.compile(r"\bcatch\s*\{"),
         "name the error (catch (e) {}), even when it goes unused",
     ),
+    (
+        "String trimEnd/trimStart",
+        re.compile(r"\.trim(?:End|Start)\s*\("),
+        "QV4 has no trimEnd/trimStart (AiInline's cut answer threw 'Property trimEnd of object ... is not a function'); use .replace(/\\s+$/, '') or .replace(/^\\s+/, '')",
+    ),
+    (
+        "reserved word as a name",
+        re.compile(r"\b(?:const|let|var|function)\s+(?:long|short|byte|char|int|float|double|boolean|native|synchronized|transient|volatile|final|abstract|goto|enum|package|interface|implements|private|protected|public|static)\b"),
+        "CI's older Qt still reserves Java's old future-reserved words (tst_ai_tool_policy's `const long` failed there with \"Expected token `identifier'\"); pick another name",
+    ),
+    (
+        "String replaceAll",
+        re.compile(r"\.replaceAll\s*\("),
+        "QV4 has no replaceAll; use .split(a).join(b) or a /g regex",
+    ),
 )
+
+
+# Third-party files kept verbatim so they can be updated by copy; their
+# dialect is their author's. Each is a file CI never compiles on its own.
+VENDORED = {
+    "modules/common/functions/fuzzysort.js",  # `var char`; loaded by LauncherSearch only
+}
 
 
 def strip_literals(source: str) -> str:
@@ -101,6 +123,8 @@ def main() -> int:
             continue
         for path in sorted(base.rglob("*")):
             if path.suffix not in SUFFIXES or not path.is_file() or path.is_symlink():
+                continue
+            if path.relative_to(ROOT).as_posix() in VENDORED:
                 continue
             source = strip_literals(path.read_text(encoding="utf-8", errors="replace"))
             for line_no, line in enumerate(source.splitlines(), start=1):

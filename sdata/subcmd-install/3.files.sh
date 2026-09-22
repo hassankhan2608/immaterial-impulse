@@ -50,7 +50,10 @@ function restore_icon_theme(){
   # gsettings only at selection time). Re-apply the stored selection after
   # every sync so an update never resets the icon theme. Best-effort: a theme
   # that is no longer installed just leaves the shipped default in place.
-  local config="${XDG_CONFIG_HOME}/immaterial-impulse/config.json"
+  # appearance.* lives in config.d/appearance.json since the config split
+  # (stage 1); config.json is read only while that file does not exist yet.
+  local config="${XDG_CONFIG_HOME}/immaterial-impulse/config.d/appearance.json"
+  [[ -f "$config" ]] || config="${XDG_CONFIG_HOME}/immaterial-impulse/config.json"
   local script="${XDG_CONFIG_HOME}/quickshell/imi/scripts/icons/apply-icon-theme.sh"
   if [[ ! -f "$config" || ! -f "$script" ]]; then return 0; fi
   local theme
@@ -83,6 +86,22 @@ function seed_default_config(){
   x cp "$source" "$target"
   x mkdir -p "$(dirname ${INSTALLED_LISTFILE})"
   realpath -se "$target" >> "${INSTALLED_LISTFILE}"
+  # The per-domain files beside it (config-storage-split, stage 1:
+  # appearance), seeded the same way so a fresh install never has to split
+  # config.json itself and never leaves a pre-split copy behind.
+  local domain_dir="${XDG_CONFIG_HOME}/quickshell/imi/defaults/config.d"
+  if [[ -d "$domain_dir" ]]; then
+    x mkdir -p "$(dirname "$target")/config.d"
+    local f
+    for f in "$domain_dir"/*.json; do
+      [[ -f "$f" ]] || continue
+      local domain_target
+      domain_target="$(dirname "$target")/config.d/$(basename "$f")"
+      if [[ -f "$domain_target" ]]; then continue; fi
+      x cp "$f" "$domain_target"
+      realpath -se "$domain_target" >> "${INSTALLED_LISTFILE}"
+    done
+  fi
 }
 cp_file(){
   # NOTE: This function is only for using in other functions
@@ -166,7 +185,16 @@ function install_file__auto_backup(){
       v cp_file $s $t
     else
       echo -e "${STY_BLUE}[$0]: It seems not a firstrun.${STY_RST}"
-      v cp_file $s $t.new
+      # A `.new` only when the shipped file actually differs: an identical
+      # copy is noise the user has to compare and delete (the yaml step
+      # already checks; this path did not). A stale `.new` left behind by an
+      # earlier update goes with it once the two agree.
+      if cmp -s "$s" "$t"; then
+        echo -e "${STY_BLUE}[$0]: \"$t\" already matches the shipped file; no .new written.${STY_RST}"
+        if [ -f "$t.new" ] && cmp -s "$s" "$t.new"; then v rm -f "$t.new"; fi
+      else
+        v cp_file $s $t.new
+      fi
     fi
   else
     echo -e "${STY_GREEN}[$0]: \"$t\" does not exist yet.${STY_RST}"

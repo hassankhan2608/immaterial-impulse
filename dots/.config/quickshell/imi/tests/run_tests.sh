@@ -572,6 +572,24 @@ if ! python3 "$SCRIPT_DIR/lint_final_properties.py"; then
     exit 1
 fi
 
+# An icon-only RippleButton is IconButton: forty-three hand-rolled copies at
+# eight sizes were folded onto it, and a copy is the kind of thing that
+# regrows one call site at a time.
+echo "Running hand-rolled icon button lint..."
+if ! python3 "$SCRIPT_DIR/lint_hand_rolled_icon_button.py"; then
+    echo "Hand-rolled icon button lint failed."
+    exit 1
+fi
+
+# Static lint: a prose `//` comment is not split by a blank line. An edit
+# helper's stray newline did it twice in one branch (once as a parse error
+# that failed the whole shell's load); the second time became this check.
+echo "Running comment run lint..."
+if ! python3 "$SCRIPT_DIR/lint_comment_runs.py"; then
+    echo "Comment run lint failed."
+    exit 1
+fi
+
 # Static lint: a ConfigSwitch click is an intent. Assigning to `checked` - in
 # the widget or at a call site - destroys the binding every settings page hangs
 # on it, and the switch silently detaches from the config it is showing.
@@ -1056,6 +1074,47 @@ if ! python3 "$SCRIPT_DIR/test_launcher_result_inputs.py"; then
     exit 1
 fi
 
+# The assistant in the overview: an Ask row under `@` (and, opt-in, as the
+# last row for a long unmatched query), only while the selected model is
+# usable, and nothing sent before Enter. docs/proposals/ai-in-overview.md.
+echo "Running config split contract..."
+if ! python3 "$SCRIPT_DIR/test_config_split_contract.py"; then
+    echo "Config split contract failed."
+    exit 1
+fi
+
+echo "Running GlobalStates import lint..."
+if ! python3 "$SCRIPT_DIR/lint_globalstates_import.py"; then
+    echo "GlobalStates import lint failed."
+    exit 1
+fi
+
+echo "Running frame mode contract..."
+if ! python3 "$SCRIPT_DIR/test_frame_mode_contract.py"; then
+    echo "Frame mode contract failed."
+    exit 1
+fi
+
+# The review sandbox's stop leaves no shell behind: driven against fake
+# Hyprland/dbus/qs binaries, so it needs no compositor.
+echo "Running review sandbox stop test..."
+if ! python3 "$SCRIPT_DIR/test_sandbox_shell.py"; then
+    echo "Review sandbox stop test failed."
+    exit 1
+fi
+
+echo "Running launcher Ask row contract..."
+if ! python3 "$SCRIPT_DIR/test_launcher_ai_ask.py"; then
+    echo "Launcher Ask row contract failed."
+    exit 1
+fi
+
+echo "Running inline launcher answers contract..."
+if ! python3 "$SCRIPT_DIR/test_ai_inline_contract.py"; then
+    echo "Inline launcher answers contract failed."
+    exit 1
+fi
+
 echo "Running settings page id tests..."
 if ! python3 "$SCRIPT_DIR/test_settings_page_ids.py"; then
     echo "Settings page id tests failed."
@@ -1201,6 +1260,22 @@ if ! python3 "$SCRIPT_DIR/test_launcher_qalc_runtime.py"; then
     exit 1
 fi
 
+# The Ask row in a real shell: hidden without a usable model, first under the
+# prefix with a keyless probe model, fallthrough gated by the switch and the
+# word count, nothing sent while typing, askAssistant opens the Intelligence
+# tab and sends the question. Brings its own headless weston.
+echo "Running launcher Ask row runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_launcher_ask_runtime.py"; then
+    echo "Launcher Ask row runtime tests failed."
+    exit 1
+fi
+
+echo "Running inline launcher answers runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_inline_runtime.py"; then
+    echo "Inline launcher answers runtime tests failed."
+    exit 1
+fi
+
 # Writes and reads a real launch-history store, and ranks the machine's own
 # desktop entries through it: whether AppSearch consults AppUsage at all is
 # invisible to a pure-logic test. Brings its own headless weston.
@@ -1237,6 +1312,23 @@ fi
 echo "Running harness check-count lint..."
 if ! python3 "$SCRIPT_DIR/lint_harness_check_counts.py"; then
     echo "Harness check-count lint failed."
+    exit 1
+fi
+
+# Transient overlays hide after their leave motion and drop input before it:
+# each OverlayLifecycle host binds its surface to .alive and gates its mask
+# on the flag. docs/proposals/overlay-motion-tier.md.
+echo "Running overlay lifecycle lint..."
+if ! python3 "$SCRIPT_DIR/lint_overlay_lifecycle.py"; then
+    echo "Overlay lifecycle lint failed."
+    exit 1
+fi
+
+# A settings page asks for text through ConfigTextArea, never a raw
+# MaterialTextField/TextField/TextArea of its own (retired 2026-09-14).
+echo "Running settings raw-field lint..."
+if ! python3 "$SCRIPT_DIR/lint_settings_raw_fields.py"; then
+    echo "Settings raw-field lint failed."
     exit 1
 fi
 
@@ -1748,6 +1840,12 @@ fi
 # Launches a real Quickshell and forces the startup race the migration used to
 # lose. Brings its own headless weston, so it needs no display of its own - but
 # it does need weston, and skips without it.
+echo "Running config split runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_config_split_runtime.py"; then
+    echo "Config split runtime tests failed."
+    exit 1
+fi
+
 echo "Running config directory migration runtime tests..."
 if ! python3 "$SCRIPT_DIR/test_config_dir_migration_runtime.py"; then
     echo "Config directory migration runtime tests failed."
@@ -1771,6 +1869,106 @@ fi
 echo "Running theme reload runtime tests..."
 if ! python3 "$SCRIPT_DIR/test_theme_reload_runtime.py"; then
     echo "Theme reload runtime tests failed."
+    exit 1
+fi
+
+# The assistant's read-tier tools answer inside a real shell: sync tools at
+# once, file tools through the fenced script (allowed file, dotfile refused,
+# outside refused, listing hides dotfiles). Brings its own headless weston.
+echo "Running AI tools runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_tools_runtime.py"; then
+    echo "AI tools runtime tests failed."
+    exit 1
+fi
+
+# The reviewed tier in a real shell: a call raises the card and changes
+# nothing, reject answers, approve applies (to-do, file + .bak, palette
+# source), invalid calls are refused, an approved write outside the
+# allowlist is still refused by the fence. Brings its own headless weston.
+echo "Running AI reviewed-tier runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_mutation_runtime.py"; then
+    echo "AI reviewed-tier runtime tests failed."
+    exit 1
+fi
+
+# Modes & Routines: the wiring pinned (state in Persistent, definitions in
+# Config, pill/toggles/overlay/settings/keybind, the pill on the record
+# indicator's grammar, schema and runner agreeing, nothing dropped by the
+# port still named)...
+echo "Running modes contract tests..."
+if ! python3 "$SCRIPT_DIR/test_modes_contract.py"; then
+    echo "Modes contract tests failed."
+    exit 1
+fi
+
+# ...and the engine in a real shell: presets seed once, a mode starts, is
+# logged and persisted, ends, comes back on toggleLast; automation off
+# refuses automatic starts only; a template becomes a routine. Brings its
+# own headless weston.
+echo "Running modes runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_modes_runtime.py"; then
+    echo "Modes runtime tests failed."
+    exit 1
+fi
+
+# Accounts (Google + Proton): secrets in the keyring blob and the helpers'
+# environment, the services on one account and one overridable API base, the
+# calendar into IcsCalendar, the to-do lists kept apart, Proton VPN two-staged,
+# the page and the index...
+echo "Running accounts contract tests..."
+if ! python3 "$SCRIPT_DIR/test_accounts_contract.py"; then
+    echo "Accounts contract tests failed."
+    exit 1
+fi
+
+# ...the OAuth helper against a fake token endpoint (refresh, a revoked token,
+# missing secrets, the loopback authorize round trip)...
+echo "Running Google OAuth helper tests..."
+if ! python3 "$SCRIPT_DIR/test_google_oauth.py"; then
+    echo "Google OAuth helper tests failed."
+    exit 1
+fi
+
+# ...and the Google services in a real shell against tests/fake_google_api.py,
+# with secret-tool shadowed by a file-backed stub. Brings its own headless weston.
+echo "Running accounts runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_accounts_runtime.py"; then
+    echo "Accounts runtime tests failed."
+    exit 1
+fi
+
+# OllamaCatalog against a fake daemon in a real shell: lists arrive, a pull
+# streams progress to 1 and lands installed, a removal drops it, and the
+# chat's model list follows both. Brings its own headless weston.
+echo "Running Ollama catalog runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_ollama_catalog_runtime.py"; then
+    echo "Ollama catalog runtime tests failed."
+    exit 1
+fi
+
+# OverlayLifecycle against the real motion catalogue: alive at once, enter
+# within its tier, alive through the leave, closed() then alive drops, a
+# re-open during the leave keeps the surface, reduce-motion still fires.
+echo "Running overlay lifecycle runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_overlay_lifecycle_runtime.py"; then
+    echo "Overlay lifecycle runtime tests failed."
+    exit 1
+fi
+
+# Local retrieval end to end in a real shell: index a probe folder, the
+# search_documents tool answers in a labelled data block with citation
+# sources queued, the Documents toggle rides passages in the wire content.
+echo "Running AI local retrieval runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_rag_runtime.py"; then
+    echo "AI local retrieval runtime tests failed."
+    exit 1
+fi
+
+# Dictation end to end in a real shell: listen, stop, the transcript lands
+# in the draft; the watchdog stops a stuck recording; auto-send sends.
+echo "Running AI dictation runtime tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_dictation_runtime.py"; then
+    echo "AI dictation runtime tests failed."
     exit 1
 fi
 
@@ -2386,6 +2584,51 @@ fi
 echo "Running media layout contract tests..."
 if ! python3 "$SCRIPT_DIR/test_media_layouts_contract.py"; then
     echo "Media layout contract tests failed."
+    exit 1
+fi
+
+# The reviewed tier: write/append stay inside the fence (.bak once, size
+# cap, symlinks out refused); every reviewed tool is declared, classified
+# in ai_tool_policy.js and reaches the approval card, never a direct branch.
+echo "Running AI reviewed-tier tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_mutation_tier.py"; then
+    echo "AI reviewed-tier tests failed."
+    exit 1
+fi
+
+# The assistant's read-tier tools: read_file/list_directory go through
+# scripts/ai/ai_fs_tool.py (allowlist on the real path, no dotfiles, no
+# binaries, byte cap); every tool is declared for all four dialects and
+# dispatched. See docs/proposals/ai-tool-adapters.md.
+echo "Running AI tool adapter tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_tool_adapters.py"; then
+    echo "AI tool adapter tests failed."
+    exit 1
+fi
+
+# The Ollama catalog talks to the daemon's HTTP API through curl, never the
+# CLI; refreshes only while a view watches; starts nothing but the explicit
+# Start; a pull asks first and checks disk. docs/proposals/ollama-catalog.md.
+echo "Running Ollama catalog contract tests..."
+if ! python3 "$SCRIPT_DIR/test_ollama_catalog_contract.py"; then
+    echo "Ollama catalog contract tests failed."
+    exit 1
+fi
+
+# Local retrieval: scripts/ai/ai_rag.py's privacy contract (only the named
+# folders, never dotfiles/key dirs/.noindex, binaries and oversize skipped),
+# incremental index, forget, lexical and fake-Ollama embedders.
+echo "Running AI local retrieval script tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_rag.py"; then
+    echo "AI local retrieval script tests failed."
+    exit 1
+fi
+
+# Dictation: scripts/ai/ai_dictate.py's recording state machine with a stub
+# recorder and the fake-transcript seam; refusals are JSON, not tracebacks.
+echo "Running AI dictation script tests..."
+if ! python3 "$SCRIPT_DIR/test_ai_dictate.py"; then
+    echo "AI dictation script tests failed."
     exit 1
 fi
 

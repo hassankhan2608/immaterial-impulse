@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""The config split, stage 1: `Config.options` is an aggregator, appearance has
+its own file, and everything outside the shell that reads appearance.* reads
+that file first.
+
+Pins: every top-level property declared on either adapter is an alias on the
+aggregator and named in `Config.domains` (a domain that is declared but not
+aliased silently vanishes from `Config.options`); the appearance block lives
+on its own adapter behind its own FileView and is no longer on the main one;
+`ready` waits for both files; the split takes the downgrade copy before it
+writes; Directories creates config.d; switchwall, applycolor and presets read
+config.d/appearance.json first. The runtime half is
+tests/test_config_split_runtime.py.
+"""
+import re
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = ROOT / "modules/common/Config.qml"
+DIRECTORIES = ROOT / "modules/common/Directories.qml"
+SCRIPTS = {
+    "switchwall": ROOT / "scripts/colors/switchwall.sh",
+    "applycolor": ROOT / "scripts/colors/applycolor.sh",
+    "presets": ROOT / "scripts/presets.sh",
+    "installer": ROOT.parents[3] / "sdata/subcmd-install/3.files.sh",
+}
+
+
+def _strip(text):
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def _block(source, opener):
+    start = source.index(opener) + len(opener)
+    depth = 1
+    for i in range(start, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i]
+    raise AssertionError(f"unterminated block after {opener!r}")
+
+
+def _top_level_props(adapter_body):
+    return re.findall(r"^            property (?:JsonObject|string|bool|int|real|list<[^>]+>|var) ([A-Za-z_]\w*)\s*:",
+                      adapter_body, re.M)
+
+
+class ConfigSplitContract(unittest.TestCase):
+    def setUp(self):
+        self.src = _strip(CONFIG.read_text())
+        self.main = _block(self.src, "JsonAdapter {\n            id: configOptionsJsonAdapter")
+        self.appearance = _block(self.src, "JsonAdapter {\n            id: appearanceAdapter")
+        self.aggregate = _block(self.src, "QtObject {\n        id: aggregate")
+
+    def test_every_declared_domain_is_aliased_and_listed(self):
+        main_props = _top_level_props(self.main)
+        app_props = _top_level_props(self.appearance)
+        self.assertEqual(app_props, ["appearance"])
+        self.assertNotIn("appearance", main_props, "appearance left the main adapter")
+        aliases = dict(re.findall(r"property alias (\w+): (\w+\.\w+)", self.aggregate))
+        for name in main_props:
+            self.assertEqual(aliases.get(name), f"configOptionsJsonAdapter.{name}", name)
+        self.assertEqual(aliases.get("appearance"), "appearanceAdapter.appearance")
+        self.assertEqual(set(aliases), set(main_props) | {"appearance"}, "no alias without a declaration")
+        self.assertIn("property alias options: aggregate", self.src)
+
+    def test_ready_waits_for_both_files_and_the_split_backs_up_first(self):
+        self.assertIn("if (root.ready || !root.mainLoaded || !root.appearanceLoaded) return;", self.src)
+        self.assertNotIn("root.ready = true;\n            root.clearStaleKbOptions();", self.src,
+                         "the migrations run from finishLoad, after both files")
+        # The two reads run in parallel; only the seed waits for the main text.
+        self.assertIn("path: root.configDirReady ? root.appearanceFilePath : \"\"", self.src)
+        self.assertIn("if (!root.appearanceMissing || !root.mainLoaded || root.appearanceLoaded) return;", self.src)
+        # No config.json write before ready (the split's copy must see the
+        # unstripped file), and a write asked for early is flushed at ready.
+        self.assertIn("if (!root.ready) {\n                root.writeRequestedBeforeReady = true;\n                return;\n            }", self.src)
+        self.assertIn("if (root.writeRequestedBeforeReady) {\n            root.writeRequestedBeforeReady = false;\n            fileWriteTimer.restart();", self.src)
+        # Neither file can hang the ready gate: a failed save marks its side
+        # loaded, and the seeded appearance file reloads on its own save.
+        self.assertEqual(self.src.count("onSaveFailed: error => {"), 2)
+        self.assertIn("onSaved: if (!root.appearanceLoaded) appearanceReloadTimer.restart()", self.src)
+        self.assertIn('command: ["cp", "-n", root.filePath, `${root.filePath}.pre-split-${Qt.formatDate(new Date(), "yyyy-MM-dd")}`]', self.src)
+        # The split writes the file only after the copy has exited.
+        backup = _block(self.src, "Process {\n        id: preSplitBackup")
+        self.assertIn('appearanceFileView.setText(JSON.stringify({ "appearance": root.legacyAppearance }, null, 2))', backup)
+        self.assertEqual(self.src.count("appearanceFileView.setText("), 1, "only the copy's exit writes the split")
+        # A timed-out directory migration never creates the file.
+        self.assertIn("if (root.configDirTimedOut) {\n            root.appearanceLoaded = true;", self.src)
+        self.assertIn('Quickshell.execDetached(["mkdir", "-p", `${root.shellConfig}/config.d`])', DIRECTORIES.read_text())
+
+    def test_the_shipped_defaults_are_already_split(self):
+        # A fresh install must not split (and leave a pre-split copy of the
+        # shipped defaults behind): defaults/config.json carries no
+        # appearance, defaults/config.d/appearance.json does, and the
+        # installer seeds both.
+        import json
+        main = json.loads((ROOT / "defaults/config.json").read_text())
+        self.assertNotIn("appearance", main)
+        split = json.loads((ROOT / "defaults/config.d/appearance.json").read_text())
+        self.assertEqual(list(split), ["appearance"])
+        self.assertIn("iconTheme", split["appearance"])
+        inst = SCRIPTS["installer"].read_text()
+        self.assertIn('local domain_dir="${XDG_CONFIG_HOME}/quickshell/imi/defaults/config.d"', inst)
+
+    def test_scripts_read_the_split_file_first(self):
+        for name, path in SCRIPTS.items():
+            text = path.read_text()
+            self.assertIn("config.d/appearance.json", text, name)
+        sw = SCRIPTS["switchwall"].read_text()
+        self.assertIn("jq -r '.appearance.wallpaperTheming.enableQtApps' \"$APPEARANCE_CONFIG_FILE\"", sw)
+        self.assertNotRegex(sw, r"\.appearance\.[^\n]*\$SHELL_CONFIG_FILE", "no appearance read from, or write into, config.json")
+        self.assertIn("'.appearance.palette.accentColor = $color' \"$APPEARANCE_CONFIG_FILE\" > \"$APPEARANCE_CONFIG_FILE.tmp\"", sw)
+        ac = SCRIPTS["applycolor"].read_text()
+        self.assertIn("jq -r '.appearance.wallpaperTheming.enableTerminal' \"$APPEARANCE_CONFIG_FILE\"", ac)
+        self.assertIn('--config "$APPEARANCE_CONFIG_FILE"', ac)
+        pr = SCRIPTS["presets"].read_text()
+        self.assertIn("jq 'del(.appearance)' \"${CONFIG_FILE}.merged\"", pr)
+        self.assertIn("{appearance: (.appearance // {})}", pr)
+        # A failed jq never lands: every stage is guarded and every candidate
+        # is checked to be a JSON object before it replaces a file.
+        self.assertNotIn('> "${CONFIG_FILE}.merged" || true', pr)
+        self.assertIn('if ! jq -e \'type == "object"\' "$candidate" >/dev/null 2>&1; then', pr)
+        # switchwall guards its appearance blocks on the file it reads.
+        self.assertIn('if [ -f "$APPEARANCE_CONFIG_FILE" ]', sw)
+        self.assertNotRegex(sw, r'-f "\$SHELL_CONFIG_FILE"[^\n]*\n[^\n]*APPEARANCE_CONFIG_FILE', "no appearance block guarded on config.json")
+        inst = SCRIPTS["installer"].read_text()
+        self.assertIn('local config="${XDG_CONFIG_HOME}/immaterial-impulse/config.d/appearance.json"', inst)
+        self.assertIn('[[ -f "$config" ]] || config="${XDG_CONFIG_HOME}/immaterial-impulse/config.json"', inst)
+
+
+if __name__ == "__main__":
+    unittest.main()

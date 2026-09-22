@@ -188,17 +188,32 @@ ContentPage {
                 wrapMode: Text.Wrap
             }
 
-            StyledText {
+            // The shared placeholder fills and centres itself in what it is
+            // given, so in this column it gets an item with its own height.
+            Item {
                 Layout.fillWidth: true
-                visible: root.filteredEntries.length === 0
-                text: PluginStore.fetching
-                    ? Translation.tr("Fetching widget catalog…")
-                    : (PluginStore.entries.length === 0
-                        ? Translation.tr("No widgets in the catalog yet.")
-                        : Translation.tr("No widgets match the current filters."))
-                font.pixelSize: Appearance.font.pixelSize.small
-                color: Appearance.colors.colSubtext
-                wrapMode: Text.Wrap
+                implicitHeight: emptyCatalogPlaceholder.visible ? 200 : 0
+
+                PagePlaceholder {
+                    id: emptyCatalogPlaceholder
+                    shown: root.filteredEntries.length === 0
+                    readonly property bool fetching: PluginStore.fetching
+                    readonly property bool emptyCatalog: PluginStore.entries.length === 0
+                    icon: emptyCatalogPlaceholder.fetching ? "cloud_download"
+                        : (emptyCatalogPlaceholder.emptyCatalog ? "storefront" : "filter_alt_off")
+                    shape: MaterialShape.Shape.Cookie7Sided
+                    title: emptyCatalogPlaceholder.fetching
+                        ? Translation.tr("Fetching the catalog…")
+                        : (emptyCatalogPlaceholder.emptyCatalog
+                            ? Translation.tr("Catalog is empty")
+                            : Translation.tr("No matches"))
+                    description: emptyCatalogPlaceholder.fetching
+                        ? Translation.tr("Reading the official widget registry.")
+                        : (emptyCatalogPlaceholder.emptyCatalog
+                            ? Translation.tr("No widgets in the catalog yet.")
+                            : Translation.tr("No widgets match the current filters."))
+                    descriptionHorizontalAlignment: Text.AlignHCenter
+                }
             }
 
             Repeater {
@@ -275,7 +290,7 @@ ContentPage {
                             ]
 
                             affordance: [
-                                RippleButton {
+                                DialogButton {
                                     id: actionButton
                                     readonly property var actionSpec: {
                                         switch (card.status) {
@@ -292,28 +307,25 @@ ContentPage {
                                         }
                                     }
                                     Layout.alignment: Qt.AlignVCenter
-                                    implicitWidth: actionLabel.implicitWidth + Appearance.spacing.space300
-                                    implicitHeight: 36
                                     enabled: actionSpec.actionable && !PluginManager.installing
-                                    buttonRadius: Appearance.rounding.full
+                                    buttonText: actionButton.actionSpec.label
                                     colBackground: actionSpec.actionable
                                         ? Appearance.colors.colSecondaryContainer
                                         : Appearance.colors.colLayer2
+                                    colBackgroundHover: actionSpec.actionable
+                                        ? Appearance.colors.colSecondaryContainerHover
+                                        : Appearance.colors.colLayer2Hover
+                                    colRipple: actionSpec.actionable
+                                        ? Appearance.colors.colSecondaryContainerActive
+                                        : Appearance.colors.colLayer2Active
+                                    colText: actionButton.enabled
+                                        ? Appearance.colors.colOnSecondaryContainer
+                                        : Appearance.colors.colSubtext
                                     onClicked: {
                                         if (card.status === "available")
                                             PluginStore.requestInstall(card.modelData);
                                         else if (card.status === "update")
                                             PluginStore.requestUpgrade(card.modelData);
-                                    }
-
-                                    contentItem: StyledText {
-                                        id: actionLabel
-                                        anchors.centerIn: parent
-                                        text: actionButton.actionSpec.label
-                                        font.pixelSize: Appearance.font.pixelSize.small
-                                        color: actionButton.enabled
-                                            ? Appearance.colors.colOnSecondaryContainer
-                                            : Appearance.colors.colSubtext
                                     }
                                 }
                             ]

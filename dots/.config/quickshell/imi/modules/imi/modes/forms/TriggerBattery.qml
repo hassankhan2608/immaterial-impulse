@@ -1,0 +1,57 @@
+pragma ComponentBehavior: Bound
+import qs.services
+import qs.modules.common
+import qs.modules.common.widgets
+import qs.modules.common.functions
+import qs.modules.imi.modes
+import QtQuick
+import QtQuick.Layouts
+
+/**
+ * Parameters of the `battery` condition. `row` is the TriggerRow this form
+ * unfolds from; every change goes back through it.
+ */
+ColumnLayout {
+    required property var row
+
+    spacing: Appearance.spacing.space125
+
+    RowLayout {
+        spacing: Appearance.spacing.space125
+
+        FormLabel {
+            text: Translation.tr("Below")
+        }
+
+        NumberField {
+            suffix: "%"
+            value: row.trigger.below
+            onCommitted: v => row.set({ below: v })
+        }
+
+        FormLabel {
+            text: Translation.tr("Above")
+        }
+
+        NumberField {
+            suffix: "%"
+            value: row.trigger.above
+            onCommitted: v => row.set({ above: v })
+        }
+
+        FormHint {
+            text: Translation.tr("Leave empty to ignore")
+        }
+    }
+
+    FormChoice {
+        text: Translation.tr("Power")
+        current: row.trigger.pluggedIn === true ? "yes" : (row.trigger.pluggedIn === false ? "no" : "any")
+        onPicked: v => row.set({ pluggedIn: v === "any" ? null : v === "yes" })
+        options: [
+            { displayName: Translation.tr("Any power"), value: "any" },
+            { displayName: Translation.tr("Plugged in"), value: "yes" },
+            { displayName: Translation.tr("On battery"), value: "no" }
+        ]
+    }
+}

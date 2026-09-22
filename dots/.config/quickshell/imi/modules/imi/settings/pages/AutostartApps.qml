@@ -58,24 +58,18 @@ ColumnLayout {
             }
         }
 
-        RippleButton {
-            Layout.preferredWidth: 36
-            Layout.preferredHeight: 36
+        IconButton {
             visible: Config.options.hyprland.autostartApps.enable
-            buttonRadius: implicitWidth / 2
+            buttonIcon: "motion_play"
+            buttonSize: 36
+            colText: Appearance.colors.colPrimary
+            // The tonal plate stays: this one carries a container where the
+            // page's other glyph buttons are flat.
             colBackground: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.85)
             colBackgroundHover: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.6)
             colRipple: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.5)
             onClicked: {
                 Quickshell.execDetached(["python3", `${Directories.scriptPath}/hyprland/autostart.py`])
-            }
-            contentItem: MaterialSymbol {
-                verticalAlignment: Text.AlignVCenter
-                anchors.centerIn: parent
-                horizontalAlignment: Text.AlignHCenter
-                text: "motion_play"
-                iconSize: Appearance.font.pixelSize.normal
-                color: Appearance.colors.colPrimary
             }
         }
     }
@@ -162,39 +156,38 @@ ColumnLayout {
                     onValueModified: root.updateEntry(entryRow.index, "delay", newValue)
                 }
 
-                RippleButton {
-                    width: 36
-                    height: 36
-                    buttonRadius: width / 2
+                IconButton {
+                    buttonIcon: "delete"
+                    buttonSize: 36
+                    colText: Appearance.colors.colError
+                    // Keeps its error-tinted plate: it is the destructive end
+                    // of an editable row, not a flat toolbar glyph.
                     colBackground: ColorUtils.transparentize(Appearance.colors.colError, 0.85)
                     colBackgroundHover: ColorUtils.transparentize(Appearance.colors.colError, 0.6)
                     colRipple: ColorUtils.transparentize(Appearance.colors.colError, 0.5)
                     onClicked: root.removeEntry(entryRow.index)
-                    contentItem: MaterialSymbol {
-                        verticalAlignment: Text.AlignVCenter
-                        anchors.centerIn: parent
-                        horizontalAlignment: Text.AlignHCenter
-                        text: "delete"
-                        iconSize: Appearance.font.pixelSize.normal
-                        color: Appearance.colors.colError
-                    }
                 }
             }
 
-            MaterialTextArea {
+            // The settings row grammar's form control, with no label of its
+            // own: this row is a hand-laid table and the column header above
+            // already says "App or Command", so the field takes the whole
+            // width left of `rightGroup` and the placeholder carries the hint.
+            // `singleLine` because a command is one line - wrapped into a
+            // stack it reads as broken.
+            ConfigTextArea {
                 id: cmdArea
                 anchors.left: parent.left
                 anchors.right: rightGroup.left
                 anchors.rightMargin: Appearance.spacing.space100
                 placeholderText: Translation.tr("App (e.g. firefox)")
-                text: entryRow.modelData.cmd ?? ""
-                wrapMode: TextEdit.Wrap
-                font.pixelSize: Appearance.font.pixelSize.normal
+                value: entryRow.modelData.cmd ?? ""
+                singleLine: true
 
                 property bool ready: false
                 Component.onCompleted: ready = true
 
-                onTextChanged: {
+                onValueChanged: {
                     if (!ready) return
                     debounceTimer.restart()
                 }
@@ -204,7 +197,7 @@ ColumnLayout {
                     interval: 3000
                     repeat: false
                     onTriggered: {
-                        root.updateEntry(entryRow.index, "cmd", cmdArea.text)
+                        root.updateEntry(entryRow.index, "cmd", cmdArea.value)
                     }
                 }
             }

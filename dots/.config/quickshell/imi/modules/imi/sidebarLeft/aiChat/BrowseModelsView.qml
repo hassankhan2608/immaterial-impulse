@@ -36,6 +36,11 @@ Rectangle {
     }
 
     property string query: ""
+    // Which store the view shows: the remote index / your providers, or the
+    // local Ollama daemon (docs/proposals/ollama-catalog.md). Remembered for
+    // the session only.
+    property string source: "remote"
+    readonly property bool ollamaMode: root.source === "ollama"
     // With providers of your own, browse IS your providers; the OpenRouter
     // index (and its fetch, refresh, key) only exists while the provider
     // list is empty and importing is the sole way in.
@@ -95,21 +100,10 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: Appearance.spacing.space100
-            RippleButton {
-                implicitWidth: 32
-                implicitHeight: 32
-                buttonRadius: Appearance.rounding.full
-                colBackground: "transparent"
-                colRipple: Appearance.colors.colLayer2Active
+            IconButton {
+                buttonIcon: "arrow_back"
+                buttonSize: 32
                 onClicked: root.closed()
-                contentItem: MaterialSymbol {
-                    anchors.centerIn: parent
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    text: "arrow_back"
-                    iconSize: Appearance.font.pixelSize.larger
-                    color: Appearance.colors.colOnLayer1
-                }
             }
             StyledText {
                 text: Translation.tr("Browse models")
@@ -118,23 +112,39 @@ Rectangle {
                 color: Appearance.colors.colOnLayer1
             }
             Item { Layout.fillWidth: true }
-            RippleButton {
-                visible: root.openRouterMode
-                implicitWidth: 32
-                implicitHeight: 32
-                buttonRadius: Appearance.rounding.full
-                colBackground: "transparent"
-                colRipple: Appearance.colors.colLayer2Active
+            IconButton {
+                visible: root.openRouterMode && !root.ollamaMode
+                buttonIcon: "refresh"
+                buttonSize: 32
+                tooltip: Translation.tr("Refresh the index")
                 onClicked: OpenRouterModels.refresh(true)
-                contentItem: MaterialSymbol {
-                    anchors.centerIn: parent
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    text: "refresh"
-                    iconSize: Appearance.font.pixelSize.larger
-                    color: Appearance.colors.colOnLayer1
-                }
-                StyledToolTip { text: Translation.tr("Refresh the index") }
+            }
+        }
+
+        // The store switch: a single-choice segmented group, the same
+        // SelectionGroupButton pair ConfigSelectionArray draws (a filter chip
+        // is for narrowing a list, not for choosing between two stores).
+        // OpenRouter/providers on the left, Ollama on the right; the search
+        // field below filters whichever is shown.
+        // A Flow, not a RowLayout: GroupButton carries Layout.fill hints for
+        // its bounce group, and a Layout honours them - the pair stretched to
+        // the whole column.
+        Flow {
+            Layout.fillWidth: true
+            spacing: Appearance.spacing.space25
+            SelectionGroupButton {
+                leftmost: true
+                buttonIcon: "cloud"
+                buttonText: root.openRouterMode ? "OpenRouter" : Translation.tr("Your providers")
+                toggled: !root.ollamaMode
+                onClicked: root.source = "remote"
+            }
+            SelectionGroupButton {
+                rightmost: true
+                buttonIcon: "memory"
+                buttonText: "Ollama"
+                toggled: root.ollamaMode
+                onClicked: root.source = "ollama"
             }
         }
 
@@ -142,7 +152,7 @@ Rectangle {
             // With providers of your own, OpenRouter is just one of them and
             // its key lives in the editor; this field only earns its row when
             // the list is empty and importing is the sole way in.
-            visible: (Config.options.ai.customProviders ?? []).length === 0
+            visible: !root.ollamaMode && (Config.options.ai.customProviders ?? []).length === 0
             Layout.fillWidth: true
             buttonIcon: "key"
             placeholderText: Translation.tr("OpenRouter API key")
@@ -162,13 +172,20 @@ Rectangle {
         ConfigTextArea {
             Layout.fillWidth: true
             buttonIcon: "search"
-            placeholderText: Translation.tr("Search model, provider…")
+            placeholderText: root.ollamaMode ? Translation.tr("Search the library or your installed models…") : Translation.tr("Search model, provider…")
             value: root.query
             onValueChanged: root.query = value
         }
 
+        OllamaBrowsePage {
+            visible: root.ollamaMode
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            query: root.query
+        }
+
         StyledText {
-            visible: root.openRouterMode && OpenRouterModels.loading
+            visible: !root.ollamaMode && root.openRouterMode && OpenRouterModels.loading
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             text: Translation.tr("Fetching the index…")
@@ -176,7 +193,7 @@ Rectangle {
             font.pixelSize: Appearance.font.pixelSize.small
         }
         StyledText {
-            visible: root.openRouterMode && OpenRouterModels.error.length > 0 && !OpenRouterModels.loading
+            visible: !root.ollamaMode && root.openRouterMode && OpenRouterModels.error.length > 0 && !OpenRouterModels.loading
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
@@ -186,6 +203,7 @@ Rectangle {
         }
 
         StyledFlickable {
+            visible: !root.ollamaMode
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -210,55 +228,54 @@ Rectangle {
                         onClicked: modelRow.modelData.kind === "provider"
                             ? root.toggleSurfaced(modelRow.modelData)
                             : root.importRow(modelRow.modelData)
-                        contentItem: RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: Appearance.spacing.space150
-                            anchors.rightMargin: Appearance.spacing.space150
-                            spacing: Appearance.spacing.space100
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 0
-                                StyledText {
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                    text: modelRow.modelData.name
-                                    color: Appearance.colors.colOnLayer1
-                                    font.pixelSize: Appearance.font.pixelSize.small
-                                }
-                                StyledText {
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                    text: modelRow.modelData.kind === "provider"
-                                        ? Translation.tr("%1 · your provider · click to %2").arg(modelRow.modelData.provider)
-                                              .arg(root.surfaced(modelRow.modelData) ? Translation.tr("hide") : Translation.tr("show"))
-                                        : `${modelRow.modelData.provider} · ${Math.round(modelRow.modelData.contextWindow / 1000)}k · ${OR.priceLabel(modelRow.modelData.promptPrice, modelRow.modelData.completionPrice)}`
-                                    color: Appearance.colors.colSubtext
-                                    font.pixelSize: Appearance.font.pixelSize.smaller
-                                }
+                        // The shell's catalogue row shape. No leading glyph
+                        // here - the name is the row - and the ink is stated
+                        // because this list sits on layer 1 rather than on a
+                        // tonal container.
+                        contentItem: CatalogueRow {
+                            anchors {
+                                fill: parent
+                                leftMargin: Appearance.spacing.space150
+                                rightMargin: Appearance.spacing.space150
                             }
+                            rowSpacing: Appearance.spacing.space100
+
+                            title: modelRow.modelData.name
+                            titleFont.pixelSize: Appearance.font.pixelSize.small
+                            titleColor: Appearance.colors.colOnLayer1
+                            titleFillsWidth: true
+                            titleElides: true
+                            description: modelRow.modelData.kind === "provider"
+                                ? Translation.tr("%1 · your provider · click to %2").arg(modelRow.modelData.provider)
+                                      .arg(root.surfaced(modelRow.modelData) ? Translation.tr("hide") : Translation.tr("show"))
+                                : `${modelRow.modelData.provider} · ${Math.round(modelRow.modelData.contextWindow / 1000)}k · ${OR.priceLabel(modelRow.modelData.promptPrice, modelRow.modelData.completionPrice)}`
+                            descriptionWraps: false
+
                             // Bare glyphs, no tooltips: a StyledToolTip
                             // needs a host with `hovered` (a Text has none),
                             // so these showed unconditionally and leaked
                             // popup windows past the view's close.
-                            MaterialSymbol {
-                                visible: modelRow.modelData.kind === "provider"
-                                text: root.surfaced(modelRow.modelData) ? "check_circle" : "radio_button_unchecked"
-                                fill: root.surfaced(modelRow.modelData) ? 1 : 0
-                                iconSize: Appearance.font.pixelSize.larger
-                                color: root.surfaced(modelRow.modelData) ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
-                            }
-                            MaterialSymbol {
-                                visible: modelRow.modelData.reasoning
-                                text: "star_shine"
-                                iconSize: Appearance.font.pixelSize.normal
-                                color: Appearance.colors.colPrimary
-                            }
-                            MaterialSymbol {
-                                visible: modelRow.modelData.vision
-                                text: "visibility"
-                                iconSize: Appearance.font.pixelSize.normal
-                                color: Appearance.colors.colSubtext
-                            }
+                            trailingContent: [
+                                MaterialSymbol {
+                                    visible: modelRow.modelData.kind === "provider"
+                                    text: root.surfaced(modelRow.modelData) ? "check_circle" : "radio_button_unchecked"
+                                    fill: root.surfaced(modelRow.modelData) ? 1 : 0
+                                    iconSize: Appearance.font.pixelSize.larger
+                                    color: root.surfaced(modelRow.modelData) ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
+                                },
+                                MaterialSymbol {
+                                    visible: modelRow.modelData.reasoning
+                                    text: "star_shine"
+                                    iconSize: Appearance.font.pixelSize.normal
+                                    color: Appearance.colors.colPrimary
+                                },
+                                MaterialSymbol {
+                                    visible: modelRow.modelData.vision
+                                    text: "visibility"
+                                    iconSize: Appearance.font.pixelSize.normal
+                                    color: Appearance.colors.colSubtext
+                                }
+                            ]
                         }
                     }
                 }

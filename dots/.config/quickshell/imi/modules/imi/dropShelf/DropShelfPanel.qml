@@ -90,12 +90,21 @@ Scope {
         }
     }
 
+    // The shelf outlives its flag by the leave motion; input follows the
+    // flag so a leaving shelf never takes a click or a drop.
+    OverlayLifecycle {
+        id: shelfLife
+        wanted: GlobalStates.dropShelfOpen
+    }
+    Region { id: shelfNoInput }
+
     LazyLoader {
-        active: GlobalStates.dropShelfOpen
+        active: shelfLife.alive
 
         component: PanelWindow {
             id: shelfWindow
             visible: true
+            mask: GlobalStates.dropShelfOpen ? null : shelfNoInput
             exclusionMode: ExclusionMode.Ignore
             WlrLayershell.layer: WlrLayer.Overlay
             WlrLayershell.namespace: "quickshell:dropshelf"
@@ -139,13 +148,14 @@ Scope {
             }
             Component.onDestruction: DropShelf.autoDismissHeld = false
 
-            StyledRectangularShadow {
-                target: shelfBg
-            }
-
-            Rectangle {
+            PopupPlate {
                 id: shelfBg
                 anchors.fill: parent
+                // Enter and leave from the lifecycle's one scalar: a fade
+                // with a small settle, the rise the summon position implies.
+                opacity: shelfLife.progress
+                scale: 0.94 + 0.06 * shelfLife.progress
+                transformOrigin: Item.Top
 
                 HoverHandler {
                     id: shelfHoverHandler
@@ -157,8 +167,6 @@ Scope {
                 color: root.blurBackground
                     ? ColorUtils.transparentize(Appearance.colors.colLayer0, 1 - root.backgroundOpacity)
                     : Appearance.colors.colLayer0
-                border.width: 1
-                border.color: Appearance.colors.colLayer0Border
 
                 ColumnLayout {
                     id: contentColumn
@@ -284,65 +292,35 @@ Scope {
                         Layout.topMargin: Appearance.spacing.space50
                         spacing: Appearance.spacing.space100
 
-                        RippleButton {
+                        DialogButton {
                             Layout.fillWidth: true
-                            implicitHeight: 40
-                            buttonRadius: height / 2
+                            buttonText: Translation.tr("Copy")
                             colBackground: Appearance.colors.colSecondaryContainer
                             colBackgroundHover: Appearance.colors.colSecondaryContainerHover
+                            colRipple: Appearance.colors.colSecondaryContainerActive
+                            colText: Appearance.colors.colOnSecondaryContainer
                             onClicked: DropShelf.copyAll()
-                            contentItem: RowLayout {
-                                anchors.fill: parent
-                                spacing: Appearance.spacing.space75
-                                StyledText {
-                                    Layout.alignment: Qt.AlignHCenter
-                                    Layout.fillWidth: true
-                                    horizontalAlignment: Text.AlignHCenter
-                                    text: Translation.tr("Copy")
-                                    color: Appearance.colors.colOnSecondaryContainer
-                                }
-                            }
                         }
 
-                        RippleButton {
+                        DialogButton {
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignRight
-                            implicitHeight: 40
-                            buttonRadius: height / 2
+                            buttonText: Translation.tr("Clear")
                             colBackground: Appearance.colors.colLayer1
                             colBackgroundHover: Appearance.colors.colLayer1Hover
+                            colRipple: Appearance.colors.colLayer1Active
+                            colText: Appearance.colors.colOnLayer1
                             onClicked: DropShelf.clear()
-                            contentItem: RowLayout {
-                                anchors.fill: parent
-                                spacing: Appearance.spacing.space75
-                                StyledText {
-                                    Layout.alignment: Qt.AlignHCenter
-                                    Layout.fillWidth: true
-                                    horizontalAlignment: Text.AlignHCenter
-                                    text: Translation.tr("Clear")
-                                    color: Appearance.colors.colOnLayer1
-                                }
-                            }
                         }
-                        RippleButton {
+                        DialogButton {
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignRight
-                            implicitHeight: 40
-                            buttonRadius: height / 2
+                            buttonText: Translation.tr("Close")
                             colBackground: Appearance.colors.colLayer1
                             colBackgroundHover: Appearance.colors.colLayer1Hover
+                            colRipple: Appearance.colors.colLayer1Active
+                            colText: Appearance.colors.colOnLayer1
                             onClicked: DropShelf.hide()
-                            contentItem: RowLayout {
-                                anchors.fill: parent
-                                spacing: Appearance.spacing.space75
-                                StyledText {
-                                    Layout.alignment: Qt.AlignHCenter
-                                    Layout.fillWidth: true
-                                    horizontalAlignment: Text.AlignHCenter
-                                    text: Translation.tr("Close")
-                                    color: Appearance.colors.colOnLayer1
-                                }
-                            }
                         }
                     }
                 }

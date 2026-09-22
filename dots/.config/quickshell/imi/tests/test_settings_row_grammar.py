@@ -61,6 +61,8 @@ PAGE = PAGES / "CaptureConfig.qml"
 ADOPTERS = {
     "CaptureConfig.qml": "this file",
     "PhoneConfig.qml": "tests/test_phone_tab_surface_contract.py",
+    "ModesConfig.qml": "tests/test_modes_contract.py",
+    "AccountsConfig.qml": "tests/test_accounts_contract.py",
 }
 
 GRAMMAR_WIDGETS = (
@@ -69,6 +71,7 @@ GRAMMAR_WIDGETS = (
     "ConfigSelectionArray.qml",
     "ConfigComboBox.qml",
     "ConfigTextArea.qml",
+    "ConfigLongText.qml",
     "ContentSubsection.qml",
 )
 
@@ -80,6 +83,7 @@ INFO_WIDGETS = (
     "ConfigComboBox.qml",
     "ConfigTextArea.qml",
     "ConfigSpinBox.qml",
+    "ConfigLongText.qml",
 )
 
 
@@ -263,7 +267,10 @@ class TokensOnlyTests(unittest.TestCase):
             fonts += len(self.FONT_SIZE.findall(source))
             colors += len(self.COLOR.findall(source))
             behaviors += len(blocks(source, r"Behavior on [\w.]+", pattern=True))
-        self.assertGreaterEqual(radii, 3)
+        # Two, not three, since the text area's reveal button became IconButton
+        # and took its radius token with it; the floor only says the regex
+        # still matches something.
+        self.assertGreaterEqual(radii, 2)
         self.assertGreaterEqual(fonts, 8)
         self.assertGreaterEqual(colors, 15)
         self.assertGreaterEqual(behaviors, 5)

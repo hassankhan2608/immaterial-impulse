@@ -6,10 +6,18 @@ import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
 import "modules/common/functions/edit_mode.js" as EditMode
+import "services/frame_geometry.js" as FrameGeo
 pragma Singleton
 pragma ComponentBehavior: Bound
 
 Singleton {
+    // Modes & Routines (services/Modes.qml; ported from the p3drovfx fork):
+    // the overlay's open state, the start/end flash, and the OLED saver's
+    // per-monitor set an action toggles.
+    property bool modesOpen: false
+    property bool modeFlashActive: false
+    property var modeFlashPayload: null
+    property var oledSaverMonitors: []
     id: root
     property bool barOpen: true
     // Ask the region selector for an action ("screenshot", "search", "ocr",
@@ -74,6 +82,32 @@ Singleton {
     // draws its cutout into this box and measures its clicks against the same
     // rectangle, so the pixels it judges are the pixels the depth layer masks.
     property var clockDepthViewports: ({})
+    // Every frame join the frame's surface is asked to paint, keyed by screen
+    // name (frame-one-surface.md, stage 2): the element that owns the motion
+    // (the dock) publishes its plate in SCREEN coordinates with the solver's
+    // numbers, and Frame.qml draws a field per record so the plates and the
+    // band are one outline on one surface. A map of screen name to a map of
+    // element key to record, reassigned whole (frame-pin-grammar.md §3): the
+    // entry removed on destruction, the screen absent while nothing is fused.
+    property var frameJoins: ({})
+    // How an element publishes: `record` null withdraws it. Keys are the
+    // element ("dock", "barPopup", "notification:<id>"), and a screen with
+    // nothing fused is absent (frame_geometry.js `withJoin`).
+    function publishFrameJoin(screen: string, key: string, record: var): void {
+        root.frameJoins = FrameGeo.withJoin(root.frameJoins, screen, key, record);
+    }
+    // The bar's pin (frame-pin-grammar.md): pinned means released - the bar
+    // floats a gap off the frame's band whatever the workspace holds; unpinned
+    // it follows `appearance.frame.bar`. One pin for every screen's bar.
+    property bool barPinned: false
+    // A bar widget's card wider than the island it is fused to: the island
+    // stands on the card as a tab, and its corners on the card square off by
+    // `left`/`right` (BarPopupOverlay.tabHoldLeft/Right, Bar.qml
+    // frameIslandRecords). Set by
+    // the overlay, never bound to the join records - the bar's records read
+    // this and the overlay reads the bar's records, and a value carried on
+    // the records would be a loop. null while no card overhangs.
+    property var barPopupTab: null
     // The active Wallpaper Engine scene's content aspect (w/h), published by
     // Background from the live surface's real content size - which the crop
     // picker needs because the scene's authored aspect is not the preview

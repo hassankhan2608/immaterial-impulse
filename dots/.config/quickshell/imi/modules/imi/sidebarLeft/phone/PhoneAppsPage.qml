@@ -121,27 +121,16 @@ PhoneSubPage {
                 onTextChanged: root.query = searchField.text
             }
 
-            RippleButton {
-                Layout.preferredWidth: Appearance.font.pixelSize.huge + Appearance.spacing.space200
-                Layout.preferredHeight: Appearance.font.pixelSize.huge + Appearance.spacing.space200
+            IconButton {
                 enabled: PhoneScrcpy.appModeSupported && !PhoneScrcpy.appsLoading
-                buttonRadius: Appearance.rounding.full
+                buttonIcon: "refresh"
+                buttonSize: 40
                 colBackground: Appearance.colors.colLayer3
                 colBackgroundHover: Appearance.colors.colLayer3Hover
                 colRipple: Appearance.colors.colLayer3Active
+                colText: Appearance.colors.colOnLayer3
+                tooltip: Translation.tr("Ask the phone for its app list")
                 onClicked: PhoneScrcpy.refreshApps()
-
-                contentItem: MaterialSymbol {
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    text: "refresh"
-                    iconSize: Appearance.font.pixelSize.large
-                    color: Appearance.colors.colOnLayer3
-                }
-
-                StyledToolTip {
-                    text: Translation.tr("Ask the phone for its app list")
-                }
             }
         }
 
@@ -262,44 +251,25 @@ PhoneSubPage {
                             elide: Text.ElideRight
                         }
 
-                        RippleButton {
-                            Layout.preferredHeight: Appearance.font.pixelSize.huge + Appearance.spacing.space125
-                            buttonRadius: Appearance.rounding.full
+                        DialogButton {
+                            buttonText: Translation.tr("Focus")
                             colBackground: Appearance.colors.colPrimary
+                            fontWeight: Font.DemiBold
                             colBackgroundHover: Appearance.colors.colPrimaryHover
                             colRipple: Appearance.colors.colPrimaryActive
+                            colText: Appearance.colors.colOnPrimary
                             onClicked: PhoneScrcpy.focusApp(sessionRow.modelData.package)
-
-                            contentItem: StyledText {
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                                text: Translation.tr("Focus")
-                                font.pixelSize: Appearance.font.pixelSize.smaller
-                                font.weight: Font.DemiBold
-                                color: Appearance.colors.colOnPrimary
-                            }
                         }
 
-                        RippleButton {
-                            Layout.preferredWidth: Appearance.font.pixelSize.huge + Appearance.spacing.space125
-                            Layout.preferredHeight: Appearance.font.pixelSize.huge + Appearance.spacing.space125
-                            buttonRadius: Appearance.rounding.full
+                        IconButton {
+                            buttonIcon: "close"
+                            buttonSize: 32
                             colBackground: Appearance.colors.colErrorContainer
                             colBackgroundHover: Appearance.colors.colErrorContainerHover
                             colRipple: Appearance.colors.colErrorContainerActive
+                            colText: Appearance.colors.colOnErrorContainer
+                            tooltip: Translation.tr("Close this session")
                             onClicked: PhoneScrcpy.stopApp(sessionRow.modelData.package)
-
-                            contentItem: MaterialSymbol {
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                                text: "close"
-                                iconSize: Appearance.font.pixelSize.small
-                                color: Appearance.colors.colOnErrorContainer
-                            }
-
-                            StyledToolTip {
-                                text: Translation.tr("Close this session")
-                            }
                         }
                     }
                 }
@@ -410,87 +380,67 @@ PhoneSubPage {
                         // there is no second copy of that decision here.
                         onClicked: PhoneScrcpy.launchApp(appRow.modelData.package)
 
-                        contentItem: RowLayout {
-                            spacing: Appearance.spacing.space125
+                        // The shell's catalogue row shape. The leading visual
+                        // is a shaped glyph rather than a bare symbol, so it
+                        // goes through `iconComponent`; the ink is stated
+                        // because the row's plate changes tone while the app
+                        // is running.
+                        contentItem: CatalogueRow {
+                            rowSpacing: Appearance.spacing.space125
 
-                            MaterialShapeWrappedMaterialSymbol {
-                                Layout.alignment: Qt.AlignVCenter
-                                // The generic glyph, deliberately: pulling
-                                // launcher icons off the phone is a follow-up
-                                // (spec, "Non-goals").
-                                text: "android"
-                                wrappedShape: MaterialShape.Shape.Cookie9Sided
-                                iconSize: Appearance.font.pixelSize.small
-                                padding: Appearance.spacing.space75
-                                color: appRow.running
-                                    ? Appearance.colors.colPrimary
-                                    : Appearance.colors.colSecondaryContainer
-                                colSymbol: appRow.running
-                                    ? Appearance.colors.colOnPrimary
-                                    : Appearance.colors.colOnSecondaryContainer
-                            }
-
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                Layout.alignment: Qt.AlignVCenter
-                                spacing: 0
-
-                                StyledText {
-                                    Layout.fillWidth: true
-                                    textFormat: Text.PlainText
-                                    text: PhoneCards.appLabel(appRow.modelData)
-                                    font.pixelSize: Appearance.font.pixelSize.small
-                                    font.weight: Font.DemiBold
+                            iconComponent: Component {
+                                MaterialShapeWrappedMaterialSymbol {
+                                    // The generic glyph, deliberately: pulling
+                                    // launcher icons off the phone is a follow-up
+                                    // (spec, "Non-goals").
+                                    text: "android"
+                                    wrappedShape: MaterialShape.Shape.Cookie9Sided
+                                    iconSize: Appearance.font.pixelSize.small
+                                    padding: Appearance.spacing.space75
                                     color: appRow.running
-                                        ? Appearance.colors.colOnPrimaryContainer
-                                        : Appearance.colors.colOnLayer2
-                                    elide: Text.ElideRight
-                                }
-                                StyledText {
-                                    Layout.fillWidth: true
-                                    textFormat: Text.PlainText
-                                    text: appRow.modelData.package
-                                    font.pixelSize: Appearance.font.pixelSize.smallest
-                                    color: Appearance.colors.colSubtext
-                                    elide: Text.ElideRight
+                                        ? Appearance.colors.colPrimary
+                                        : Appearance.colors.colSecondaryContainer
+                                    colSymbol: appRow.running
+                                        ? Appearance.colors.colOnPrimary
+                                        : Appearance.colors.colOnSecondaryContainer
                                 }
                             }
 
-                            RippleButton {
-                                id: starButton
-                                readonly property bool favourite: PhoneScrcpy.isFavorite(appRow.modelData.package)
+                            title: PhoneCards.appLabel(appRow.modelData)
+                            titleFont.pixelSize: Appearance.font.pixelSize.small
+                            titleFont.weight: Font.DemiBold
+                            titleColor: appRow.running
+                                ? Appearance.colors.colOnPrimaryContainer
+                                : Appearance.colors.colOnLayer2
+                            titleFillsWidth: true
+                            titleElides: true
+                            description: appRow.modelData.package
+                            descriptionWraps: false
 
-                                Layout.preferredWidth: Appearance.font.pixelSize.huge + Appearance.spacing.space150
-                                Layout.preferredHeight: Appearance.font.pixelSize.huge + Appearance.spacing.space150
-                                buttonRadius: Appearance.rounding.full
-                                colBackground: "transparent"
-                                colBackgroundHover: Appearance.colors.colLayer3Hover
-                                colRipple: Appearance.colors.colLayer3Active
-                                onClicked: PhoneScrcpy.toggleFavorite(appRow.modelData.package)
+                            trailingContent: [
+                                IconButton {
+                                    id: starButton
+                                    readonly property bool favourite: PhoneScrcpy.isFavorite(appRow.modelData.package)
 
-                                contentItem: MaterialSymbol {
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    text: starButton.favourite ? "star" : "star_outline"
-                                    fill: starButton.favourite ? 1 : 0
-                                    iconSize: Appearance.font.pixelSize.large
-                                    color: starButton.favourite ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
+                                    buttonIcon: starButton.favourite ? "star" : "star_outline"
                                     animateChange: true
-                                }
-
-                                StyledToolTip {
-                                    text: starButton.favourite
+                                    buttonSize: 32
+                                    iconFill: starButton.favourite ? 1 : 0
+                                    colText: starButton.favourite ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
+                                    tooltip: starButton.favourite
                                         ? Translation.tr("Remove from favourites")
                                         : Translation.tr("Add to favourites")
+                                    onClicked: PhoneScrcpy.toggleFavorite(appRow.modelData.package)
                                 }
-                            }
+                            ]
 
-                            MaterialSymbol {
-                                Layout.alignment: Qt.AlignVCenter
-                                text: appRow.running ? "open_in_new" : "play_arrow"
-                                iconSize: Appearance.font.pixelSize.larger
-                                color: appRow.running ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
-                            }
+                            affordance: [
+                                MaterialSymbol {
+                                    text: appRow.running ? "open_in_new" : "play_arrow"
+                                    iconSize: Appearance.font.pixelSize.larger
+                                    color: appRow.running ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
+                                }
+                            ]
                         }
                     }
                 }

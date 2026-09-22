@@ -56,6 +56,20 @@ EXCLUDED_DIRS = {
 
 # Path relative to the shell root -> why it is not in the gallery.
 EXCLUDED = {
+    "modules/imi/modes/AddRowButton.qml":
+        "the modes editor's dashed 'add a row' affordance: a RippleButton in "
+        "a DashedBorder whose label names the row type it adds. Outside its "
+        "ActionList / TriggerList it adds nothing, so a tile would be a dashed "
+        "box that answers nothing; RippleButton and DashedBorder are tiles",
+    "modules/imi/modes/FooterButton.qml":
+        "the manager overlay's footer action (Save / Cancel / Delete), a "
+        "RippleButton with the footer's fixed height and tonal roles; the "
+        "gallery's RippleButton tile shows the same press morph",
+    "modules/imi/modes/EditorSwitchRow.qml":
+        "the editor's switch row: the shell's ConfigSwitch (icon, label, "
+        "description, trailing switch, the whole row flips it) drawn as one "
+        "of the editor's rounded colLayer2 cards. ConfigSwitch is a tile; this "
+        "adds only the card tier's fill, padding and radius",
     "modules/common/plugins/designsystem/widgets/M3IconButton.qml":
         "vendored designsystem mirror - a second copy of a shipped widget, "
         "listing it would show the same control twice under two names",

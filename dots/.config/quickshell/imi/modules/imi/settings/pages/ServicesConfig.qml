@@ -18,53 +18,6 @@ ContentPage {
     forceWidth: true
     bottomContentPadding: 15
 
-    component IconButton : RippleButton {
-        id: iRoot
-        property string iconName
-        property string textString
-        property color textColor: Appearance.colors.colOnPrimary
-
-        toggled: true
-        implicitHeight: 36
-        padding: Appearance.spacing.space200
-        implicitWidth: layoutItem.implicitWidth + padding * 2
-        buttonRadius: Appearance.rounding.full
-        // The press tones follow each state's own fill family: the filled
-        // pill ripples in its container's Active, and the flat variant -
-        // whose colLayer1 default reads as no background at all on this
-        // page - ripples in the Layer2 family it hovers in.
-        // A filled surface ripples in its ON-color, faint: this palette's
-        // PrimaryActive sits nearly on Primary itself, which was the
-        // weakness - and SecondaryContainerActive was the wrong family
-        // for a colPrimary fill entirely.
-        colRippleToggled: ColorUtils.transparentize(Appearance.colors.colOnPrimary, 0.75)
-        colBackground: "transparent"
-        colBackgroundHover: Appearance.colors.colLayer2Hover
-        colRipple: Appearance.colors.colLayer2Active
-
-        contentItem: Item {
-            implicitWidth: layoutItem.implicitWidth
-            implicitHeight: layoutItem.implicitHeight
-            RowLayout {
-                id: layoutItem
-                anchors.centerIn: parent
-                spacing: Appearance.spacing.space100
-                MaterialSymbol {
-                    text: iRoot.iconName
-                    color: iRoot.textColor
-                    iconSize: Appearance.font.pixelSize.normal
-                    Layout.alignment: Qt.AlignVCenter
-                }
-                StyledText {
-                    text: iRoot.textString
-                    color: iRoot.textColor
-                    font.pixelSize: Appearance.font.pixelSize.small
-                    Layout.alignment: Qt.AlignVCenter
-                }
-            }
-        }
-    }
-
     //This was intended to go into the results more deeply but in the end I didn't like it but I left it just in case lol
     function goTo(term) {
         const t = term.toLowerCase().trim()
@@ -102,15 +55,276 @@ ContentPage {
             shape: MaterialShape.Shape.Ghostish
             title: Translation.tr("AI")
 
-            MaterialTextArea {
-                Layout.fillWidth: true
-                placeholderText: Translation.tr("System prompt")
-                text: Config.options.ai.systemPrompt
-                wrapMode: TextEdit.Wrap
-                onTextChanged: {
+            // A paragraph, not a value: the long-text row grows with it and
+            // scrolls inside itself past ten lines.
+            ConfigLongText {
+                buttonIcon: "psychology"
+                text: Translation.tr("System prompt")
+                placeholderText: Translation.tr("How the assistant should behave")
+                value: Config.options.ai.systemPrompt
+                // Deferred, because the write feeds back into the binding that
+                // set `value`: committing on the keystroke itself reassigns the
+                // field's text while it is being typed into.
+                onValueChanged: {
                     Qt.callLater(() => {
-                        Config.options.ai.systemPrompt = text;
+                        Config.options.ai.systemPrompt = value;
                     });
+                }
+            }
+
+            ContentSubsection {
+                title: Translation.tr("Folders the assistant may read")
+                tooltip: Translation.tr("read_file and list_directory work only inside these; hidden files are never readable")
+
+                // The folders, one plate each, from the config list.
+                GroupedList {
+                    visible: (Config.options.ai.tools.folders ?? []).length > 0
+                    model: Config.options.ai.tools.folders
+                    rowDelegate: Component {
+                        RowLayout {
+                            id: folderRow
+                            property var modelData: null
+                            spacing: Appearance.spacing.space200
+                            MaterialSymbol {
+                                Layout.leftMargin: Appearance.spacing.space100
+                                text: "folder"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colOnLayer1
+                            }
+                            StyledText {
+                                Layout.fillWidth: true
+                                text: String(folderRow.modelData ?? "")
+                                elide: Text.ElideMiddle
+                                color: Appearance.colors.colOnLayer1
+                            }
+                            IconButton {
+                                Layout.rightMargin: Appearance.spacing.space100
+                                buttonIcon: "delete"
+                                buttonSize: 32
+                                colText: Appearance.colors.colError
+                                colRipple: Appearance.colors.colErrorActive
+                                tooltip: Translation.tr("Remove folder")
+                                onClicked: {
+                                    const gone = String(folderRow.modelData ?? "");
+                                    Config.options.ai.tools.folders = (Config.options.ai.tools.folders ?? []).filter(f => f !== gone);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GroupedList {
+                    ConfigTextArea {
+                        id: newFolderField
+                        buttonIcon: "create_new_folder"
+                        text: Translation.tr("Add a folder")
+                        singleLine: true
+                        placeholderText: "~/Documents"
+                        confirmButtonVisible: value.trim().length > 0
+                        confirmButtonIcon: "add"
+                        onConfirmClicked: {
+                            const folder = value.trim();
+                            if (folder.length === 0) return;
+                            const next = (Config.options.ai.tools.folders ?? []).slice();
+                            if (next.indexOf(folder) === -1) next.push(folder);
+                            Config.options.ai.tools.folders = next;
+                            value = "";
+                        }
+                    }
+                    ConfigSwitch {
+                        buttonIcon: "content_paste"
+                        text: Translation.tr("Let the assistant read the clipboard")
+                        checked: Config.options.ai.tools.allowClipboard
+                        onToggleRequested: Config.options.ai.tools.allowClipboard = !Config.options.ai.tools.allowClipboard
+                    }
+                }
+            }
+
+            ContentSubsection {
+                title: Translation.tr("Documents")
+                tooltip: Translation.tr("Folders the assistant may search. Hidden files, key and config directories, and .noindex subtrees are never indexed.")
+
+                // The indexed folders, one plate each; removing one forgets it.
+                GroupedList {
+                    visible: (Config.options.ai.documents.folders ?? []).length > 0
+                    model: Config.options.ai.documents.folders
+                    rowDelegate: Component {
+                        RowLayout {
+                            id: docFolderRow
+                            property var modelData: null
+                            spacing: Appearance.spacing.space200
+                            MaterialSymbol {
+                                Layout.leftMargin: Appearance.spacing.space100
+                                text: "folder"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colOnLayer1
+                            }
+                            StyledText {
+                                Layout.fillWidth: true
+                                text: String(docFolderRow.modelData ?? "")
+                                elide: Text.ElideMiddle
+                                color: Appearance.colors.colOnLayer1
+                            }
+                            IconButton {
+                                Layout.rightMargin: Appearance.spacing.space100
+                                buttonIcon: "delete"
+                                buttonSize: 32
+                                colText: Appearance.colors.colError
+                                colRipple: Appearance.colors.colErrorActive
+                                tooltip: Translation.tr("Remove and forget this folder")
+                                onClicked: {
+                                    const gone = String(docFolderRow.modelData ?? "");
+                                    Config.options.ai.documents.folders = (Config.options.ai.documents.folders ?? []).filter(f => f !== gone);
+                                    AiRag.forget(gone);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GroupedList {
+                    ConfigTextArea {
+                        id: newDocFolderField
+                        buttonIcon: "create_new_folder"
+                        text: Translation.tr("Add a folder")
+                        singleLine: true
+                        placeholderText: "~/Documents"
+                        confirmButtonVisible: value.trim().length > 0
+                        confirmButtonIcon: "add"
+                        onConfirmClicked: {
+                            const folder = value.trim();
+                            if (folder.length === 0) return;
+                            const next = (Config.options.ai.documents.folders ?? []).slice();
+                            if (next.indexOf(folder) === -1) next.push(folder);
+                            Config.options.ai.documents.folders = next;
+                            value = "";
+                        }
+                    }
+                    ConfigSelectionArray {
+                        text: Translation.tr("Embeddings")
+                        currentValue: Config.options.ai.documents.embedder
+                        onSelected: value => { Config.options.ai.documents.embedder = value; }
+                        options: [
+                            { "displayName": Translation.tr("Keywords (offline)"), "value": "lexical" },
+                            { "displayName": "nomic-embed-text (Ollama)", "value": "ollama:nomic-embed-text" },
+                            { "displayName": "mxbai-embed-large (Ollama)", "value": "ollama:mxbai-embed-large" },
+                        ]
+                    }
+                    ConfigSwitch {
+                        buttonIcon: "attach_file"
+                        text: Translation.tr("Attach matching passages to every message")
+                        checked: Config.options.ai.documents.alwaysAttach
+                        onToggleRequested: Config.options.ai.documents.alwaysAttach = !Config.options.ai.documents.alwaysAttach
+                        StyledToolTip { text: Translation.tr("Off: the model calls search_documents when it decides to look") }
+                    }
+                    RowLayout {
+                        spacing: Appearance.spacing.space200
+                        MaterialSymbol {
+                            Layout.leftMargin: Appearance.spacing.space100
+                            text: "manage_search"
+                            iconSize: Appearance.font.pixelSize.larger
+                            color: Appearance.colors.colOnLayer1
+                        }
+                        StyledText {
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            text: AiRag.error.length > 0 ? AiRag.error
+                                : AiRag.files === 0 ? Translation.tr("Nothing indexed yet")
+                                : Translation.tr("%1 files, %2 passages, %3").arg(AiRag.files).arg(AiRag.chunks)
+                                      .arg(AiRag.indexedWith.length > 0 ? AiRag.indexedWith : "")
+                            color: AiRag.error.length > 0 ? Appearance.m3colors.m3error : Appearance.colors.colOnLayer1
+                        }
+                        DialogButton {
+                            Layout.rightMargin: Appearance.spacing.space100
+                            enabled: AiRag.configured && !AiRag.indexing
+                            buttonText: AiRag.indexing
+                                ? Translation.tr("Indexing %1 / %2").arg(AiRag.progressDone).arg(AiRag.progressTotal)
+                                : Translation.tr("Index now")
+                            colBackground: Appearance.colors.colSecondaryContainer
+                            colBackgroundHover: Appearance.colors.colSecondaryContainerHover
+                            colRipple: Appearance.colors.colSecondaryContainerActive
+                            colText: Appearance.colors.colOnSecondaryContainer
+                            onClicked: AiRag.index()
+                        }
+                    }
+                }
+            }
+
+            ContentSubsection {
+                title: Translation.tr("Dictation")
+                tooltip: Translation.tr("Press the mic in the composer, or bind `qs ipc call ai dictate toggle` to a key")
+
+                GroupedList {
+                    ConfigSelectionArray {
+                        text: Translation.tr("Transcriber")
+                        currentValue: Config.options.ai.dictation.engine
+                        onSelected: value => { Config.options.ai.dictation.engine = value; }
+                        options: [
+                            { "displayName": Translation.tr("On this machine"), "value": "local" },
+                            { "displayName": Translation.tr("Provider (audio leaves this machine)"), "value": "provider" },
+                        ]
+                    }
+                    ConfigSelectionArray {
+                        property bool rowVisible: Config.options.ai.dictation.engine === "local"
+                        text: Translation.tr("Model")
+                        currentValue: Config.options.ai.dictation.model
+                        onSelected: value => { Config.options.ai.dictation.model = value; }
+                        options: [
+                            { "displayName": "tiny", "value": "tiny" },
+                            { "displayName": "base", "value": "base" },
+                            { "displayName": "small", "value": "small" },
+                            { "displayName": "medium", "value": "medium" },
+                            { "displayName": "large-v3", "value": "large-v3" },
+                        ]
+                    }
+                    RowLayout {
+                        property bool rowVisible: Config.options.ai.dictation.engine === "local"
+                        spacing: Appearance.spacing.space200
+                        MaterialSymbol {
+                            Layout.leftMargin: Appearance.spacing.space100
+                            text: "download"
+                            iconSize: Appearance.font.pixelSize.larger
+                            color: Appearance.colors.colOnLayer1
+                        }
+                        StyledText {
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            text: !AiDictation.probed ? Translation.tr("Checking…")
+                                : AiDictation.hint.length > 0 ? AiDictation.hint
+                                : AiDictation.downloadState === "done" ? Translation.tr("Model ready")
+                                : AiDictation.downloadState === "error" ? AiDictation.lastError
+                                : AiDictation.fasterWhisper ? Translation.tr("faster-whisper found; the first use of a model downloads it unless you fetch it here")
+                                : Translation.tr("whisper.cpp found")
+                            color: AiDictation.hint.length > 0 || AiDictation.downloadState === "error" ? Appearance.m3colors.m3error : Appearance.colors.colOnLayer1
+                        }
+                        DialogButton {
+                            Layout.rightMargin: Appearance.spacing.space100
+                            enabled: AiDictation.fasterWhisper && AiDictation.downloadState !== "downloading"
+                            buttonText: AiDictation.downloadState === "downloading" ? Translation.tr("Downloading…")
+                                : Translation.tr("Download model")
+                            colBackground: Appearance.colors.colSecondaryContainer
+                            colBackgroundHover: Appearance.colors.colSecondaryContainerHover
+                            colRipple: Appearance.colors.colSecondaryContainerActive
+                            colText: Appearance.colors.colOnSecondaryContainer
+                            onClicked: AiDictation.download()
+                        }
+                    }
+                    ConfigSwitch {
+                        buttonIcon: "send"
+                        text: Translation.tr("Send the transcript at once")
+                        checked: Config.options.ai.dictation.autoSend
+                        onToggleRequested: Config.options.ai.dictation.autoSend = !Config.options.ai.dictation.autoSend
+                        StyledToolTip { text: Translation.tr("Off: the transcript lands in the composer for editing") }
+                    }
+                    ConfigSpinBox {
+                        icon: "timer"
+                        text: Translation.tr("Stop listening after (seconds)")
+                        value: Config.options.ai.dictation.maxSeconds
+                        from: 5
+                        to: 300
+                        stepSize: 5
+                        onValueModified: Config.options.ai.dictation.maxSeconds = newValue
+                    }
                 }
             }
 
@@ -128,13 +342,15 @@ ContentPage {
             shape: MaterialShape.Shape.PixelCircle
             title: Translation.tr("Networking")
 
-            MaterialTextArea {
+            ConfigTextArea {
                 Layout.fillWidth: true
+                buttonIcon: "http"
+                text: Translation.tr("User agent")
                 placeholderText: Translation.tr("User agent (for services that require it)")
-                text: Config.options.networking.userAgent
-                wrapMode: TextEdit.Wrap
-                onTextChanged: {
-                    Config.options.networking.userAgent = text;
+                singleLine: true
+                value: Config.options.networking.userAgent
+                onValueChanged: {
+                    Config.options.networking.userAgent = value;
                 }
             }
 
@@ -206,6 +422,67 @@ ContentPage {
                     text: Translation.tr("Use Levenshtein distance-based algorithm instead of fuzzy")
                     checked: Config.options.search.sloppy
                     onToggleRequested: Config.options.search.sloppy = !Config.options.search.sloppy
+                }
+                ConfigSwitch {
+                    buttonIcon: "star_shine"
+                    text: Translation.tr("Offer \"Ask the assistant\" for long queries nothing else matches")
+                    checked: Config.options.search.ai.fallthrough
+                    onToggleRequested: Config.options.search.ai.fallthrough = !Config.options.search.ai.fallthrough
+                    StyledToolTip { text: Translation.tr("Four or more words, no app, setting or action matched, and a usable model selected. Nothing is sent before Enter.") }
+                }
+            }
+
+            ContentSubsection {
+                title: Translation.tr("Inline answers")
+
+                GroupedList {
+                    ConfigSwitch {
+                        buttonIcon: "auto_awesome"
+                        text: Translation.tr("Answer short questions inline, under the Ask row")
+                        checked: Config.options.search.ai.inline
+                        onToggleRequested: Config.options.search.ai.inline = !Config.options.search.ai.inline
+                        StyledToolTip { text: Translation.tr("Under the assistant prefix, after a pause in typing, a one-sentence answer appears under the Ask row. This sends what you type to the selected model: only a local model answers unless the next switch is on. Enter carries the answer into the chat.") }
+                    }
+                    ConfigSwitch {
+                        property bool rowVisible: Config.options.search.ai.inline
+                        // Why nothing happens: a usable cloud model selected
+                        // with this off is the case where the main switch
+                        // does nothing, so this row says so, in its own
+                        // description slot.
+                        readonly property var selectedModel: Ai.models[Ai.currentModelId] ?? null
+                        readonly property bool cloudModelWaiting: !!selectedModel && Ai.currentModelHasApiKey
+                            && !StringUtils.isLoopbackUrl(selectedModel.endpoint ?? "") && !Config.options.search.ai.inlineWithCloud
+                        buttonIcon: "cloud"
+                        text: Translation.tr("Inline answers may use my cloud key")
+                        description: cloudModelWaiting
+                            ? Translation.tr("The selected model (%1) runs in the cloud, so nothing answers inline until this is on.").arg(selectedModel.name ?? Ai.currentModelId)
+                            : (!selectedModel && Config.options.search.ai.inline
+                                ? Translation.tr("No model is selected, so nothing answers inline yet.")
+                                : "")
+                        checked: Config.options.search.ai.inlineWithCloud
+                        onToggleRequested: Config.options.search.ai.inlineWithCloud = !Config.options.search.ai.inlineWithCloud
+                        StyledToolTip { text: Translation.tr("Off: only a model on this machine (a loopback endpoint) answers inline. On: the selected cloud model does, one request per pause in typing, at your key's cost.") }
+                    }
+                    ConfigSpinBox {
+                        property bool rowVisible: Config.options.search.ai.inline
+                        icon: "timer"
+                        text: Translation.tr("Pause before asking (ms)")
+                        value: Config.options.search.ai.inlineDelayMs
+                        from: 300
+                        to: 3000
+                        stepSize: 100
+                        onValueModified: Config.options.search.ai.inlineDelayMs = newValue
+                    }
+                    ConfigSpinBox {
+                        property bool rowVisible: Config.options.search.ai.inline
+                        icon: "short_text"
+                        text: Translation.tr("Minimum words in the question")
+                        value: Config.options.search.ai.inlineMinWords
+                        from: 1
+                        to: 10
+                        stepSize: 1
+                        onValueModified: Config.options.search.ai.inlineMinWords = newValue
+                    }
                 }
             }
 
@@ -338,6 +615,22 @@ ContentPage {
                     // one. PrismLauncher.available comes from that service's
                     // own startup detection, so this row appears on machines
                     // that can use it and nowhere else.
+                    ConfigRow {
+                        uniform: true
+                        ConfigTextArea {
+                            Layout.fillWidth: true
+                            fieldWidth: 100
+                            buttonIcon: "star_shine"
+                            text: Translation.tr("Ask the assistant")
+                            value: Config.options.search.prefix.ai
+                            onValueChanged: {
+                                Config.options.search.prefix.ai = value;
+                            }
+                        }
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                    }
                     ConfigRow {
                         uniform: true
                         property bool rowVisible: PrismLauncher.available

@@ -260,6 +260,437 @@ timer and a slow poll (60 s / 10 s) for anything the stream misses. When adding 
 emits the change first; `tests/test_sni_watchdog.py` and `tests/test_media_capture_contract.py`
 pin the subscriptions. 82627cb23 ("perf(tray): the SNI watchdog listens on the bus instead of polling it"), 8c9ac38b8 ("perf(privacy): detect capture by subscription, poll only as a safety net").
 
+**A tool that changes something is `reviewed`: it raises the approval card and runs only from
+`approveCommand()`; the tier lives in `services/ai/ai_tool_policy.js`, never in the dispatch chain.**
+`handleFunctionCall` asks `ToolPolicy.tierOf(name)` first: a `reviewed` tool is validated against the
+registry schema (`validateArgs`: coerce, drop unknown keys, report missing), stamped on the message
+as `functionCall`, and rendered as a ```` ```mutation ```` fence with `summaryFor()`'s one line - the
+same card `run_shell_command` has, in `MessageCodeBlock.qml`. Approve calls `applyMutation()`, whose
+every branch answers the model and continues; reject answers "rejected". A tool nobody classified
+is `reviewed`, never auto-run. `write_file`/`append_file` reuse `scripts/ai/ai_fs_tool.py` (content
+on stdin, `.bak` kept once, size cap, dotfiles and symlinks out refused even when approved).
+`test_ai_skeleton_contract.py` counts `case "x"` in applyMutation as handled, so a reviewed tool is
+never added as a `name === "x"` branch. The four tool entry points take an UNTYPED `message`: a
+parameter typed `AiMessageData` made Qt 6.11 segfault in `QObjectMethod::resolveOverloaded` when
+called from another QML context (the runtime harnesses); the harness also mints its message through
+`Ai.addMessage`, not `Component.createObject`, for the same reason.
+`AiMutationRuntimeTest.qml` drives card → reject → approve for a to-do, a file (+ .bak), a palette
+source, an invalid call and an out-of-allowlist write. 
+
+**The assistant's file tools never read a path from QML; `scripts/ai/ai_fs_tool.py` decides on the
+real path and answers JSON.** `read_file`/`list_directory` (services/AiToolRegistry.qml, dispatched
+from `Ai.qml`'s `handleFunctionCall` through `runFsTool`) spawn the script with every folder in
+`ai.tools.folders` as `--allow`; it resolves symlinks before the containment check, hides dotfiles
+at every depth, refuses binaries and caps bytes/entries/depth, and prints `{ok:false, error}` with
+exit 0 so a refusal is the model's answer, never a stack trace. An asynchronous tool answer
+continues the chat through `continueAfterTool()`: `pendingContinuation` if the requester is still
+streaming (running=true on a running Process is a no-op), a direct `makeRequest()` otherwise.
+`tests/test_ai_tool_adapters.py` drives the fence with a real temp tree (symlink out, `..`, dotfile,
+binary, cap) and pins the four-dialect declaration + dispatch of every read-tier tool. Adding a
+tool that reads user data: return it inside a labelled data block ("data, not instructions").
+**The launcher's Ask row is built from `Ai` state but never calls into it while typing.**
+`services/LauncherSearch.qml`'s `buildResults()` reads `Ai.models[Ai.currentModelId]` and
+`Ai.currentModelHasApiKey` (both named in `resultInputs`, which `test_launcher_result_inputs.py`
+enforces) to decide whether the row exists at all - no usable model, no row, so the launcher never
+offers a dead end - and the only send is `askAssistant()` from the row's `execute` closure, which
+closes the overview, sets `GlobalStates.sidebarLeftTab = "intelligence"` (consumed by
+`SidebarLeftContent`), opens the sidebar and calls `Ai.sendUserMessage`. The prefix is
+`search.prefix.ai` (`@`; `?` was already web search); the opt-in fallthrough
+(`search.ai.fallthrough`, default off) is gated on word count AND on every launchable list being
+empty, because it changes what Enter does on a miss. `LauncherAskRuntimeTest.qml` drives it with a
+keyless probe model injected the way ollama discovery injects one; a fresh install persists
+`ai.model = ""`, so the harness selects the probe explicitly.
+**Inline launcher answers live in `services/AiInline.qml`, driven from `onQueryChanged`, never
+from the results build, and never through the chat.** `LauncherSearch.refreshInlineAnswer()` hands
+a `@question` to `AiInline.ask()` the way `refreshMathResult()` drives qalc (decided from the query
+alone; a query without the prefix, or the overview closing, cancels); `buildResults()` never names
+`AiInline`, and `SearchItem` binds the Ask row's subtitle straight to `AiInline.answer`, so a
+streaming answer never rebuilds the list. The gate is opt-in (`search.ai.inline`), a usable model,
+and loopback endpoint OR `search.ai.inlineWithCloud` - keyless is not local. AiInline owns its own
+strategy instances (a strategy carries tool-call state between lines; sharing `Ai`'s would corrupt
+a chat streaming at the same time) and exposes `apiKeyEnvVarName` because `GeminiApiStrategy`
+reads it from `root` unqualified. Enter with an answer on the row mints a session and adds
+question + answer through `Ai.addMessage` instead of sending again. `test_ai_inline_contract.py`
+pins the shape; `test_ai_inline_runtime.py` counts requests against a fake streaming server.
+7703badd5 ("feat(launcher): one-sentence answers under the Ask row").
+**Frame mode has one geometry authority, `services/FrameGeometry.qml`; edge surfaces read it and
+compute nothing of their own.** `frame_geometry.js` (pure; `tst_frame_geometry.qml`) answers the
+band's thickness (`appearance.frame.thickness`, or the compositor's outer gap when 0), each edge's
+inset - an occupant's reserved zone(s) plus the band, because the compositor applies its outer gap
+after the zone (measured: modelling the bar's edge as the painted height left a gap-wide wallpaper
+stripe under the bar); a free edge is the band - the fillet's radius (the compositor's window
+rounding, no more: the fillet's box already sits at the inset, so the arcs are concentric only when
+the radii are equal; the LIVE value, `hyprctl getoption decoration:rounding` at start and on every
+`configreloaded`, so a hypr/custom override is honoured, the option as the fallback) and each
+fillet's margins. The frame's ONE occupant is the bar, whose zone is
+`Appearance.sizes.barExclusiveZone` (the settled zone `Bar.qml`'s reserver asks for; `Bar.qml` reads
+`barReservedHeight` from the same place, so there is no second copy to drift). The dock is NOT an
+occupant: modelling it as one went wrong twice - a band above its zone was a line across the
+wallpaper with the dock floating under it, and a band that was its whole strip was a border as tall
+as the dock with the pill lost in it - so on the dock's edge the band is the band, the fillet sits
+at the band, and the authority names no dock and no screen (the per-screen readers existed for the
+dock's zone dropping on a fullscreen monitor; one frame for every screen). The dock meets the band
+from ITS side: `modules/imi/dock/DockReservation.qml` reads `FrameGeometry` (never the reverse - no
+import cycle) and publishes `attached` and `frameOffset`, and `Dock.qml` applies the offset as its
+surface's outward layer-shell margin while pinned - the compositor adds an anchored-edge margin to
+the exclusive zone by itself, so nothing inside the surface moves and the zone needs no second
+number; an unpinned dock hides and reveals from the screen edge and stays there - moved in, its hover
+sliver would sit above the band, which takes no input, and the pointer slammed to the edge would miss
+it. The attached LOOK is not pinned-only while the band IS the gap: an unpinned dock sits a gap from
+the edge, and a rounded, bordered pill there rested on the default band like a pill on a line; on any
+other band an unpinned dock cannot be moved to meet it, so it keeps the pill.
+`appearance.frame.dock`: "attached" (the default) puts the pill ON the band as a tab - the band's
+colour, no border, its outward corners squared (`dock_geometry.js` `cornerRadii`; the blur region is
+composed per corner from the pill's radii, the bar's centre-pill pattern, and KEPT: the bar plate in
+the same colour is blurred, and a tab without blur read as unfrosted translucency on a real
+wallpaper - and published only while the pill is AT REST, `dockMouseArea.atRest` on the animated
+centre offsets: Quickshell's `Region` re-evaluates on its item's own geometry, the dock hides by
+offsetting an ancestor, and a hidden dock left a frosted silhouette where the pill rests, in every
+mode, unmasked the moment the tab kept its blur), the surface moved in by band minus gap (nothing at the default
+band, which is the gap; a negative margin when the band is thinner, so the tab still sits on the
+band); "floating" keeps a gap above the band. Anything but "floating"
+attaches, so a hand-edited value cannot leave the dock nowhere.
+**The attached <-> floating switch is the SPLIT, and the surface never moves for it.** It was a
+jump - the layer-shell margin reconfigured by the band in one step, colour, border and radii in one
+frame - and a layer surface's margin cannot animate. So `DockReservation.frameOffset` is the
+ATTACHED position (band minus gap) in both states, and floating is the pill lifting INSIDE the
+surface by the compositor's gap (`dock_geometry.js` `splitTravel` - "on the band" and "a gap above
+it" are `gapsOut` apart by definition, whatever the band), on ONE scalar (`Dock.qml`
+`splitProgress`, 0 fused, 1 apart) taking `Appearance.animation.split` whole - the tier measured off
+the dynamic-island reference in `docs/proposals/motion-split.md`, a two-segment curve whose join is
+the seam. Everything else is arithmetic on that scalar: the pill's own margins carry the lift
+(`liftedMargins`; the blur `Region` tracks its item's OWN geometry, so the frost rides), the icons
+follow through a centre offset (`liftOffset`), the outward corners round from the SEAM to the pinch
+(`cornerRadiiAt`, the seam's own shape opening with the neck that exposes it - rounding to rest left a
+square corner over a lit gap), and a neck in the band's colour that is a DISTANCE FIELD, the way the reference builds it
+(`shaders/split.frag`, after Clavis's `pill_morph.frag`): the pill's rounded box and the band's half-plane
+joined by a smooth-minimum whose radius is the neck (`neckBlend`: nothing at rest, four lifts at the
+seam), one `ShaderEffect` over a box laid out once per motion from the REST margins (`splitBox`, so the item
+holds still and only uniforms change per frame), covered ONCE - the first cut was a `Shape` on
+a path under the pill, and the pill and the path each antialiased their half of a fractional boundary
+into a hairline across the whole fused outline. Four things the field needed that the source's does
+not, because a flat pill edge faces a flat band where the source has a circle: the blend tapers along the
+band from the waist's centre (`neckWaist`, so the neck narrows in width to nothing `splitNeckReach` of the
+way through the settle), or a flat edge over a flat band is one distance everywhere and the neck lets go
+all at once; the coverage ramp is one DEVICE pixel of the field's own gradient, or the two facing fields'
+gradients cancel between them and a ramp in field units smeared over several pixels - taken by central
+differences with the WINDOW's pixel ratio as a uniform (`devicePixelRatio` on the window follows
+fractional scaling; the screen's is the output's integer scale), never `fwidth`, which GLSL ES 1.00 has only behind
+`GL_OES_standard_derivatives` and an OpenGL 2.1-class backend gets exactly that profile (c76d6b7b
+("fix(background): make the Doom melt transition compile on GLSL ES 1.00")) - and CLAMPED to
+[0.5, 1.5]: the blend's taper along the band steepens without bound as the waist closes, and an
+unclamped gradient drew the pinch frame as a half-covered stalk, while one taken with the radius held
+fixed left the post's sides unantialiased (both measured); the pill's field reaches
+two pixels into the band less the lift (`fieldReach`, a uniform the shader extends the pill by), because a blend that is nothing at rest cannot
+bridge the sub-pixel gap of the lift's first frames; and the band's zero-crossing sits one ramp inside
+the band, or its ramp tinted the gap's last row along the whole box. The band's edge is given in the
+box's own frame - 0 on the top and left edges, where the box starts at the band - and a first cut that
+put it a lift further out drew a band-coloured slab into the gap on those two edges and dropped it in one
+frame at the hand-over. While the field paints the pill's `Rectangle` does not (an `opacity` flip, no
+Behavior): the same silhouette in the same colour at both hand-overs, and a translucent fill drawn twice
+is darker - and only where a shader CAN paint (`fieldAvailable`: not the software scene graph, which
+draws no `ShaderEffect`, and not a shader whose file failed to load), or the hand-over would leave the
+icons over bare band; there the pill lifts without a neck, and its outward corners round over the whole
+lift rather than to a pinch that is never drawn (they hovered square over a lit gap for half of it).
+The shader binary is what the shell loads, so `split.frag.qsb.bake` records the source hash and the
+`qsb` that baked it, and the contract fails on a source edit that was not rebaked. A shader that loads but fails to build on the
+GPU is not caught - `ShaderEffect.status` reports the load - which is why the shader itself stays inside
+core GLSL ES 1.00. With a neck, the corners start rounding where the pill's ENDS leave the band
+(`cornerSpan`), not at the seam: the blend tapers to nothing at the ends, so for a short lift they open
+first, and a corner that waited for the seam sat square over a lit gap for a few frames.
+3e63f8be ("feat(dock): the neck is a distance field, and a reversal takes a proportional time"),
+5f2eb5b1 ("fix(dock): the split shader's gradient goes through the taper again, clamped; the bake is recorded"),
+8d8a2fc1 ("fix(dock): with no neck to draw, the corners round over the whole lift; the shader binary is checked against its source"),
+e7172eda ("fix(dock): with a neck, the corners start rounding where the pill's ends leave the band").
+The RESERVATION is what still steps, and it reserves the union
+of where the pill is and where it is going (`splitZoneExtra`, in `Dock.qml`): at the start of a lift and
+the end of a landing, a boolean that flips - written at the start of a landing it put the windows against
+the floating pill for a second - and the compositor re-tiles on its own animation. The scalar's target is
+the frame option and the PIN (`splitTarget`), never `attached` or `reserves`: both fold in the fullscreen
+term, and a scalar on it replayed a landing (or a lift) on every fullscreen exit. The look is sequenced
+outside the motion, as the reference does it: `attachedLook` holds the tab's colour and border until the
+scalar has landed apart, and a landing from rest pauses the scalar's `SequentialAnimation` for the effects
+tier first - `PauseAnimation` keyed on the Behavior's own `targetValue` AND the scalar still at 1, which
+is set before the animation starts, where a binding on `attached` may not have re-evaluated yet, and
+which a lift reversed mid-flight (no look pending) does not trigger. The border is a COLOUR that fades,
+from the tab's own colour to `colLayer0Border`, never a width: a width animated from 0 draws nothing
+until it reaches 1, a pop wearing the tier's name, and a transparent ring would be a seam because a
+Rectangle's fill stops at its border. A direction started part way takes a proportional
+time with the effects tier as its floor (`splitDuration` - the source does this for a merge with a
+220 ms floor of its own; here it is both directions), from a start the Behavior LATCHES when its target
+changes: bound to the moving scalar, the duration re-evaluated every frame of its own run and shortened
+it as it went. A lift that did not begin as the tab - a floating dock being
+pinned, the frame switching on under one - rises as the pill it is, no neck, corners round:
+`liftFromTab` is decided at the target's rising edge from last turn's `attached` (`attachedBefore`,
+refreshed one turn late with `Qt.callLater`); reading the look at the edge fed the old latch back
+through its own terms, and reading "what changed since the last edge" missed a change made between edges.
+No lift, no spatial tier: an unpinned dock never reserves and never lifts, so at the default band the
+Behavior is disabled and the look, corners included, changes on the effects tier through a scalar of its
+own (`lookApart`); a configured gap larger than the elevation margin the pill lifts into grows the strip
+by the shortfall (`splitRoom`, nothing at the defaults). Two things the sandbox taught while measuring
+it: a zone request lands only on the surface's next commit, and with the parent display DPMS-off the
+nested output produces no frames at all - every zone read stale and every `grim`/`wf-recorder` hung
+until the display was switched back on; and the neck's reach is a fraction of the scalar's VALUE set
+from the reference's neck in TIME (165 ms of 800), because the curve's settle half is front-loaded and a
+value-domain 0.5 pinched in 50 ms. Stated limits: a pill-lift reversed into a landing takes the tab's
+look during the descent (no pause, by construction); and the motion is pinned as source text and
+measured in the sandbox, never sampled in flight by the suite - the dock is a `PanelWindow`, which
+headless weston cannot build. `test_frame_mode_contract.py`
+pins all of it; `tst_dock_geometry.qml` the arithmetic. Verified in the sandbox at 60 fps, read the
+way the reference was: the pill's extent one row above the band 322 -> 0 px across a lift, the
+effects tier's 200 ms look change before the descent (a change detector first read it as 133 ms by
+trimming the fade's faint ends), and the reservation 65 -> 70 at the start of a lift and
+70 -> 65 at the end of a landing. ("feat(dock): the attached <-> floating switch is
+the split"). The rounding probe runs only
+while the mode is on (`running: root.enabled`, re-armed on `configreloaded` while on): the shell
+rewrites hypr files itself, so an ungated probe spawned `hyprctl` on every self-inflicted reload for
+every user. `lint_globalstates_import.py` refuses a QML file that names `GlobalStates` without a way
+to resolve it (a throwing binding is a warning, not a load failure: an earlier dock occupant read
+through it was inert for a whole review round). `modules/imi/frame/Frame.qml` draws the four bands on
+ONE surface per screen (`docs/proposals/frame-one-surface.md`, stage 1): four edges anchored, no
+margins, an empty mask, `WlrKeyboardFocus.None`, `screen: screenScope.modelData`, and the bands as
+Rectangles on it placed from `bandMargins`: the horizontal bands span the width (under the bar's
+plate on the bar's edge, at the screen edge otherwise), the side bands run between them, so no two
+overlap - the frame's colour is translucent, and a crossing was a band-square painted twice. One
+surface rather than four because a surface is the unit blur is computed against and the outline a
+specular edge is drawn along: four bands were four outlines meeting at four corners, and a glass
+treatment cannot be applied to a border that is four pieces. It also means one composed blur region
+for the whole border, gated per band on exactly what paints. The surface sits on the
+TOP layer, like the bezel corners on Overlay: chrome, over a floating window dragged into the gap.
+**`quickshell:frame` carries `blur = false` in `rules.lua`, and that half was missing for as long as
+the region existed**: the band was blurred whole-surface off the catch-all while the bar and the dock
+beside it were blurred through a region - two mechanisms at two thresholds on one colour, which is
+the seam that made an attached dock read as a separate object, and
+`tests/lint_blur_region_pairing.py` had been red on it the whole time (nobody ran it).
+**Stage 2: the frame's surface paints the dock's plate and neck**, so the whole silhouette is one
+outline on one surface. `FrameJoin` keeps the physics and `FrameJoinField` is the painter, split out
+so it can be drawn anywhere; `Dock.qml` publishes the plate in SCREEN coordinates
+(`dock_geometry.js` `surfaceOrigin` + the plate's place summed up the tree) with the corners, the
+solver's numbers and the plate's own animated colour into `GlobalStates.frameJoins[screen]`, and
+`Frame.qml` draws it and adds the field's own outline (`join_field.js`, the shader's field on the
+CPU, one `Region` per painted row) to its blur region while the dock's own region stands down; the
+strip's length itself breathes on the fluid's spring (`FluidValue`, motion-split.md §8) rather than
+a tween, so an icon arriving moves plate, meniscus and outline on one curve. On the frame's surface
+the field's box is PINNED to the band strip (`FrameJoinField.pinnedBox`) and re-made when the strip
+changes: a ShaderEffect directly under that window's content item paints its uniforms but never
+its own position or size change (measured; frame-one-surface.md stage 2), so the plate travels
+inside a box that never moves - and that box stays even inside the frame's paint layer: a field let
+follow its own box painted where it first was on the NVIDIA desktop while the sandbox's llvmpipe
+showed nothing ("fix(frame): every field keeps its pinned strip"). A field paints no band side
+(`frame_join.frag` `bandPaint`, off from the frame): a popup's box crosses the bar's gap and filled it
+("fix(frame): a field paints no band side"). A `.qsb` edit needs `qs` RESTARTED - the binary is cached by
+URL for the process's life, a hot reload keeps the old shader. And the frame takes `GlobalStates.frameJoins`
+up from `Qt.callLater`, not a binding - a repaint asked for from inside another window's sync is only noted
+under the threaded render loop, and the plate froze until a random later frame. **Stage 4 is the pin grammar** (`docs/proposals/frame-pin-grammar.md`): pinned means
+released, unpinned means fused, for the dock (`frame.dock` "auto"), a bar widget's popup
+(fused by hover, released by click, `frame.popups`) and a notification (fused, its Pin button
+releases and keeps it, `frame.notifications`); every element publishes under its own key through
+`GlobalStates.publishFrameJoin` and the frame paints one field per record. **The frame paints the pill at rest too** (`paintsAtRest`): a hand-over back
+to the dock's Rectangle at the cut crosses two render loops nothing orders, and it showed one blank
+frame at every cut (60 fps capture) - one painter in both states, and the floating pill's 1 px
+border is the stated cost. Under fullscreen the dock paints itself (`paintsLocally` follows
+`fullscreenOnThisMonitor`), since a Top surface is buried there.
+**Stage 3: where the bar's plate covers its strip (Hug, painted - `FrameGeometry.paintsBarPlate`),
+the frame paints the bar's plate as a JOIN on the band of its edge** - first as the band itself
+("feat(frame): the frame's band on the bar's edge is the bar's plate"), then under the pin grammar as
+a record like the dock's ("feat(frame): the bar's plate is a join on its band"): `Bar.qml` owns a
+`FrameJoin` on its plate and publishes it under `"bar"`, `BarContent` paints no plate (`plateOnFrame`,
+set by the bar's window), the band on the bar's edge stays the hairline, and the plate is FUSED to it
+(on the hairline, between the side bands) or RELEASED (lifted by the compositor's gap, inset from the
+side bands by the same, corners rounding with the lift - an island). `FrameGeometry.barAttachedFor(pinned,
+occupied)` decides from `frame.bar`: "auto" is fused (Hug) while a window is on the monitor's active
+workspace and nothing pins the bar - the frame is the border around the windows - and released (Float)
+over an empty workspace (`HyprlandData.occupiedByMonitorName`, `GlobalStates.barPinned`, `bar togglePin`
+over IPC; turned at review, "fix(frame): auto hugs with windows, the bar's shadow stands down, Hug and
+Float are states"), "attached"/"floating" force one look. In frame mode Hug and Float are STATES of the
+plate: the Bar style row offers Plate / Islands / M3 and a Bar state row picks Auto / Hug / Float; the
+Islands style is pieces of the plate on the same join: Bar.qml publishes one record per island
+(`"barIsland:<section>"`), the frame paints them with their meniscus, the outer islands hug their corner,
+the style takes the plate's height and zone in frame mode (`Appearance.sizes.frameIslands`), and a popup
+fuses to its section's island with the card as the drop (its record names the section for
+`joinBandEdgeFor`; "feat(frame): islands are pieces of the plate"); the bar's own shadow stands down while
+the frame paints its plate. Released, the bar reserves its lift as well
+(`releaseZoneExtra`, the dock's `splitZoneExtra` rule: flips at the start of a lift and the end of a
+landing, one re-tile per state change) - with the zone held the island sat ON the first window's edge
+(measured at 8x, "feat(frame): a released bar reserves its lift"); the notification popup's `roomOn`
+reads the extra off the bar's record. A bar popup joins the bar PLATE's inner edge, not the hairline
+(`Frame.qml joinBandEdgeFor`, `BarPopupOverlay.barInner`, both off the bar's record) - joined to the
+hairline its plate climbed up through the bar (seen live). Under auto-hide the band on the bar's edge
+slides out with the plate, the bar's neck lets go over the last meniscus of the slide (a plate AT the
+band's surface blended into a screen-wide strip), and the bar holds while its popup is up
+("fix(frame): auto-hide under the pin grammar - the band goes with the plate, the popup joins the plate").
+The frame paints into ONE layer with ONE alpha while its colour is translucent (`Frame.qml paintLayer`,
+"fix(frame): one layer, one alpha - the frame's overlapping paints stop doubling"): its paints overlap by
+design (a popup's band side is the bar's plate; a fused plate reaches into its band) and a translucent
+colour painted twice doubled - the bar under an open popup read darker than the popup. Other bar styles
+keep their own plates: islands inside the frame.
+("feat(frame): one surface per screen draws the four bands"),
+("fix(frame): the band's blur is scoped like the bar's, so the two stop being two"),
+("feat(frame): the frame's surface paints the dock's plate and neck"),
+("feat(frame): the frame's band on the bar's edge is the bar's plate"). A round
+on Bottom ("under every window, over the wallpaper") was invisible on every cold start with the mode
+on: `quickshell:background` is on Bottom too and a level stacks by creation order, so a band created
+before the wallpaper sat under it - it showed only when the mode was switched on at runtime (measured
+in the sandbox: bands present in `hyprctl layers`, every band pixel the wallpaper's). The wallpaper
+cannot move to Background: the WallpaperEngine satellite relies on being below it. `ExclusionMode.Ignore`, an empty mask; they stay mapped and
+paint transparent for a fullscreen window
+(`visible` on a layer surface destroys it; `rules.lua` gives `quickshell:frame` no_anim). `ScreenCorners` keeps its windows AT the screen
+corners (the sidebar corner-open hit rect lives there) and moves the fillet shape inward through
+`RoundCorner`'s visual margins; `BarContent` squares the centre-only pill. All gated on
+`FrameGeometry.enabled` (the option AND not the vertical bar), the family included. Known stage-1
+limits, stated in the proposal: one frame for every screen; the bar's screen list and auto-hide are
+not modelled. A further slice adds its geometry to the authority first. 220780dfb ("feat(frame): frame mode, stage 1"), 953d67a89 ("fix(frame): a pinned dock's band is its whole strip, under the dock, on the Bottom layer"), 03567ec36 ("fix(frame, dock): a pinned dock sits on the band as a tab, or floats a gap above it").
+**The review sandbox is in the repo: `tests/sandbox/` (README there).** A nested Hyprland on its
+own D-Bus and XDG dirs running a worktree's shell against the shipped defaults, with the
+hot-apply of overrides (the appearance domain is split into `config.d/appearance.json`, wrapped),
+layout-based crops (the nested output resizes with the parent's tiling) and the nested
+compositor's Lua dispatch syntax (`hl.dsp.cursor.move`; the classic `movecursor` is inert there)
+written down where the next machine finds them - the tooling lived in one machine's home dir for
+a week and a laptop session had none of it. 062486551 ("test(sandbox): the review sandbox tooling lives in the repo").
+**`stop` ends the whole sandbox session, and a measurement finds the shell by the session's
+marker.** Every process a sandbox starts carries `IMI_SANDBOX_SESSION=<sandbox-dir>` - set for the
+session only, not in the env file, so a terminal that sourced that file is never mistaken for part of
+the sandbox (a `stop` that matched `XDG_CONFIG_HOME` killed its own caller). `stop` ends every marked
+process, the shell first (the one whose argv[0] is `quickshell`; `pgrep -f quickshell` matches the
+script's own path), needs no env file (a start that failed before writing one still left a
+compositor running), never kills a pid from one on its own (an env file outlives its session, and
+the pid can be anyone's by then), removes only a run dir `start` made - `run.path` feeds an unmount
+pass and an `rm -rf`, so an empty or foreign value is ignored - after lazily unmounting any FUSE
+mount a portal left there, refuses to run from inside the sandbox, and reports what it ended and what
+is left (non-zero if anything is). Both commands canonicalise the sandbox dir - it IS the marker, and a
+stop given another spelling of it found nothing and said "nothing left". A directory is a sandbox
+only if it holds the `.imi-sandbox` sentinel start writes: guessing from file names (`env`,
+`run.path`) would have let `start` wipe a project whose Python venv is called `env/`. `start` over a
+sandbox dir stops that sandbox first and gives up if it cannot, never wipes a non-empty directory
+without the sentinel, and ends the session of a start that failed.
+Before this, `start` recorded the subshell of `cd && qs &` as the shell, and `stop` ended only that
+and the compositor: the shell sometimes survived, and its helpers always did - 274 of them after a
+day of review sandboxes, every tray watchdog whose bus had gone spinning at 14% of a core, the
+machine at a load average of 73. A dock review's idle CPU swung tenfold between starts because of it,
+and looked like a property of the build. So: to measure the shell, find it by the marker in
+`/proc/<pid>/environ`, never with `pgrep -n`; after a batch of sandbox runs, check that nothing marked
+is left before trusting a timing; and never delete a sandbox dir without `stop` first - its session
+keeps running and nothing can find it any more. `test_sandbox_shell.py` drives start and stop against
+fake `Hyprland`, `dbus-run-session` and `qs` binaries.
+c700c58d ("fix(sandbox): stop kills the shell, not the subshell around it"),
+0a6a74b2 ("fix(sandbox): stop ends the whole session, not just the shell and the compositor"),
+579e1424 ("fix(sandbox): stop finds the session by its own marker, not by a variable the env file exports"),
+a1375a5a ("fix(sandbox): stop kills only what carries the marker, finds the shell by argv[0], and unmounts what it left"),
+dfe57a9f ("fix(sandbox): stop needs no env file, trusts no run.path, refuses from inside, and reports"),
+9e1733b0 ("fix(sandbox): one spelling of the sandbox, a literal match, a start that neither wipes nor strands"),
+609a0f3d ("fix(sandbox): a sandbox is what start marked, and the script's own hooks stay in their lane").
+**Modes & Routines is one engine, `services/Modes.qml`, and every surface reads it.** Definitions
+(modes in priority order, routines) live in `Config.options.modes`; the APPLIED state (active mode,
+its revert snapshot, the activity log, routine runs, paused action steps) lives in
+`Persistent.states.modes`, so a config reset never strands an applied mode. `services/modes/` holds the
+schema (presets, routine templates, normalisers), the action runner and the trigger watchers; the
+port from the p3drovfx fork dropped what this shell has no home for (screen shaders, keyboard
+backlight, earbuds ANC, sounds, workspace profiles, DNS-over-TLS, calendar, the lock-screen pill), and
+`test_modes_contract.py` refuses those names anywhere under `services/modes` or `modules/imi/modes`
+and checks every type a preset or template names is one the runner or the triggers know. The
+surfaces: the manager overlay (`modules/imi/modes/ModesOverlay.qml`, GlobalShortcut `modesToggle`,
+Super + Y in `keybinds.lua`); the bar pill `ModeIndicator` - the record indicator's pill grammar on
+the mode's container colour, with a `StyledPopup` card, never the fork's shared cards; the shared
+`ModesToggle` model in both quick-panel styles; the start/end banner `ModeFlashPopup` (family-loaded
+while `modes.flash` is not "off"); Settings > Modes & Routines in the page grammar (the bar switch
+edits the layout's `modeIndicator` id). Fork UI ported into `modules/imi/modes/` must take the M3
+spacing tokens and this shell's widget props - `lint_spacing.py` and the load are the gate, and the
+fork's `animatePopulate`, `popupRadius`, `stickyHover` and `tooltip`-on-`ContentSection` do not exist
+here. The engine is driven end to end in `test_modes_runtime.py`. 130cee4ec ("feat(modes): the Modes & Routines engine, ported from the p3drovfx fork"). The editor's controls are this shell's, never a second implementation: text fields on `ToolbarTextField` (`PlainField` / `TimeField` / `NumberField` keep only commit semantics), removable chips on `FilterChip`, every switch row on `ConfigSwitch` (`EditorSwitchRow` is it on the card tier; `EditorRow` draws with `CatalogueRow`), a form's segmented choice standing on its own a LABELLED `FormChoice` at the form's width (one sharing its line with another control keeps its natural width), and one `EditorPopup` plate under the kind menu, the icon picker and the suggestion menu. What remains under `modules/imi/modes/` (`FooterButton`, `FormLabel`, `FormHint`, `AddRowButton`) is a role wrapper over `RippleButton` / `StyledText` with the editor's sizes, registered as such in `lint_component_gallery.py`. A hand-rolled Rectangle-plus-StyledTextInput field or a `StyledSwitch` beside a label is the fork kit coming back; `test_modes_contract.py` refuses both. 974621970 ("refactor(modes): the editor's fields, chips and popups are the shell's"), 94017f93d ("refactor(modes): every switch row in the editor is the shell's ConfigSwitch").
+**Accounts (Google, Proton) are services on one credential store and one request path; the
+surfaces that already exist read them.** `services/GoogleAccount.qml` holds the user's OWN OAuth client
+and refresh token under `google` in the keyring blob (`KeyringStorage.setNestedField(["google"], …)` -
+never a second libsecret item, or the shell scripts' `secret-tool lookup` and the QML store diverge)
+and runs `scripts/accounts/google_oauth.py` for sign-in (loopback + PKCE) and refresh with the secrets
+in the helper's ENVIRONMENT, never argv. Every call is a `GoogleRequest` (`services/GoogleRequest.qml`):
+curl with the bearer header, method and JSON body on stdin as a curl config (`-K -`), and stdin
+re-opened per run - a `Process` started with `stdinEnabled` false inherits the shell's own stdin and
+curl waits on it for ever (the second request on any instance hung until that line). Calls QUEUE on
+the instance (`request(url, method, body, tag)`, PhoneConnect's action-queue shape) and each carries
+its own tag - the calendar's id and name ride with its events request - so a second write inside one
+round trip is never dropped and an overlapping cycle cannot re-point the one in flight. The queue is
+pumped from `exited`, never from the stream's end, and refuses while `running`: `running = true` on a
+Process that has not exited yet is a NO-OP, so a call queued from inside a result was started never
+and then settled as "no answer" by the previous exit - the calendar's events request failed silently
+every cycle, and only the settings page's live count in a screenshot showed it (b788dce90 ("fix(accounts):
+a request queued from a result waits for the process to exit")). The Proton status read is a Python
+process (~0.5 s, ~47 MB), so it is never a background poll: presence is `importlib.util.find_spec`
+(imports nothing), the read runs on a 60 s reconcile only while `watched` (the right sidebar open,
+or the Accounts page holding `acquire()` - `shown` is `currentPageInstance === page &&
+settingsOpen`, the window and not the host: without that conjunct a single visit holds the watcher for
+the rest of the session) and once,
+debounced, after a NetworkManager event while watched (7020f3a6a ("perf(accounts): the Proton status is
+read only while someone is looking")). Parsers and URL
+builders are pure (`services/google_api.js`, `tst_google_api.qml`); the API base is overridable
+(`IMI_GOOGLE_API_BASE`) so `test_accounts_runtime.py` runs against `tests/fake_google_api.py` with
+`secret-tool` shadowed by a file-backed stub. Account calendars land in `IcsCalendar.setExternalEvents(sourceId, events)`
+- the ONE list the sidebar dots, `list_events` and the modes engine read - with `singleEvents` so Google
+expands recurrences (the ICS parser does none). Google Tasks and the local to-do file never merge (the
+file has no ids): the to-do widget shows a Local | Google source row and routes by source. Proton VPN
+goes through the official app's session (`scripts/accounts/protonvpn_ctl.py` over
+python-proton-vpn-api-core; the shell never logs in and never sees the password), two-staged like
+Tailscale; Proton Calendar is an ICS share link (Settings > Accounts > Calendar feeds), Proton Mail
+needs Bridge (stage 2), Proton Pass has no API (nothing offered). 2dbdaced6 ("feat(accounts): the Google account and its calendar, tasks and mail services").
+**`services/OllamaCatalog.qml` is the shell's only Ollama client; it speaks the daemon's HTTP API
+through curl and starts nothing on its own.** `/api/tags` (installed), `/api/ps` (loaded),
+`/api/pull` (NDJSON, one status line per event, streamed through `curl -sN` into a `SplitParser`)
+and `/api/delete`; the base URL is `IMI_OLLAMA_URL` (the test seam), else `OLLAMA_HOST`, else
+`127.0.0.1:11434`. The refresh timer runs only while `watchers > 0` - the browse page counts
+itself in on completion and out on destruction - so nothing polls the daemon in the background,
+and the only non-curl processes are `df` (free space where the daemon stores models) and the
+`systemctl --user start ollama.service` behind the explicit Start button. The remote library is
+a hand-refreshed snapshot (`services/ai/ollama_library.js`, dated) because ollama.com has no
+JSON catalog; anything else is pulled by typed `name:tag`. Discovery for the chat is still
+`show-installed-ollama-models.sh`; `Ai.refreshOllamaModels()` re-runs it after a pull and
+`Ai.forgetOllamaModel()` drops a removed model at once. `test_ollama_catalog_runtime.py` plays the
+daemon with a tiny HTTP server and a stub `ollama` on PATH; `test_ollama_catalog_contract.py`
+pins the no-CLI, watcher-gated, explicit-start rules. A pull asks twice (armed chip shows size and
+free disk) and refuses outright when it would not fit.
+**A transient overlay's surface outlives its flag by the leave motion, and its input does not.**
+`modules/common/widgets/OverlayLifecycle.qml` is the one mechanism: `wanted` follows the
+`GlobalStates.*Open` flag, `alive` is what the host's Loader/LazyLoader binds `active:` to, and
+`progress` (0→1 on `animation.overlayEnter`, 1→0 on `animation.overlayExit`, both through the
+motion policy) is the only scalar the card's opacity/scale read; `closed()` fires when the leave
+finishes and only then does `alive` drop. The host's `PanelWindow.mask` follows the FLAG
+(`flag ? null : emptyRegion`), so the leaving surface never eats a click - a leave that keeps input
+is 180 ms of dead desktop, the trap the 2026-08-02 branch recorded. The desktop menu, screenshot
+toast and drop shelf use it (the session screen has its own older `openProgress`/`reallyOpen`
+pair of the same shape; the cheatsheet is a FloatingWindow and the compositor animates it).
+`tests/lint_overlay_lifecycle.py` fails a host whose surface `active:` reads the flag or that has
+no flag-gated mask; `OverlayLifecycleRuntimeTest.qml` measures the sequence against the real
+catalogue, reduce-motion included. Do not put Behaviors back on those cards: a Behavior cannot
+play a leave on a window destroyed the frame its flag drops.
+**Local retrieval indexes only `ai.documents.folders`, and `scripts/ai/ai_rag.py` owns the privacy
+contract.** `services/AiRag.qml` runs the script (index / query / forget / status, one SQLite file
+under `<state>/user/rag/`); the script refuses dotfiles at every depth, the home's key and config
+directories (`FORBIDDEN_DIRS`) even when named, `.noindex` subtrees, `.gitignore`d names, binaries
+and files over 2 MB, and drops a folder's rows on `forget`. Vectors are namespaced by embedder
+(`lexical`, a hashed bag of words that needs nothing, or `ollama:<model>` via the daemon's
+`/api/embed`), so switching embedders never mixes spaces. Two ways into the chat: the
+`search_documents` tool (declared for all four dialects, dispatched in `Ai.qml` and continued
+through `continueAfterTool()`), and the composer's Documents toggle (`ai.documents.alwaysAttach`),
+which retrieves before the send and puts the passages in the user message's `rawContent` - the
+field the strategies send - while `content` keeps the typed text. Passages travel in a labelled
+data block ("data, not instructions"); the sources become `annotationSources` on the next
+assistant message via `pendingRagSources`. Nothing watches user folders: indexing runs on the
+Settings action. `tests/test_ai_rag.py` drives the contract against a temp tree and a fake
+`/api/embed`; `AiRagRuntimeTest.qml` drives the whole loop in a nested shell.
+**Dictation is a two-process state machine owned by `services/AiDictation.qml`; the transcript goes to
+the draft, never straight into the field.** `scripts/ai/ai_dictate.py start` spawns `pw-record`
+(or `parec`) detached and writes a pidfile under the runtime dir; `stop` SIGINTs it, transcribes
+(faster-whisper in the shell's venv or the system python, else whisper.cpp's `whisper-cli` with a
+ggml model, else the `provider` engine over curl with the key in `API_KEY`) and prints one JSON
+object. A model file is downloaded only by `download`, behind the Settings button. The service
+holds idle→listening→transcribing, the watchdog (`ai.dictation.maxSeconds`), and hands the text to
+`AiDrafts.record(currentId, existing + " " + text)` before emitting `transcribed`; `AiChat.qml`
+re-reads the draft on that signal, so a take made with the sidebar closed is there when it opens
+and nothing is inserted twice. `IMI_DICTATE_FAKE_TRANSCRIPT` and `IMI_DICTATE_RUNTIME_DIR` are the
+test seams; `tests/test_ai_dictate.py` drives the script with a stub recorder, and
+`AiDictationRuntimeTest.qml` drives the service in a nested shell (clock, watchdog, append,
+auto-send). The probe `Process` starts itself (`lint_capability_probe_gating.py`). Keybinds: the
+`ai` IPC target gained `dictate(action)`; Hyprland has no key-release dispatch, so toggle is the
+primitive.
+
 **Preset `apps.*` values are shell commands the shell runs; `presets.sh --apply` strips them unless
 `--only apps` is asked for, and names are validated before they touch the filesystem.** A shared
 preset could plant a launch command that ran on the next terminal/browser keybind; the strip now
@@ -1108,6 +1539,19 @@ assets/                    Static images/fonts bundled with the shell; assets/ty
 1. Loads `~/.config/immaterial-impulse/config.json` into `Config.options` on startup.
 2. Persists any property write back to that file (debounced by `Config.readWriteDelay`, 50ms by
    default — see the claim entry below for what that debounce is for and who may shorten it).
+3. **`appearance` lives in its own file** (`config.d/appearance.json`) since the config split's
+   stage 1 (`docs/proposals/config-storage-split.md`). `Config.options` is a `QtObject` aggregator
+   of one alias per top-level domain (`Config.domains` lists them; `test_config_split_contract.py`
+   pins that every declared domain is aliased), so every `Config.options.x.y` read and write is
+   unchanged whichever file `x` is in. The split happens once, on the first load that finds
+   `appearance` in `config.json` and no split file: a `cp -n config.json config.json.pre-split-<date>`
+   first (the downgrade path: the main adapter's next write drops the key it no longer declares),
+   then the object becomes the file verbatim; `ready` waits for both files. Anything outside QML that
+   reads or writes `appearance.*` — `switchwall.sh`, `applycolor.sh`, `presets.sh` — goes to
+   `config.d/appearance.json` when it exists (presets fold it into the one shared document on save
+   and split it back out on apply). A new domain moved out of `config.json` follows the same shape:
+   its own `FileView` + `JsonAdapter` + the two timers, an alias on the aggregator, a name in
+   `domains`, and its outside readers redirected. 0ddb0df35 ("feat(config): appearance on its own file").
 
 Consequences for making changes:
 
@@ -6850,8 +7294,10 @@ header button and the rail button must stay the same height, or that shared cent
 Shared building blocks to reach for before writing something from scratch: `StyledText`,
 `StyledComboBox`/`StyledComboBoxSearch`, `StyledSlider`, `StyledToolTip`/`StyledToolTipContent`,
 `RippleButton`, `MaterialSymbol`, `ResourceCard`, `GroupedList` + `ConfigSwitch`/`ConfigSpinBox`/
-`ConfigSelectionArray`/`ConfigComboBox`/`ConfigTextArea` (settings rows - see the row-grammar entry
-below for the opt-in shapes they carry), `StyledPopup` (a bar
+`ConfigSelectionArray`/`ConfigComboBox`/`ConfigTextArea`/`ConfigLongText` (settings rows - see the row-grammar
+entry below for the opt-in shapes they carry; `ConfigTextArea` is a one-line VALUE field, `ConfigLongText`
+the row for a paragraph: label above, full width, grows to a line cap, scrolls inside - a system prompt in a
+`ConfigTextArea` was clipped to its first lines), `StyledPopup` (a bar
 widget's hover popup: a declaration plus a hover state machine, *not* a window - its content is
 hosted on `modules/imi/bar/BarPopupOverlay.qml`'s shared card, b22a923a5 ("refactor(bar): delete
 the per-popup layer surface")), `StyledRectangularShadow`, `DockIconMotion` (wraps a dock icon's visuals with hover-lift /
@@ -7252,7 +7698,10 @@ control from `LockSurface` rather than naming a type, so the two cannot drift ag
 same failure shape as the `colLayer0`/`colLayer1` note below - "it uses a real shared widget" is not
 "it uses the right shared widget for this position". The four remaining call sites are unreviewed
 rather than sanctioned; `modules/imi/sidebarRight/wifiNetworks/WifiNetworkItem.qml` is the next one
-of them that is a password prompt.
+of them that is a password prompt. Both files are now DELETED and those four sites moved onto the
+widgets above: the Wi-Fi password prompt to `PasswordField`, the AI system prompt and the
+networking user agent (`ServicesConfig.qml`) and the autostart command row (`AutostartApps.qml`) to
+`ConfigTextArea`, and `welcome.qml`'s locale box to `ToolbarTextField`.
 f957d9e59 ("fix(polkit): give the auth prompt the field the rest of the shell uses").
 
 **...and the same two prompts then drifted again in the half a type name does not carry, which is

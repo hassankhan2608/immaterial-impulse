@@ -27,6 +27,28 @@ Singleton {
         else
             FileSearch.reset();
         root.refreshMathResult();
+        root.refreshInlineAnswer();
+    }
+
+    // The inline answer (AiInline) is driven from here, like the qalc spawn:
+    // decided from the query alone, never from the results build. AiInline
+    // applies its own gates (opt-in, usable model, local-or-cloud-switch,
+    // word count, debounce); a query without the prefix cancels whatever
+    // was in flight. Closing the overview cancels it too.
+    function refreshInlineAnswer() {
+        // Off means off: nothing here instantiates or pokes AiInline.
+        if (!(Config.options.search.ai.inline ?? false)) return;
+        const aiPrefix = Config.options.search.prefix.ai ?? "";
+        if (aiPrefix.length > 0 && root.query.startsWith(aiPrefix))
+            AiInline.ask(StringUtils.cleanPrefix(root.query, aiPrefix));
+        else
+            AiInline.cancel();
+    }
+    Connections {
+        target: GlobalStates
+        function onOverviewOpenChanged() {
+            if (!GlobalStates.overviewOpen && (Config.options.search.ai.inline ?? false)) AiInline.cancel();
+        }
     }
 
     // Called, never bound. A `readonly property bool queryIsMath` read from
@@ -374,6 +396,9 @@ Singleton {
         Config.options.search.prefix.math, Config.options.search.prefix.shellCommand,
         Config.options.search.prefix.webSearch, Config.options.search.prefix.file,
         Config.options.search.prefix.prism,
+        Config.options.search.prefix.ai, Config.options.search.ai.fallthrough,
+        Config.options.search.ai.fallthroughMinWords,
+        Ai.models, Ai.currentModelId, Ai.currentModelHasApiKey,
     ]
     onResultInputsChanged: Qt.callLater(root.rebuildResults)
 
@@ -673,6 +698,26 @@ Singleton {
                 Qt.openUrlExternally(url);
             }
         });
+        // The assistant. Offered under its prefix, and (opt-in) as the last
+        // row for a long query nothing else matched. Built only while the
+        // selected model can actually answer, so the launcher never offers a
+        // dead end; the question is sent on Enter, never while typing.
+        const aiPrefix = Config.options.search.prefix.ai ?? "";
+        const startsWithAiPrefix = aiPrefix.length > 0 && root.query.startsWith(aiPrefix);
+        const aiModel = Ai.models[Ai.currentModelId];
+        const aiUsable = !!aiModel && Ai.currentModelHasApiKey;
+        const aiQuestion = (startsWithAiPrefix ? StringUtils.cleanPrefix(root.query, aiPrefix) : root.query).trim();
+        const aiResultObject = (aiUsable && aiQuestion.length > 0) ? resultComp.createObject(null, {
+            id: "ask-assistant", // SearchItem hangs the inline answer off this
+            name: aiQuestion,
+            verb: Translation.tr("Ask"),
+            type: Translation.tr("Ask %1").arg(aiModel.name ?? "AI"),
+            iconName: "star_shine",
+            iconType: LauncherSearchResult.IconType.Material,
+            execute: () => {
+                root.askAssistant(aiQuestion);
+            }
+        }) : null;
         const launcherActionObjects = root.allActions.map(action => {
             const actionString = `${Config.options.search.prefix.action}${action.action}`;
             if (actionString.startsWith(root.query) || root.query.startsWith(actionString)) {
@@ -702,6 +747,8 @@ Singleton {
             result.push(commandResultObject);
         } else if (startsWithWebSearchPrefix) {
             result.push(webSearchResultObject);
+        } else if (startsWithAiPrefix && aiResultObject) {
+            result.push(aiResultObject);
         }
 
         //////////////// Apps //////////////////
@@ -716,6 +763,18 @@ Singleton {
         ////////// Launcher actions ////////////
         result = result.concat(launcherActionObjects);
 
+        ////////// Ask the assistant ///////////
+        // Fallthrough: a real sentence that matched nothing launchable.
+        if (aiResultObject && !startsWithAiPrefix
+                && (Config.options.search.ai.fallthrough ?? false)
+                && appResultObjects.length === 0 && prismResultObjects.length === 0
+                && settingsResults.length === 0 && launcherActionObjects.length === 0
+                && !startsWithShellCommandPrefix && !startsWithWebSearchPrefix
+                && !startsWithNumber && !startsWithMathPrefix
+                && aiQuestion.split(/\s+/).length >= (Config.options.search.ai.fallthroughMinWords ?? 4)) {
+            result.push(aiResultObject);
+        }
+
         /// Math result, command, web search ///
         if (Config.options.search.prefix.showDefaultActionsWithoutPrefix) {
             if (!startsWithShellCommandPrefix)
@@ -727,6 +786,39 @@ Singleton {
         }
         
         return result;
+    }
+
+    // Enter on the Ask row: close the launcher, open the left sidebar on the
+    // Intelligence tab (the deep link is consumed by SidebarLeftContent) and
+    // send the question. Ai is a singleton, so the send does not wait for the
+    // panel to be built.
+    // An inline answer already on the row (complete or partial) travels
+    // into the chat as the assistant's turn instead of being asked again,
+    // so the conversation continues from it; without one, the question is
+    // sent normally.
+    function askAssistant(question) {
+        const text = String(question ?? "").trim();
+        if (text.length === 0) return;
+        const taken = (Config.options.search.ai.inline ?? false) ? AiInline.take(text) : { "answer": "", "model": "" };
+        GlobalStates.overviewOpen = false;
+        GlobalStates.sidebarLeftTab = "intelligence";
+        GlobalStates.sidebarLeftOpen = true;
+        if (taken.answer.length > 0) {
+            AiSessions.mint(text);
+            Ai.addMessage(text, "user");
+            // A cut answer says so in the transcript, so the "…" reads as the
+            // launcher's budget and not as the model trailing off.
+            const carried = taken.answer.endsWith("…")
+                ? taken.answer + " " + Translation.tr("*(cut in the launcher; ask to continue)*")
+                : taken.answer;
+            Ai.addMessage(carried, "assistant");
+            // Stamped with the model that answered, like a streamed reply,
+            // so the bubble shows its icon and name instead of a blank.
+            const answerId = Ai.messageIDs[Ai.messageIDs.length - 1];
+            if (Ai.messageByID[answerId]) Ai.messageByID[answerId].model = taken.model || Ai.currentModelId;
+            return;
+        }
+        Ai.sendUserMessage(text);
     }
 
     Component {

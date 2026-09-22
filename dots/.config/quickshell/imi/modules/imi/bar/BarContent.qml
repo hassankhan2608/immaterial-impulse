@@ -22,7 +22,13 @@ Item {
     // with the groups inside them exactly as Float draws them. The full-width
     // plate goes transparent and three islands take its place.
     readonly property bool isFloatIslands: Config.options.bar.cornerStyle === 4
-    readonly property bool floatPlate: Config.options.bar.cornerStyle === 1 || root.isFloatIslands
+    // Islands in frame mode are pieces of the Hug plate on the bar's join
+    // (Bar.qml publishes one record per island, the frame paints them): no
+    // gap of their own around the content, the join carries the lift.
+    readonly property bool frameIslands: FrameGeometry.enabled && root.isFloatIslands
+    readonly property bool floatPlate: Config.options.bar.cornerStyle === 1 || (root.isFloatIslands && !root.frameIslands)
+    // The islands, for the bar's window to publish (section, populated, rect).
+    readonly property list<Item> frameIslandItems: [leftIsland, centerIsland, rightIsland]
     readonly property real centerPillX: centerPill.x
     readonly property real centerPillWidth: centerPill.width
     property bool suppressDockerForMemoryTest: false
@@ -37,6 +43,17 @@ Item {
     readonly property Item backgroundItem: barBackground
     readonly property bool backgroundPainted: !centerOnly && Config.options.bar.showBackground
         && Config.options.bar.cornerStyle !== 2 && !root.isMaterial && !root.isFloatIslands
+        && !root.plateOnFrame
+    // The plate is the FRAME's to paint where the bar is the frame's edge
+    // (frame-one-surface.md stage 3, frame-pin-grammar.md the bar row): the
+    // bar's window publishes it as a join on the band and Frame.qml draws it,
+    // fused or lifted, so plate and bands are one shape on one surface.
+    // Painted here as well it would be the same translucent colour twice.
+    // Both set by the bar's window, which owns the join: whether the frame
+    // paints this plate, and the corner radius the join asks for - rounding
+    // with the lift.
+    property bool plateOnFrame: false
+    property real plateRadius: 0
     readonly property Item centerPillItem: centerPill
     readonly property bool centerPillPainted: centerPill.visible
 
@@ -53,9 +70,14 @@ Item {
     readonly property Item leftIslandItem: leftIsland
     readonly property Item centerIslandItem: centerIsland
     readonly property Item rightIslandItem: rightIsland
-    readonly property bool leftIslandPainted: leftIsland.visible
-    readonly property bool centerIslandPainted: centerIsland.visible
-    readonly property bool rightIslandPainted: rightIsland.visible
+    // ...and not while the frame paints an island (onFrame): the frost for
+    // it is the frame's outline region then, and this window's own rounded
+    // region over its transparent island blurred the frame's paint a second
+    // time - measured in the sandbox as the island's body a shade lighter
+    // than a square corner the frame painted outside the rounded region.
+    readonly property bool leftIslandPainted: leftIsland.visible && !leftIsland.onFrame
+    readonly property bool centerIslandPainted: centerIsland.visible && !centerIsland.onFrame
+    readonly property bool rightIslandPainted: rightIsland.visible && !rightIsland.onFrame
 
     function filterLayout(layout) {
         return layout.filter(name => {
@@ -131,9 +153,14 @@ Item {
 
     // Optional soft drop shadow under the bar background (Config.options.bar.shadow).
     // Only rendered when the background itself is painted (mirrors barBackground's color condition).
+    // Never while the frame paints the plate: the shadow lives in THIS window,
+    // above the frame's surface, so it fell across the frame's plate and a
+    // fused popup below it - part of the seam the user saw. The frame's plate
+    // is the frame's material and carries no shadow of its own.
     Loader {
         active: Config.options.bar.shadow && !centerOnly && Config.options.bar.showBackground
             && Config.options.bar.cornerStyle !== 2 && !root.isMaterial && !root.isFloatIslands
+            && !root.plateOnFrame
         anchors.fill: barBackground
         sourceComponent: StyledRectangularShadow {
             anchors.fill: undefined // The loader's anchors act on this, and this should not have any anchor
@@ -164,9 +191,10 @@ Item {
         id: barBackground
         anchors.fill: parent
         anchors.margins: root.floatPlate ? Appearance.sizes.hyprlandGapsOut : 0
-        color: (!centerOnly && Config.options.bar.showBackground && Config.options.bar.cornerStyle !== 2 && !root.isMaterial && !root.isFloatIslands)
+        color: (!centerOnly && Config.options.bar.showBackground && Config.options.bar.cornerStyle !== 2 && !root.isMaterial && !root.isFloatIslands && !root.plateOnFrame)
             ? Appearance.colors.colBarBackground : "transparent"
-        radius: Config.options.bar.cornerStyle === 1 ? Appearance.rounding.windowRounding : 0
+        radius: root.plateOnFrame ? root.plateRadius
+            : Config.options.bar.cornerStyle === 1 ? Appearance.rounding.windowRounding : 0
         border.width: (!centerOnly && Config.options.bar.cornerStyle === 1) ? 1 : 0
         border.color: Appearance.colors.colLayer0Border
     }
@@ -197,10 +225,12 @@ Item {
         border.width: root.floatPlate ? 1 : 0
         border.color: Appearance.colors.colLayer0Border
 
-        bottomLeftRadius:  Config.options.bar.cornerStyle === 0 && !Config.options.bar.bottom ? Appearance.rounding.screenRounding : radius
-        bottomRightRadius: Config.options.bar.cornerStyle === 0 && !Config.options.bar.bottom ? Appearance.rounding.screenRounding : radius
-        topLeftRadius:     Config.options.bar.cornerStyle === 0 && Config.options.bar.bottom  ? Appearance.rounding.screenRounding : radius
-        topRightRadius:    Config.options.bar.cornerStyle === 0 && Config.options.bar.bottom  ? Appearance.rounding.screenRounding : radius
+        // In frame mode the plate is square: the fillets at its ends are the
+        // ScreenCorners inner corners, drawn in the same colour.
+        bottomLeftRadius:  FrameGeometry.enabled ? 0 : (Config.options.bar.cornerStyle === 0 && !Config.options.bar.bottom ? Appearance.rounding.screenRounding : radius)
+        bottomRightRadius: FrameGeometry.enabled ? 0 : (Config.options.bar.cornerStyle === 0 && !Config.options.bar.bottom ? Appearance.rounding.screenRounding : radius)
+        topLeftRadius:     FrameGeometry.enabled ? 0 : (Config.options.bar.cornerStyle === 0 && Config.options.bar.bottom  ? Appearance.rounding.screenRounding : radius)
+        topRightRadius:    FrameGeometry.enabled ? 0 : (Config.options.bar.cornerStyle === 0 && Config.options.bar.bottom  ? Appearance.rounding.screenRounding : radius)
     }
 
     Item {
@@ -216,6 +246,13 @@ Item {
         readonly property real islandPad: Appearance.spacing.space125
         component Island: Rectangle {
             required property bool populated
+            required property string sectionName
+            // In frame mode the frame paints this island from the record the
+            // bar's window publishes ("barIsland:<section>", Bar.qml) - fused
+            // to the band with its meniscus, or lifted off it - and the
+            // island stands down like the plate does, its shadow with it.
+            readonly property bool onFrame: (GlobalStates.frameJoins[root.screen?.name ?? ""]?.["barIsland:" + sectionName] ?? null) !== null
+            opacity: onFrame ? 0 : 1
             visible: root.isFloatIslands && Config.options.bar.showBackground && !root.centerOnly && populated
             anchors.top: parent.top
             anchors.bottom: parent.bottom
@@ -226,7 +263,7 @@ Item {
         }
         component IslandShadow: Loader {
             required property Item island
-            active: Config.options.bar.shadow && island.visible
+            active: Config.options.bar.shadow && island.visible && !island.onFrame
             anchors.fill: island
             sourceComponent: StyledRectangularShadow {
                 anchors.fill: undefined
@@ -238,6 +275,7 @@ Item {
         IslandShadow { island: rightIsland }
         Island {
             id: leftIsland
+            sectionName: "left"
             populated: root.effectiveLeftLayout.length > 0
             anchors.left: leftSection.left
             anchors.right: leftSection.right
@@ -246,6 +284,7 @@ Item {
         }
         Island {
             id: centerIsland
+            sectionName: "center"
             populated: root.effectiveMiddleLayout.length > 0
             anchors.left: absoluteCenter.left
             anchors.right: absoluteCenter.right
@@ -254,6 +293,7 @@ Item {
         }
         Island {
             id: rightIsland
+            sectionName: "right"
             populated: root.effectiveRightLayout.length > 0
             anchors.left: rightSection.left
             anchors.right: rightSection.right
@@ -264,6 +304,7 @@ Item {
         // Left
         Item {
             id: leftSection
+            readonly property Item frameIsland: leftIsland
             // The plate behind this section, for a widget's popup-open
             // indicator when its own group paints no pill: the material pill,
             // the island, or the bar background - whichever this style paints.
@@ -387,6 +428,7 @@ Item {
         // Center
         Item {
             id: absoluteCenter
+            readonly property Item frameIsland: centerIsland
             readonly property Item popupAnchorSurface: root.isMaterial ? centerMaterialPill
                 : root.isFloatIslands ? centerIsland
                 : centerPill.visible ? centerPill
@@ -505,6 +547,7 @@ Item {
         // Right
         Item {
             id: rightSection
+            readonly property Item frameIsland: rightIsland
             readonly property Item popupAnchorSurface: root.isMaterial ? rightMaterialPill
                 : root.isFloatIslands ? rightIsland
                 : barBackground.color.a > 0 ? barBackground : null

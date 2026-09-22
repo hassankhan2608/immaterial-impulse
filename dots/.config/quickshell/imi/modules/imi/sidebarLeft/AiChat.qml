@@ -174,6 +174,17 @@ Item {
             messageInputField.text = AiDrafts.take(AiSessions.currentId);
     }
 
+    // A transcript lands in the draft first (AiDictation), so the composer
+    // re-reads the draft rather than receiving text twice.
+    Connections {
+        target: AiDictation
+        function onTranscribed(text) {
+            if (root.editingMessageIndex >= 0) return;
+            messageInputField.text = AiDrafts.take(AiSessions.currentId);
+            messageInputField.cursorPosition = messageInputField.text.length;
+        }
+    }
+
     Connections {
         target: AiSessions
         function onSessionOpened(id) {
@@ -866,21 +877,10 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: Appearance.spacing.space100
-                            RippleButton {
-                                implicitWidth: 32
-                                implicitHeight: 32
-                                buttonRadius: Appearance.rounding.full
-                                colBackground: "transparent"
-                                colRipple: Appearance.colors.colLayer2Active
+                            IconButton {
+                                buttonIcon: "arrow_back"
+                                buttonSize: 32
                                 onClicked: root.closeView()
-                                contentItem: MaterialSymbol {
-                                    anchors.centerIn: parent
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    text: "arrow_back"
-                                    iconSize: Appearance.font.pixelSize.larger
-                                    color: Appearance.colors.colOnLayer1
-                                }
                             }
                             StyledText {
                                 text: Translation.tr("Providers & keys")
@@ -889,26 +889,15 @@ Item {
                                 color: Appearance.colors.colOnLayer1
                             }
                             Item { Layout.fillWidth: true }
-                            RippleButton {
+                            IconButton {
                                 // The fetch: a flat primary-inked icon in
                                 // the header (was a text button lost at the
                                 // bottom; the filled FAB read too heavy).
-                                implicitWidth: 36
-                                implicitHeight: 36
-                                buttonRadius: Appearance.rounding.full
-                                colBackground: "transparent"
-                                colBackgroundHover: Appearance.colors.colLayer2Hover
-                                colRipple: Appearance.colors.colLayer2Active
+                                buttonIcon: "sync"
+                                buttonSize: 40
+                                colText: Appearance.colors.colPrimary
+                                tooltip: Translation.tr("Fetch models")
                                 onClicked: Ai.fetchCustomModels()
-                                contentItem: MaterialSymbol {
-                                    anchors.centerIn: parent
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    text: "sync"
-                                    iconSize: Appearance.font.pixelSize.larger
-                                    color: Appearance.colors.colPrimary
-                                }
-                                StyledToolTip { text: Translation.tr("Fetch models") }
                             }
                         }
 
@@ -985,36 +974,17 @@ Item {
                                     Repeater {
                                         model: [{ "id": "", "name": Translation.tr("Custom"), "icon": "edit_note", "description": Translation.tr("The free-text prompt below") }]
                                             .concat(AiPersonas.all)
-                                        delegate: RippleButton {
+                                        // The shell's filter chip: one choice
+                                        // of many, drawn the way the model
+                                        // filters above and the plugin
+                                        // surfaces draw theirs.
+                                        delegate: FilterChip {
                                             id: personaChip
                                             required property var modelData
-                                            readonly property bool current: AiPersonas.activeId === modelData.id
-                                            implicitHeight: 30
-                                            implicitWidth: chipRow.implicitWidth + Appearance.spacing.space200 * 2
-                                            buttonRadius: Appearance.rounding.full
-                                            colBackground: current ? Appearance.colors.colPrimaryContainer : Appearance.colors.colLayer2
-                                            colBackgroundHover: current ? Appearance.colors.colPrimaryContainerHover : Appearance.colors.colLayer2Hover
-                                            colRipple: current ? Appearance.colors.colPrimaryContainerActive : Appearance.colors.colLayer2Active
-                                            onClicked: AiPersonas.pick(modelData.id)
-                                            contentItem: Item {
-                                                implicitWidth: chipRow.implicitWidth
-                                                implicitHeight: chipRow.implicitHeight
-                                                RowLayout {
-                                                    id: chipRow
-                                                    anchors.centerIn: parent
-                                                    spacing: Appearance.spacing.space50
-                                                    MaterialSymbol {
-                                                        text: personaChip.modelData.icon ?? "person"
-                                                        iconSize: Appearance.font.pixelSize.normal
-                                                        color: personaChip.current ? Appearance.m3colors.m3onPrimaryContainer : Appearance.colors.colOnLayer2
-                                                    }
-                                                    StyledText {
-                                                        text: personaChip.modelData.name
-                                                        font.pixelSize: Appearance.font.pixelSize.smaller
-                                                        color: personaChip.current ? Appearance.m3colors.m3onPrimaryContainer : Appearance.colors.colOnLayer2
-                                                    }
-                                                }
-                                            }
+                                            chipIcon: personaChip.modelData.icon ?? "person"
+                                            label: personaChip.modelData.name
+                                            toggled: AiPersonas.activeId === personaChip.modelData.id
+                                            onClicked: AiPersonas.pick(personaChip.modelData.id)
                                             StyledToolTip { text: personaChip.modelData.description ?? "" }
                                         }
                                     }
@@ -1097,23 +1067,24 @@ Item {
                                     colBackgroundHover: Appearance.colors.colLayer2Hover
                                     colRipple: Appearance.colors.colLayer2Active
                                     onClicked: root.openView("browse", "keys")
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: Appearance.spacing.space100
-                                        spacing: Appearance.spacing.space100
-                                        MaterialSymbol {
-                                            text: "travel_explore"
-                                            iconSize: Appearance.font.pixelSize.larger
-                                            color: Appearance.colors.colPrimary
+                                    // The shell's catalogue row shape. The ink
+                                    // is stated: this row sits on layer 1,
+                                    // not on a tonal container.
+                                    contentItem: CatalogueRow {
+                                        anchors {
+                                            fill: parent
+                                            leftMargin: Appearance.spacing.space100
                                         }
-                                        StyledText {
-                                            Layout.fillWidth: true
-                                            text: (Config.options.ai.customProviders ?? []).length > 0
-                                                ? Translation.tr("Browse models")
-                                                : Translation.tr("Browse OpenRouter models")
-                                            color: Appearance.colors.colOnLayer1
-                                            font.pixelSize: Appearance.font.pixelSize.small
-                                        }
+                                        rowSpacing: Appearance.spacing.space100
+
+                                        rowIcon: "travel_explore"
+                                        rowIconColor: Appearance.colors.colPrimary
+                                        title: (Config.options.ai.customProviders ?? []).length > 0
+                                            ? Translation.tr("Browse models")
+                                            : Translation.tr("Browse OpenRouter models")
+                                        titleFont.pixelSize: Appearance.font.pixelSize.small
+                                        titleColor: Appearance.colors.colOnLayer1
+                                        titleFillsWidth: true
                                     }
                                 }
                             }
@@ -1264,7 +1235,7 @@ Item {
                     top: parent.top
                     left: parent.left
                     right: parent.right
-                    margins: visible ? 5 : 0
+                    margins: visible ? Appearance.spacing.space50 : 0
                 }
                 visible: Ai.pendingFilePaths.length > 0
                 spacing: Appearance.spacing.space50
@@ -1524,18 +1495,16 @@ Item {
                     enabled: messageInputField.text.length > 0 || Ai.isGenerating
                     toggled: enabled
 
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: sendButton.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                        onClicked: {
-                            if (Ai.isGenerating) {
-                                Ai.stopGeneration();
-                                return;
-                            }
-                            const inputText = messageInputField.text;
-                            root.acceptComposer(inputText);
-                            messageInputField.clear();
+                    // The click belongs to the button: an overlaid MouseArea
+                    // ate every press, so the ripple never ran.
+                    onClicked: {
+                        if (Ai.isGenerating) {
+                            Ai.stopGeneration();
+                            return;
                         }
+                        const inputText = messageInputField.text;
+                        root.acceptComposer(inputText);
+                        messageInputField.clear();
                     }
 
                     contentItem: MaterialSymbol {

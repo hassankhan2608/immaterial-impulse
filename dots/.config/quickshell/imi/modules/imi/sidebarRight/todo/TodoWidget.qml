@@ -7,7 +7,37 @@ import QtQuick.Layouts
 
 Item {
     id: root
-    property var tabButtonList: [{"icon": "checklist", "name": Translation.tr("Unfinished")}, {"name": Translation.tr("Done"), "icon": "check_circle"}]
+    // The local file's two tabs, then one tab per Google task list while the
+    // account offers them: the source picker rides the tab bar it already
+    // has (BottomWidgetGroup's height is a fixed budget; a row of its own
+    // took 40px out of the list). The lists never merge (the local file has
+    // no ids).
+    readonly property var localTabs: [{"icon": "checklist", "name": Translation.tr("Unfinished")}, {"name": Translation.tr("Done"), "icon": "check_circle"}]
+    readonly property bool googleAvailable: GoogleTasks.enabled && GoogleTasks.lists.length > 0
+    readonly property var googleLists: root.googleAvailable ? GoogleTasks.lists : []
+    readonly property var tabButtonList: root.localTabs.concat(root.googleLists.map(l => ({ "icon": "cloud", "name": l.title, "listId": l.id })))
+    readonly property bool googleSource: tabBar.currentIndex >= root.localTabs.length
+    // The chosen Google list is an ID, never the tab's index: the lists are
+    // refetched and can be added, removed or reordered under a standing
+    // index, which would silently show a different list. The index is
+    // derived from the id and falls back to the local tabs when it is gone.
+    property string selectedListId: ""
+    readonly property string currentGoogleListId: root.googleSource ? (root.tabButtonList[tabBar.currentIndex]?.listId ?? "") : ""
+    onCurrentGoogleListIdChanged: {
+        if (root.currentGoogleListId.length > 0) {
+            root.selectedListId = root.currentGoogleListId;
+            GoogleTasks.selectList(root.currentGoogleListId);
+        } else if (root.googleSource === false) {
+            root.selectedListId = "";
+        }
+    }
+    onTabButtonListChanged: {
+        if (root.selectedListId.length === 0) return;
+        const at = root.tabButtonList.findIndex(tab => tab.listId === root.selectedListId);
+        if (at === -1) { root.selectedListId = ""; tabBar.setCurrentIndex(0); }
+        else if (tabBar.currentIndex !== at) tabBar.setCurrentIndex(at);
+    }
+    onGoogleAvailableChanged: if (!googleAvailable && root.googleSource) tabBar.setCurrentIndex(0)
     property bool showAddDialog: false
     property int dialogMargins: Appearance.spacing.space250
     property int fabSize: 48
@@ -79,6 +109,19 @@ Item {
                 emptyPlaceholderText: Translation.tr("Finished tasks will go here")
                 taskList: Todo.list.filter(function(item) { return item.done; })
             }
+            // One page per Google list: its open tasks (Google keeps the
+            // completed ones itself).
+            Repeater {
+                model: root.googleLists
+                TaskList {
+                    required property var modelData
+                    listBottomPadding: root.fabSize + root.fabMargins * 2
+                    emptyPlaceholderIcon: "cloud_done"
+                    emptyPlaceholderText: Translation.tr("Nothing open in %1").arg(modelData.title)
+                    source: "google"
+                    taskList: GoogleTasks.currentListId === modelData.id ? GoogleTasks.tasks : []
+                }
+            }
 
         }
     }
@@ -146,10 +189,14 @@ Item {
 
             function addTask() {
                 if (todoInput.text.length > 0) {
-                    Todo.addTask(todoInput.text)
+                    if (root.googleSource)
+                        GoogleTasks.addTask(todoInput.text)
+                    else
+                        Todo.addTask(todoInput.text)
                     todoInput.text = ""
                     root.showAddDialog = false
-                    tabBar.setCurrentIndex(0) // Show unfinished tasks
+                    if (!root.googleSource)
+                        tabBar.setCurrentIndex(0) // Show unfinished tasks
                 }
             }
 
@@ -168,28 +215,23 @@ Item {
                     text: Translation.tr("Add task")
                 }
 
-                TextField {
+                ToolbarTextField {
                     id: todoInput
                     Layout.fillWidth: true
+                    // The widget fills its row's height by default, which would
+                    // let the one field eat this column.
+                    Layout.fillHeight: false
                     Layout.leftMargin: Appearance.spacing.space200
                     Layout.rightMargin: Appearance.spacing.space200
-                    padding: Appearance.spacing.space150
-                    color: activeFocus ? Appearance.m3colors.m3onSurface : Appearance.m3colors.m3onSurfaceVariant
-                    renderType: Text.NativeRendering
-                    selectedTextColor: Appearance.m3colors.m3onSecondaryContainer
-                    selectionColor: Appearance.colors.colSecondaryContainer
+                    // The dialog's body is m3surfaceContainerHigh, i.e. layer 3
+                    // - a field nested in it is the tier above, and colLayer4 is
+                    // that tier already composited over layer 3.
+                    focusRing: true
+                    colBackground: Appearance.colors.colLayer4
+                    color: activeFocus ? Appearance.colors.colOnLayer4 : Appearance.colors.colOnLayer1
                     placeholderText: Translation.tr("Task description")
-                    placeholderTextColor: Appearance.m3colors.m3outline
                     focus: root.showAddDialog
                     onAccepted: dialog.addTask()
-
-                    background: Rectangle {
-                        anchors.fill: parent
-                        radius: Appearance.rounding.verysmall
-                        border.width: Appearance.borderWidth.emphasis
-                        border.color: todoInput.activeFocus ? Appearance.colors.colPrimary : Appearance.m3colors.m3outline
-                        color: "transparent"
-                    }
 
                     cursorDelegate: Rectangle {
                         width: 1

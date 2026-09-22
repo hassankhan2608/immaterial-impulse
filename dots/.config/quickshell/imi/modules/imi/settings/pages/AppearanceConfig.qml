@@ -67,7 +67,6 @@ ContentPage {
         }
     }
 
-
     function goTo(term) {
         const t = term.toLowerCase().trim()
 
@@ -105,6 +104,88 @@ ContentPage {
 
             IconPackSelector {
                 Layout.fillWidth: true
+            }
+        }
+
+        ContentSection {
+            icon: "crop_square"
+            title: Translation.tr("Frame")
+
+            GroupedList {
+                ConfigSwitch {
+                    buttonIcon: "border_outer"
+                    text: Translation.tr("Frame mode: bar, edges and corners as one surface")
+                    checked: Config.options.appearance.frame.enable
+                    onToggleRequested: Config.options.appearance.frame.enable = !Config.options.appearance.frame.enable
+                    StyledToolTip { text: Translation.tr("Draws a band along the screen edges, in the bar's colour, with rounded inner corners, so the shell reads as a frame around your windows instead of floating islands. Looks best with the Hug bar style. Not yet for the vertical bar or a bar that auto-hides.") }
+                }
+                ConfigSpinBox {
+                    property bool rowVisible: Config.options.appearance.frame.enable
+                    icon: "line_weight"
+                    text: Translation.tr("Band thickness (px, 0 = hairline)")
+                    value: Config.options.appearance.frame.thickness
+                    from: 0
+                    to: 64
+                    stepSize: 1
+                    onValueModified: Config.options.appearance.frame.thickness = newValue
+                }
+                ConfigSelectionArray {
+                    property bool rowVisible: Config.options.appearance.frame.enable && (Config.options.dock.enable ?? false)
+                    icon: "call_to_action"
+                    text: Translation.tr("Dock")
+                    currentValue: Config.options.appearance.frame.dock
+                    onSelected: newValue => { Config.options.appearance.frame.dock = newValue; }
+                    options: [
+                        { "displayName": Translation.tr("Auto"), "value": "auto" },
+                        { "displayName": Translation.tr("Attached"), "value": "attached" },
+                        { "displayName": Translation.tr("Floating"), "value": "floating" }
+                    ]
+                    detailContent: StyledText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        color: Appearance.colors.colSubtext
+                        text: Translation.tr("Auto follows the dock's pin: pinned, it floats a gap above the frame's band; unpinned, it sits on the band as a tab. Attached or Floating force one look.")
+                    }
+                }
+                ConfigSelectionArray {
+                    property bool rowVisible: Config.options.appearance.frame.enable
+                    icon: "picture_in_picture_alt"
+                    text: Translation.tr("Bar widget popups")
+                    currentValue: Config.options.appearance.frame.popups ?? "auto"
+                    onSelected: newValue => { Config.options.appearance.frame.popups = newValue; }
+                    options: [
+                        { "displayName": Translation.tr("Auto"), "value": "auto" },
+                        { "displayName": Translation.tr("Fused"), "value": "fused" },
+                        { "displayName": Translation.tr("Released"), "value": "released" }
+                    ]
+                    detailContent: StyledText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        color: Appearance.colors.colSubtext
+                        text: Translation.tr("Auto: a popup opened by hovering grows out of the bar's band and closes back into it; one pinned by a click lifts off as its own card. Fused or Released force one look for both.")
+                    }
+                }
+                ConfigSelectionArray {
+                    property bool rowVisible: Config.options.appearance.frame.enable
+                    icon: "notifications"
+                    text: Translation.tr("Notifications")
+                    currentValue: Config.options.appearance.frame.notifications ?? "auto"
+                    onSelected: newValue => { Config.options.appearance.frame.notifications = newValue; }
+                    options: [
+                        { "displayName": Translation.tr("Auto"), "value": "auto" },
+                        { "displayName": Translation.tr("Fused"), "value": "fused" },
+                        { "displayName": Translation.tr("Released"), "value": "released" }
+                    ]
+                    detailContent: StyledText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        color: Appearance.colors.colSubtext
+                        text: Translation.tr("Auto: a notification arrives fused to the band at its edge and sinks back into it; its Pin button lifts it off as its own card and keeps it. Fused keeps pinned ones on the band too; Released is the free card. Only for the left and right positions.")
+                    }
+                }
             }
         }
 

@@ -63,21 +63,10 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: Appearance.spacing.space100
-            RippleButton {
-                implicitWidth: 32
-                implicitHeight: 32
-                buttonRadius: Appearance.rounding.full
-                colBackground: "transparent"
-                colRipple: Appearance.colors.colLayer2Active
+            IconButton {
+                buttonIcon: "arrow_back"
+                buttonSize: 32
                 onClicked: root.closed()
-                contentItem: MaterialSymbol {
-                    anchors.centerIn: parent
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    text: "arrow_back"
-                    iconSize: Appearance.font.pixelSize.larger
-                    color: Appearance.colors.colOnLayer1
-                }
             }
             StyledText {
                 text: Translation.tr("Chats")
@@ -148,28 +137,34 @@ Rectangle {
                             AiSessions.importLegacy(legacyRow.modelData.path);
                             root.closed();
                         }
-                        contentItem: RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: Appearance.spacing.space100
-                            anchors.rightMargin: Appearance.spacing.space100
-                            spacing: Appearance.spacing.space100
-                            MaterialSymbol {
-                                text: "history"
-                                iconSize: Appearance.font.pixelSize.larger
-                                color: Appearance.colors.colSubtext
+                        // The shell's catalogue row shape - glyph, name, an
+                        // affordance saying what a click does. It sits on
+                        // layer 1 rather than a tonal container, so the ink
+                        // it had is stated rather than taken from the
+                        // component's container default.
+                        contentItem: CatalogueRow {
+                            anchors {
+                                fill: parent
+                                leftMargin: Appearance.spacing.space100
+                                rightMargin: Appearance.spacing.space100
                             }
-                            StyledText {
-                                Layout.fillWidth: true
-                                elide: Text.ElideRight
-                                text: legacyRow.modelData.name
-                                color: Appearance.colors.colOnLayer1
-                                font.pixelSize: Appearance.font.pixelSize.small
-                            }
-                            StyledText {
-                                text: Translation.tr("import")
-                                color: Appearance.colors.colSubtext
-                                font.pixelSize: Appearance.font.pixelSize.smaller
-                            }
+                            rowSpacing: Appearance.spacing.space100
+
+                            rowIcon: "history"
+                            rowIconColor: Appearance.colors.colSubtext
+                            title: legacyRow.modelData.name
+                            titleFont.pixelSize: Appearance.font.pixelSize.small
+                            titleColor: Appearance.colors.colOnLayer1
+                            titleFillsWidth: true
+                            titleElides: true
+
+                            trailingContent: [
+                                StyledText {
+                                    text: Translation.tr("import")
+                                    color: Appearance.colors.colSubtext
+                                    font.pixelSize: Appearance.font.pixelSize.smaller
+                                }
+                            ]
                         }
                     }
                 }
@@ -177,24 +172,11 @@ Rectangle {
         }
     }
 
-    component RowAction: RippleButton {
-        id: actionButton
-        property string glyph: ""
-        property real glyphFill: 0
-        implicitWidth: 28
-        implicitHeight: 28
-        buttonRadius: Appearance.rounding.full
-        colBackground: "transparent"
+    component RowAction: IconButton {
+        buttonSize: 28
+        // On a layer2 row: the hover and ripple in that layer's tones.
+        colBackgroundHover: Appearance.colors.colLayer2Hover
         colRipple: Appearance.colors.colLayer2Active
-        contentItem: MaterialSymbol {
-            anchors.centerIn: parent
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-            text: actionButton.glyph
-            fill: actionButton.glyphFill
-            iconSize: Appearance.font.pixelSize.normal
-            color: Appearance.colors.colOnLayer1
-        }
     }
 
     component SessionRow: Rectangle {
@@ -293,12 +275,12 @@ Rectangle {
 
             RowAction {
                 visible: rowHover.hovered && !row.renaming
-                glyph: row.modelData.pinned ? "keep_off" : "keep"
+                buttonIcon: row.modelData.pinned ? "keep_off" : "keep"
                 onClicked: AiSessions.setPinned(row.modelData.id, !row.modelData.pinned)
             }
             RowAction {
                 visible: rowHover.hovered && !row.renaming
-                glyph: "edit"
+                buttonIcon: "edit"
                 onClicked: {
                     row.renaming = true;
                     titleInput.text = row.modelData.title;
@@ -308,7 +290,7 @@ Rectangle {
             }
             RowAction {
                 visible: rowHover.hovered && !row.renaming
-                glyph: "delete"
+                buttonIcon: "delete"
                 onClicked: AiSessions.remove(row.modelData.id)
             }
         }

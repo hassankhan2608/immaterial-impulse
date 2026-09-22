@@ -65,7 +65,7 @@ WindowDialog {
         Layout.leftMargin: -root.contentPadding
         Layout.rightMargin: -root.contentPadding
     }
-    ListView {
+    StyledListView {
         Layout.fillHeight: true
         Layout.fillWidth: true
         Layout.topMargin: -Appearance.spacing.space200
@@ -75,6 +75,9 @@ WindowDialog {
 
         clip: true
         spacing: 0
+        // Every rescan rewrites the whole list; rows popping in one by one
+        // would read as churn rather than as arrival.
+        animateAppearance: false
 
         model: ScriptModel {
             values: Network.friendlyWifiNetworks
@@ -84,6 +87,10 @@ WindowDialog {
             wifiNetwork: modelData
             width: ListView.view.width
             connecting: Network.wifiConnectTarget === modelData
+            // The row draws the shell's masked prompt; the switch that decides
+            // whether it masks with Material shapes is the lock's, and the row
+            // is not allowed to read a config of its own.
+            materialShapeChars: Config.options.lock.materialShapeChars
             onConnectRequested: Network.connectToWifiNetwork(modelData)
             onPasswordSubmitted: password => Network.changePassword(modelData, password)
             onPasswordCancelled: modelData.askingPassword = false

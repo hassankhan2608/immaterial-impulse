@@ -66,9 +66,14 @@ RowLayout {
         opacity: root.enabled ? 1 : 0.4
     }
 
+    // The label column. A row that declares no `text` has nothing to put
+    // here, and its field takes the row instead - a placeholder elided in a
+    // 220px box on the far right was the "Folders the assistant may read"
+    // row's whole content.
+    readonly property bool unlabelled: root.text.length === 0 && root.description.length === 0
     ColumnLayout {
         Layout.fillWidth: true
-        visible: !root.floatingLabel || root.description.length > 0
+        visible: (!root.floatingLabel || root.description.length > 0) && !root.unlabelled
         spacing: 0
         StyledText {
             Layout.fillWidth: true
@@ -94,13 +99,13 @@ RowLayout {
     }
 
     RowLayout {
-        Layout.fillWidth: root.floatingLabel && root.description.length === 0
+        Layout.fillWidth: (root.floatingLabel && root.description.length === 0) || root.unlabelled
         Layout.alignment: Qt.AlignVCenter
         spacing: Appearance.spacing.space50
 
         Rectangle {
             id: fieldBg
-            Layout.fillWidth: root.floatingLabel && root.description.length === 0
+            Layout.fillWidth: (root.floatingLabel && root.description.length === 0) || root.unlabelled
             Layout.preferredWidth: root.fieldWidth
             Layout.preferredHeight: root.fieldHeight
             Layout.alignment: Qt.AlignVCenter
@@ -233,25 +238,15 @@ RowLayout {
             }
         }
 
-        RippleButton {
+        IconButton {
             visible: root.password && root.revealButton
             enabled: root.enabled
-            implicitWidth: 30
-            implicitHeight: 30
-            buttonRadius: Appearance.rounding.full
-            colBackground: "transparent"
+            buttonSize: 32
+            buttonIcon: root.revealed ? "visibility_off" : "visibility"
+            animateChange: true
             colBackgroundHover: Appearance.colors.colPrimaryContainerHover
             colRipple: Appearance.colors.colPrimaryContainerActive
             onClicked: root.revealed = !root.revealed
-
-            contentItem: MaterialSymbol {
-                anchors.centerIn: parent
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                iconSize: Appearance.font.pixelSize.larger
-                text: root.revealed ? "visibility_off" : "visibility"
-                color: Appearance.colors.colOnLayer1
-            }
         }
     }
     // Enters and leaves the way the bar's standalone pills do (TimerPill,

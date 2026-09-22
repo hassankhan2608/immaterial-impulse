@@ -23,7 +23,12 @@ Scope {
         id: cornerPanelWindow
         property var brightnessMonitor: Brightness.getMonitorForScreen(screen)
         property bool fullscreen
-        visible: (Config.options.appearance.fakeScreenRounding === 1 || (Config.options.appearance.fakeScreenRounding === 2 && !fullscreen))
+        // A monitor has a black bezel with a rounded corner, and these are
+        // it. Frame mode wants them whatever the fake-rounding setting says -
+        // the frame's border runs INTO the bezel's curve, so the curve has to
+        // be there - and outside frame mode the setting rules as before.
+        visible: FrameGeometry.enabled ? !fullscreen
+            : (Config.options.appearance.fakeScreenRounding === 1 || (Config.options.appearance.fakeScreenRounding === 2 && !fullscreen))
         property var corner
 
         exclusionMode: ExclusionMode.Ignore
@@ -52,9 +57,16 @@ Scope {
             id: cornerWidget
             anchors.fill: parent
             corner: cornerPanelWindow.corner
+            // Black, in frame mode too: this is the bezel, not a piece of the
+            // shell's chrome. A frame-coloured fillet here belonged to the
+            // model where one edge of the frame was the bar's whole zone and
+            // the corner had something to round; it read as a blob two dozen
+            // pixels across hanging off each end of the bar.
+            color: "#000000"
             rightVisualMargin: (Config.options.interactions.deadPixelWorkaround.enable && cornerPanelWindow.anchors.right) * 1
             bottomVisualMargin: (Config.options.interactions.deadPixelWorkaround.enable && cornerPanelWindow.anchors.bottom) * 1
 
+            // The bezel's radius, in both modes.
             implicitSize: Appearance.rounding.screenRounding
             implicitHeight: Math.max(implicitSize, sidebarCornerOpenInteractionLoader.implicitHeight)
             implicitWidth: Math.max(implicitSize, sidebarCornerOpenInteractionLoader.implicitWidth)
