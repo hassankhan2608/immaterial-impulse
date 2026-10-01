@@ -50,17 +50,6 @@ Singleton {
     // `activespecial` one included. Hyprland blurs the whole screen behind a
     // special workspace, so anything drawing sixty frames a second under one
     // is paying for a fullscreen blur nobody can see through.
-    // Whether anything is on the monitor's active workspace: the frame's
-    // bar fuses to the band while the workspace is empty and releases once
-    // a window is there (frame-pin-grammar.md).
-    readonly property var occupiedByMonitorName: {
-        const out = ({});
-        for (const mon of root.monitors) {
-            out[mon.name] = root.windowList.some(w => w.monitor === mon.id
-                && w.workspace?.id === mon.activeWorkspace?.id);
-        }
-        return out;
-    }
     readonly property var specialWorkspaceByMonitorName: {
         const out = ({});
         for (const mon of root.monitors)
@@ -146,6 +135,22 @@ Singleton {
         id: refreshDebounce
         interval: 50
         onTriggered: root.updateAll()
+    }
+
+    // Whether a floating window is on any monitor's active workspace. A
+    // floating window MOVES without a Hyprland event (the bar hugs for one
+    // in its strip, the dock hides for one - frame_geometry.js
+    // edgeOccupied), so while one is up the clients are re-read on a slow
+    // clock; none up, the clock is off.
+    readonly property bool floatingOnActive: root.monitors.some(mon =>
+        root.windowList.some(w => w.monitor === mon.id
+            && ((w.floating && w.workspace?.id === mon.activeWorkspace?.id)
+                || ((mon.specialWorkspace?.name ?? "") !== "" && w.workspace?.id === mon.specialWorkspace?.id))))
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.floatingOnActive
+        onTriggered: root.updateWindowList()
     }
 
     Connections {

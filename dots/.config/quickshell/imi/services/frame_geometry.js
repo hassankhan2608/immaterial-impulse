@@ -107,6 +107,69 @@ function joinBandEdge(edge, extent, width, height) {
     return (Number(width) || 0) - e;
 }
 
+// Whether a window is in the way of the shell's element on `edge` - the bar
+// (frame-pin-grammar.md, the bar row: it hugs for one) or the dock (it hides
+// for one): a window on the monitor's active workspace, unless it FLOATS
+// clear of the element's strip, `depth` deep along that edge (the element's
+// zone, its lift and the gap). A floating window in the middle of the screen
+// leaves the bar's border and the dock alone; one dragged into the strip is
+// in the way, touching counts. `windows` and `monitor` are hyprctl's JSON: a
+// client's `at`/`size` are logical, a monitor's `width`/`height` physical
+// under its `scale`, swapped by an odd `transform`.
+function edgeOccupied(windows, monitor, edge, depth) {
+    if (!monitor) return false;
+    var scale = Number(monitor.scale) || 1;
+    var rotated = (Number(monitor.transform) || 0) % 2 === 1;
+    var lw = (Number(rotated ? monitor.height : monitor.width) || 0) / scale;
+    var lh = (Number(rotated ? monitor.width : monitor.height) || 0) / scale;
+    var d = Math.max(0, Number(depth) || 0);
+    var mx = Number(monitor.x) || 0, my = Number(monitor.y) || 0;
+    var strip = edge === "bottom" ? { x: mx, y: my + lh - d, w: lw, h: d }
+        : edge === "top" ? { x: mx, y: my, w: lw, h: d }
+        : edge === "left" ? { x: mx, y: my, w: d, h: lh }
+        : { x: mx + lw - d, y: my, w: d, h: lh };
+    var ws = monitor.activeWorkspace ? monitor.activeWorkspace.id : undefined;
+    // A special workspace's windows, while it is shown: never the whole
+    // screen (they sit in the middle, scaled), so they count by their rect
+    // like a floating window does - one over the dock hides it (screenshot).
+    var special = monitor.specialWorkspace && monitor.specialWorkspace.name ? monitor.specialWorkspace.id : undefined;
+    var list = windows || [];
+    for (var i = 0; i < list.length; i++) {
+        var w = list[i];
+        if (!w || w.monitor !== monitor.id || !w.workspace) continue;
+        var onActive = w.workspace.id === ws, onSpecial = special !== undefined && w.workspace.id === special;
+        if (!onActive && !onSpecial) continue;
+        if (onActive && !w.floating) return true;
+        var at = w.at || [0, 0], size = w.size || [0, 0];
+        if (at[0] <= strip.x + strip.w && at[0] + size[0] >= strip.x
+            && at[1] <= strip.y + strip.h && at[1] + size[1] >= strip.y) return true;
+    }
+    return false;
+}
+
+// The inner edge of whatever bar sits on `edge` in a screen's join records
+// (frame-pin-grammar.md, the bar row): the plate's, or the island's under
+// `along` (a screen x, for a horizontal edge), else `fallback` - the band's
+// own edge, for a bar that is hidden, absent or of a style that publishes no
+// plate. What a card centred on the bar (the OSD) fuses to, read the same way
+// by the frame's painter and by the card's own window.
+function barRecordAt(joins, edge, along) {
+    if (!joins) return null;
+    var b = joins.bar;
+    if (b && b.edge === edge) return b;
+    var keys = ["barIsland:left", "barIsland:center", "barIsland:right"];
+    for (var i = 0; i < keys.length; i++) {
+        var isl = joins[keys[i]];
+        if (isl && isl.edge === edge && along >= isl.plate.x && along <= isl.plate.x + isl.plate.width) return isl;
+    }
+    return null;
+}
+function barInnerEdgeAt(joins, edge, along, fallback) {
+    var r = barRecordAt(joins, edge, along);
+    if (!r) return fallback;
+    return edge === "bottom" ? r.plate.y : r.plate.y + r.plate.height;
+}
+
 // The join records, many per screen (frame-pin-grammar.md §3): a map of
 // screen name to a map of element key ("dock", "barPopup",
 // "notification:<id>") to record. Returns a NEW outer and inner map with

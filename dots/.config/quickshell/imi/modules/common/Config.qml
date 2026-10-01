@@ -2138,6 +2138,12 @@ Singleton {
                     // window is there or the bar is pinned; "attached" and
                     // "floating" force one look. Hug style only.
                     property string bar: "auto"
+                    // How the on-screen display (volume, brightness, locks)
+                    // meets the bar's plate: "detached" (the default) grows
+                    // out of the plate and lifts off it as its own card,
+                    // sinking back when it times out; "attached" stays fused
+                    // to the plate the whole time.
+                    property string osd: "detached"
                 }
                 property bool extraBackgroundTint: true
                 property int fakeScreenRounding: 2 // 0: None | 1: Always | 2: When not fullscreen

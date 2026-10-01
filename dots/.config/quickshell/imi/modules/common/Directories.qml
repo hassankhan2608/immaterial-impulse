@@ -50,6 +50,10 @@ Singleton {
     // reads it while the shell is not running, and re-grabbing costs a frame
     // only when a wallpaper is actually applied.
     property string wallpaperEngineStills: FileUtils.trimFileProtocol(`${Directories.cache}/wallpaperengine-stills`)
+    // The bar's adaptive edge shadow's samples: a 64x36 grab of each screen's
+    // wallpaper, written by Background.qml and read back by a Canvas (the
+    // only way QML reads pixels, and it will not load a grab's in-memory url).
+    property string edgeLuma: FileUtils.trimFileProtocol(`${Directories.cache}/edge-luma`)
     property string shellConfig: FileUtils.trimFileProtocol(`${Directories.config}/immaterial-impulse`)
     // The suite checkout get.sh installs/updates (same resolution as its DEST)
     property string suiteSrc: (Quickshell.env("XDG_DATA_HOME") || `${FileUtils.trimFileProtocol(Directories.home)}/.local/share`) + "/immaterial-impulse/src"
@@ -144,6 +148,7 @@ Singleton {
         Quickshell.execDetached(["mkdir", "-p", `${root.userPresetsPath}`])
         Quickshell.execDetached(["mkdir", "-p", `${root.userActions}`])
         Quickshell.execDetached(["mkdir", "-p", `${root.aiAttachments}`])
+        Quickshell.execDetached(["mkdir", "-p", `${root.edgeLuma}`])
     }
 
     // Cleanup on init

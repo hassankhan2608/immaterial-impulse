@@ -197,6 +197,9 @@ Scope {
                     overlayWindow.current.contentItem.enabled = true;
 
                 if (overlayWindow.current === popup) {
+                    // ...and its content, if the sink's fade had started.
+                    sinkFade.stop();
+                    if (popup.contentItem) popup.contentItem.opacity = 1;
                     retargetTimer.restart();
                     return;
                 }
@@ -243,31 +246,59 @@ Scope {
                     // (footage: weather to calendar). Pinned to the host's
                     // top-left it keeps the top the user was reading and the
                     // card's edge covers it from below and from the right.
+                    // ...in its OWN host, under the arriving tree's and with
+                    // the leaving popup's padding: in the arriving tree's host
+                    // it stacked on top (reparented last) and drew at full
+                    // strength over the one the pointer had moved to for the
+                    // first frames (footage: weather over calendar), and the
+                    // host's margins had already become the arriving popup's
+                    // padding, so the leaving content jumped by the difference
+                    // on the first frame - 16 px, weather to calendar
+                    // (footage). Same top-left, same padding, no jump.
                     const leaving = previous.contentItem;
                     leaving.anchors.centerIn = null;
-                    leaving.parent = contentHost;
-                    leaving.anchors.top = contentHost.top;
-                    leaving.anchors.left = contentHost.left;
+                    leaving.parent = leaveHost;
+                    leaving.anchors.top = leaveHost.top;
+                    leaving.anchors.left = leaveHost.left;
                     contentExit.target = leaving;
                     contentExit.restart();
                 }
 
                 const arriving = popup.contentItem;
+                // Coming from idle there is no geometry to morph from (the
+                // card is parked at its widget below, before anything animates).
+                const fresh = card.width <= 0 || card.openHeight <= 0;
                 if (arriving) {
                     arriving.parent = contentSlot;
                     arriving.anchors.centerIn = contentSlot;
                     arriving.enabled = true;
-                    arriving.opacity = 0;
                     contentEnter.stop();
-                    contentEnter.item = arriving;
-                    contentEnter.restart();
+                    if (fresh && overlayWindow.unrolls) {
+                        // A fused card grows out of the band from nothing, and
+                        // the frame paints its plate at full strength from the
+                        // first row - a fused plate cannot fade, that would be
+                        // the seam. So its content is there from the first
+                        // frame too and the growing plate REVEALS it (the host
+                        // clips, the slot is pinned to the band-side edge):
+                        // the unroll. The pause-then-fade below is the
+                        // takeover's, sized to the outgoing content's fade;
+                        // run on a fresh fused open it left the plate empty
+                        // for its first 200 ms and faded the content into a
+                        // card that had already arrived (burst, 12 ms frames).
+                        // The sections below the fold still park and cascade
+                        // once the card has arrived (wavePending).
+                        arriving.opacity = 1;
+                    } else {
+                        arriving.opacity = 0;
+                        contentEnter.item = arriving;
+                        contentEnter.restart();
+                    }
                 }
                 popup.surfaceWindow = overlayWindow;
                 popup.popupHovered = cardHover.hovered;
 
-                // Coming from idle there is no geometry to morph from, so put
-                // the card at the widget it belongs to before anything animates.
-                if (card.width <= 0 || card.openHeight <= 0) {
+                if (fresh) {
+                    overlayWindow.emerging = overlayWindow.joinsFrame && !FrameGeometry.barPlateless;
                     overlayWindow.park();
                     // A fresh open arms the wave: the sections below the fold
                     // are put away before the card is on screen, and the gate
@@ -409,6 +440,7 @@ Scope {
                 // becomes the parked square's here, and at progress 1 that
                 // changes nothing, so the exit starts where the card already is.
                 overlayWindow.exiting = true;
+                overlayWindow.emerging = false;
                 if (overlayWindow.current?.contentItem)
                     overlayWindow.current.contentItem.enabled = false;
                 // A released card lands FIRST, then submerges (the grammar's
@@ -416,22 +448,50 @@ Scope {
                 // turns the join attached; the collapse waits for it to
                 // settle, else the card shrank while still coming down and
                 // read as vanishing without ever fusing back (footage).
-                if (overlayWindow.joinsFrame && cardJoin.lift > 0.5) {
+                if (overlayWindow.joinsFrame && !FrameGeometry.barPlateless && cardJoin.lift > 0.5) {
                     overlayWindow.landing = true;
                     return;
                 }
                 overlayWindow.submerge();
             }
-            // The exit's second half: the card sinks into the band it sits on.
+            // The exit's second half: the content fades out WHOLE, at the size
+            // it has, and then the card sinks into the band it sits on. Sunk
+            // with its content still up, the collapsing card cropped the
+            // elements inside it as it went (footage) - a fade first is what
+            // leaves the motion one piece.
             property bool landing: false
             function submerge() {
                 overlayWindow.landing = false;
+                overlayWindow.sink();
+            }
+            // The sink: the card collapses toward its widget and the content
+            // vanishes IN PLACE as it starts - the fast tier, decelerating,
+            // so it is mostly gone within the collapse's first frames and
+            // the clip has little left to cut - one motion, nothing held.
+            // Sunk with the content up, the clip cut the elements (footage);
+            // a fade held first stalled the close; scaled down with the
+            // card, the content squashed (review: "somehow worse").
+            function sink() {
                 if (!overlayWindow.exiting) return;
+                const content = overlayWindow.current?.contentItem ?? null;
+                if (content && (sinkFade.target !== content || !sinkFade.running)) {
+                    sinkFade.stop();
+                    sinkFade.target = content;
+                    sinkFade.restart();
+                }
                 const anchor = overlayWindow.anchorAlongBar();
                 if (anchor !== null && anchor !== undefined) card.alongBar = anchor;
                 card.width = card.parkedSize;
                 card.openProgress = 0;
                 exitTimer.restart();
+            }
+            NumberAnimation {
+                id: sinkFade
+                property: "opacity"
+                to: 0
+                duration: Appearance.animation.elementMoveFast.duration
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: Appearance.animationCurves.emphasizedDecel
             }
             // The landing is over when the gap is closed and the neck whole,
             // not when the spring has stopped ringing: the last tenth of a
@@ -452,6 +512,7 @@ Scope {
                 exitTimer.stop();
                 contentEnter.stop();
                 contentExit.stop();
+                sinkFade.stop();
                 // The reset the next entrance starts from, made off screen -
                 // the card collapses in this same call. The exit itself never
                 // touches the sections: they ride the container out at full
@@ -793,11 +854,31 @@ Scope {
             onBarThicknessChanged: overlayWindow.takeBarInner()
             readonly property string popupsLook: String(Config.options.appearance.frame.popups ?? "auto")
             readonly property bool wantsFused: overlayWindow.popupsLook === "fused"
-                || (overlayWindow.popupsLook === "auto" && !(overlayWindow.current?.pinnedOpen ?? false))
+                || (overlayWindow.popupsLook === "auto" && !(overlayWindow.current?.pinnedOpen ?? false) && !FrameGeometry.barPlateless)
             // ...and on the way out whatever it was: a released card lands
             // and swallows into the band before it submerges.
-            readonly property bool joinAttached: !overlayWindow.joinsFrame || overlayWindow.wantsFused || overlayWindow.exiting
+            // A released card still EMERGES: a fresh open grows out of the
+            // band fused (the dock preview's, the OSD's phases) and lifts off
+            // when the growth arrives - one motion, the frame's own, where a
+            // released card used to unroll from its parked square as before.
+            property bool emerging: false
+            readonly property bool joinAttached: !overlayWindow.joinsFrame || overlayWindow.wantsFused
+                || (overlayWindow.exiting && !FrameGeometry.barPlateless) || overlayWindow.emerging
+            // A bar with no plate: the card is released from its first frame
+            // and the lift RIDES the growth (the OSD's rule, liftRide there) -
+            // no emergence phase, no landing; the one scalar grows the card
+            // out of the bar's edge to its gap and sinks it back.
+            readonly property real liftRide: FrameGeometry.barPlateless ? Math.max(0, Math.min(1, card.openProgress)) : 1
             readonly property bool cardFused: overlayWindow.joinsFrame && overlayWindow.joinAttached
+            // Whether the card grows out of the bar from NOTHING and sinks
+            // back to nothing, its content revealed by the growth (the
+            // unroll): a fused card, and a released one on a bar with no plate
+            // - it rides the same scalar out of the same edge. Every other
+            // released card grows from the parked square and fades its
+            // content in; on a plateless bar that left a parked-square dot
+            // on the bar edge for the exit timer's length after the card had
+            // gone, and an empty card for the content fade's first 200 ms.
+            readonly property bool unrolls: overlayWindow.cardFused || (overlayWindow.joinsFrame && FrameGeometry.barPlateless)
             FrameJoin {
                 id: cardJoin
                 anchors.fill: parent
@@ -840,13 +921,15 @@ Scope {
                              topRight: bottom ? card.radius : heldR,
                              bottomRight: bottom ? heldR : card.radius,
                              bottomLeft: bottom ? heldL : card.radius },
-                    gap: cardJoin.state.gap,
-                    neck: overlayWindow.cardOverhangs ? 0 : cardJoin.state.neck * grown,
-                    bulge: overlayWindow.cardOverhangs ? 0 : cardJoin.state.bulge * grown,
+                    gap: cardJoin.state.gap * overlayWindow.liftRide,
+                    // No meniscus where there is nothing to fuse to: a card
+                    // wider than its island, or a bar with no plate.
+                    neck: overlayWindow.cardOverhangs || FrameGeometry.barPlateless ? 0 : cardJoin.state.neck * grown,
+                    bulge: overlayWindow.cardOverhangs || FrameGeometry.barPlateless ? 0 : cardJoin.state.bulge * grown,
                     meniscus: cardJoin.meniscus, blendPerPixel: cardJoin.blendPerPixel,
                     climbFraction: cardJoin.climbFraction, color: overlayWindow.platePaint,
                     // The released card's border, fading in with the lift.
-                    strokeWidth: Appearance.borderWidth.standard * Math.min(1, cardJoin.lift / Math.max(1, cardJoin.travel)),
+                    strokeWidth: Appearance.borderWidth.standard * Math.min(1, cardJoin.lift * overlayWindow.liftRide / Math.max(1, cardJoin.travel)),
                     strokeColor: Appearance.colors.colLayer0Border
                 };
             }
@@ -868,11 +951,12 @@ Scope {
             SequentialAnimation {
                 id: contentEnter
                 property Item item: null
-                // The pause is the slice of the travel the outgoing content's
-                // fade owns; the enter then lands exactly as the move settles.
+                // The pause is the outgoing content's whole fade: the arriving
+                // tree starts once the leaving one is gone, so the two are
+                // never both legible (a shorter pause had them overlapping,
+                // footage). The card's move keeps its own tier underneath.
                 PauseAnimation {
-                    duration: Appearance.animation.elementMove.duration
-                        - Appearance.animation.elementMoveEnter.duration
+                    duration: Appearance.animation.elementMoveExit.duration
                 }
                 NumberAnimation {
                     target: contentEnter.item
@@ -923,6 +1007,10 @@ Scope {
                 // and the one place they would visibly differ is mid-flight,
                 // which is the only place nobody looks.
                 property real openProgress: 0
+                // The growth's arrival ends the emergence: a released card
+                // lifts off from here (the OSD's lesson: the animation's END
+                // came 280 ms after the card looked grown).
+                onOpenProgressChanged: if (overlayWindow.emerging && card.openProgress >= 0.97) overlayWindow.emerging = false
                 // What the card unrolls between. Assigned by retarget(), which
                 // is a turn of the event loop behind the takeover because an
                 // unparented tree does not polish and its implicit size is
@@ -938,7 +1026,7 @@ Scope {
 
                 width: 0
                 height: BarPopupUnroll.cardHeight(card.openHeight, card.heroHeight,
-                    card.parkedSize, overlayWindow.exiting, card.openProgress, overlayWindow.cardFused)
+                    card.parkedSize, overlayWindow.exiting, card.openProgress, overlayWindow.unrolls)
                 // Bindings, not assignments, and that is what the driver bought.
                 // On the bottom and right edges the bar-adjacent coordinate is a
                 // function of the animating size, which is why this used to be
@@ -954,7 +1042,7 @@ Scope {
                     : card.alongBar
                 // The gap off the bar: the elevation margin, or - where the
                 // frame joins the card - the join's lift, nothing while fused.
-                readonly property real offBar: overlayWindow.joinsFrame ? cardJoin.lift : Appearance.sizes.elevationMargin
+                readonly property real offBar: overlayWindow.joinsFrame ? cardJoin.lift * overlayWindow.liftRide : Appearance.sizes.elevationMargin
                 y: overlayWindow.barVertical
                     ? card.alongBar
                     : (overlayWindow.barEdge === "bottom"
@@ -1046,6 +1134,14 @@ Scope {
                 // paint outside the card's rounded body. Content is inset by
                 // contentPadding on every side, so the rectangular clip never
                 // reaches the corner radii.
+                // The leaving tree's host: under the arriving tree's, inset by
+                // the LEAVING popup's padding, clipped the same way.
+                Item {
+                    id: leaveHost
+                    anchors.fill: parent
+                    anchors.margins: overlayWindow.outgoing?.contentPadding ?? 0
+                    clip: true
+                }
                 Item {
                     id: contentHost
                     anchors.fill: parent

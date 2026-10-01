@@ -186,6 +186,24 @@ ContentPage {
                         text: Translation.tr("Auto: a notification arrives fused to the band at its edge and sinks back into it; its Pin button lifts it off as its own card and keeps it. Fused keeps pinned ones on the band too; Released is the free card. Only for the left and right positions.")
                     }
                 }
+                ConfigSelectionArray {
+                    property bool rowVisible: Config.options.appearance.frame.enable
+                    icon: "tune"
+                    text: Translation.tr("On-screen display")
+                    currentValue: Config.options.appearance.frame.osd ?? "detached"
+                    onSelected: newValue => { Config.options.appearance.frame.osd = newValue; }
+                    options: [
+                        { "displayName": Translation.tr("Detached"), "value": "detached" },
+                        { "displayName": Translation.tr("Attached"), "value": "attached" }
+                    ]
+                    detailContent: StyledText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        color: Appearance.colors.colSubtext
+                        text: Translation.tr("The volume, brightness and lock indicators. Detached: the pill grows out of the bar's plate and lifts off it as its own card, landing and sinking back when it times out. Attached: it stays on the plate.")
+                    }
+                }
             }
         }
 

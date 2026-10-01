@@ -239,7 +239,7 @@ Scope {
                 // lift and the end of a landing - the dock's rule - so the
                 // compositor re-tiles once per state change, on its own
                 // animation.
-                readonly property bool barOccupied: HyprlandData.occupiedByMonitorName[barRoot.screen?.name ?? ""] ?? false
+                readonly property bool barOccupied: FrameGeometry.barOccupiedByMonitorName[barRoot.screen?.name ?? ""] ?? false
                 readonly property bool joinAttached: FrameGeometry.barAttachedFor(GlobalStates.barPinned, barRoot.barOccupied)
                 // The band's inner edge in this window's frame: the surface
                 // sits at the screen edge less its own margin.

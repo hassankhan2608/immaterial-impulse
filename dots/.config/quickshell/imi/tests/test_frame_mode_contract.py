@@ -378,11 +378,11 @@ class FrameModeContract(unittest.TestCase):
         overlay = _strip((ROOT / "modules/imi/bar/BarPopupOverlay.qml").read_text())
         self.assertIn('GlobalStates.publishFrameJoin(name, "barPopup", record);', overlay)
         self.assertIn("readonly property bool joinsFrame: FrameGeometry.popupsJoinBar && !overlayWindow.barVertical", overlay)
-        self.assertIn('|| (overlayWindow.popupsLook === "auto" && !(overlayWindow.current?.pinnedOpen ?? false))', overlay)
-        self.assertIn("readonly property bool joinAttached: !overlayWindow.joinsFrame || overlayWindow.wantsFused || overlayWindow.exiting", overlay)
-        self.assertIn("card.parkedSize, overlayWindow.exiting, card.openProgress, overlayWindow.cardFused)", overlay)
+        self.assertIn('|| (overlayWindow.popupsLook === "auto" && !(overlayWindow.current?.pinnedOpen ?? false) && !FrameGeometry.barPlateless)', overlay)
+        self.assertIn("|| (overlayWindow.exiting && !FrameGeometry.barPlateless) || overlayWindow.emerging", overlay)
+        self.assertIn("card.parkedSize, overlayWindow.exiting, card.openProgress, overlayWindow.unrolls)", overlay)
         self.assertIn("readonly property bool plateOnFrame: overlayWindow.joinsFrame && cardJoin.drawsPlate", overlay)
-        self.assertIn("readonly property real offBar: overlayWindow.joinsFrame ? cardJoin.lift : Appearance.sizes.elevationMargin", overlay)
+        self.assertIn("readonly property real offBar: overlayWindow.joinsFrame ? cardJoin.lift * overlayWindow.liftRide : Appearance.sizes.elevationMargin", overlay)
         unroll = (ROOT / "modules/imi/bar/bar_popup_unroll.js").read_text()
         self.assertIn("function restHeight(openHeight, heroHeight, parkedSize, exiting, fused)", unroll)
         self.assertIn('property string popups: "auto"', _strip((ROOT / "modules/common/Config.qml").read_text()))
@@ -493,7 +493,8 @@ class FrameModeContract(unittest.TestCase):
         # Islands treat popups like the plate: the island is the drop, the
         # card's edge the pond; the frame paints both, the bar's island stands
         # down by section, and the two records name each other's edges.
-        self.assertIn("readonly property bool popupsJoinBar: root.enabled && (root.barCovers || root.barIslands)", geometry)
+        self.assertIn("readonly property bool popupsJoinBar: root.enabled && [0, 4].includes(Number(Config.options.bar.cornerStyle ?? 0))", geometry)
+        self.assertIn("readonly property bool barPlateless: root.popupsJoinBar && !root.barPlate", geometry)
         self.assertIn('for (const key in records) GlobalStates.publishFrameJoin(name, key, records[key]);', barWindow, "one record per island, from the bar's own join")
         self.assertIn('const out = { "barIsland:left": null, "barIsland:center": null, "barIsland:right": null };', barWindow)
         self.assertIn("&& (FrameGeometry.barCovers || FrameGeometry.barIslands)", barWindow, "the plate or the islands: the same join")
@@ -504,14 +505,18 @@ class FrameModeContract(unittest.TestCase):
         self.assertIn("if (GlobalStates.claimBarPopup(root)) root.held = true;", _strip((ROOT / "modules/common/widgets/StyledPopup.qml").read_text()))
         for plugin in ("modules/imi/bar/DiscordVoicePlugin.qml", "modules/imi/bar/DockerPlugin.qml", "modules/common/plugins/bundled/docker/DockerWidget.qml"):
             src = _strip((ROOT / plugin).read_text())
-            self.assertIn("active: root.popupOpen || (popupLoader.item?.held ?? false)", src, plugin)
+            # A plain flag, not a binding on the item's own `held`: that binding
+            # re-evaluated while its write was unloading the item (a loop), and
+            # the popup was destroyed under the overlay's hand (crash report).
+            self.assertIn("active: root.popupOpen || popupLoader.cardHeld", src, plugin)
+            self.assertIn("function onHeldChanged() { popupLoader.cardHeld = popupLoader.item?.held ?? false; }", src, plugin)
             self.assertNotIn("pinnedOpen: true", src, plugin + ": the popup asks to close; the plugin keeps it loaded")
         # A fused card sits on the flat stretch of its plate, between the
         # corner radii, and carries no neck where it overhangs a narrower
         # island (the span is taken up with barInner, never bound).
         self.assertIn("const span = overlayWindow.joinSpan();", overlay)
         self.assertIn("const edges = overlayWindow.plateEdges ?? span;", overlay, "a card wider than its island lines up with the island's edges (the tab), inside the screen")
-        self.assertIn("neck: overlayWindow.cardOverhangs ? 0 : cardJoin.state.neck * grown,", overlay, "the fillets are as tall as the card")
+        self.assertIn("neck: overlayWindow.cardOverhangs || FrameGeometry.barPlateless ? 0 : cardJoin.state.neck * grown,", overlay, "the fillets are as tall as the card")
         self.assertIn("if (card.height <= 3) return null;", overlay, "no stalk under the bar for a collapsed card")
         self.assertIn("if (!was || was.min !== span.min || was.max !== span.max) overlayWindow.plateSpan = span;", overlay)
         self.assertIn('const isl = key === "barPopup" && pop && pop.section ? (surface.joins["barIsland:" + pop.section] ?? null) : null;', frame)
@@ -525,11 +530,30 @@ class FrameModeContract(unittest.TestCase):
         popup_room = _strip((ROOT / "modules/imi/notificationPopup/NotificationPopup.qml").read_text())
         self.assertIn('joins.bar ?? joins["barIsland:left"] ?? joins["barIsland:center"] ?? joins["barIsland:right"] ?? null', popup_room, "the islands carry the released bar's zone too")
         self.assertIn("const extra = barRecord?.zoneExtra ?? 0", popup_room)
-        self.assertIn("readonly property var occupiedByMonitorName:", _strip((ROOT / "services/HyprlandData.qml").read_text()))
+        # The bar hugs for a tiled window, or a floating one within its strip
+        # (the zone and the gap); a floating window elsewhere leaves it
+        # (review). The rule is Geo.barOccupied, mapped per monitor by the
+        # frame authority; the old any-window map is gone.
+        self.assertIn("function edgeOccupied(windows, monitor, edge, depth) {", (ROOT / "services/frame_geometry.js").read_text())
+        self.assertIn("readonly property var barOccupiedByMonitorName:", geometry_src := _strip((ROOT / "services/FrameGeometry.qml").read_text()))
+        self.assertIn("readonly property real barStripDepth: root.barThickness + root.gap * 2", geometry_src, "the zone, the lift and the gap: a window touching the floating plate's gap is in its space")
+        self.assertIn("out[mon.name] = Geo.edgeOccupied(HyprlandData.windowList, mon, root.barEdge, root.barStripDepth);", geometry_src)
+        # The dock hides for a focused window only when it is in the dock's
+        # way, by the same rule; and floating windows move without an event,
+        # so the clients are re-read on a slow clock while one is up.
+        dock_src = _strip((ROOT / "modules/imi/dock/Dock.qml").read_text())
+        self.assertIn("|| !(ToplevelManager.activeToplevel?.activated && dockRoot.dockOccupied)", dock_src)
+        self.assertIn("readonly property bool dockOccupied: Geo.edgeOccupied(HyprlandData.windowList,", dock_src)
+        hypr = _strip((ROOT / "services/HyprlandData.qml").read_text())
+        self.assertIn("readonly property bool floatingOnActive: root.monitors.some(mon =>", hypr)
+        self.assertIn("running: root.floatingOnActive", hypr)
+        self.assertIn("var onActive = w.workspace.id === ws, onSpecial = special !== undefined && w.workspace.id === special;", (ROOT / "services/frame_geometry.js").read_text(), "a shown special workspace's windows count by their rect")
+        self.assertIn('readonly property bool barOccupied: FrameGeometry.barOccupiedByMonitorName[barRoot.screen?.name ?? ""] ?? false', barWindow)
+        self.assertNotIn("occupiedByMonitorName", _strip((ROOT / "services/HyprlandData.qml").read_text()))
         states = _strip((ROOT / "GlobalStates.qml").read_text())
         self.assertIn("property bool barPinned: false", states)
         self.assertNotIn("frameBars", states)
-        self.assertNotIn("barPlate", frame)
+        self.assertNotRegex(frame, r"\bbarPlate\b")
         self.assertIn('property string bar: "auto"', _strip((ROOT / "modules/common/Config.qml").read_text()))
 
     def test_an_island_narrower_than_its_card_stands_on_it_as_a_tab(self):
@@ -585,13 +609,194 @@ class FrameModeContract(unittest.TestCase):
         self.assertIn("strokeWidth: joinField.j?.strokeWidth ?? 0", frame)
         self.assertIn('strokeColor: joinField.j?.strokeColor ? paintLayer.solid(joinField.j.strokeColor) : "transparent"', frame)
         overlay = _strip((ROOT / "modules/imi/bar/BarPopupOverlay.qml").read_text())
-        self.assertIn("strokeWidth: Appearance.borderWidth.standard * Math.min(1, cardJoin.lift / Math.max(1, cardJoin.travel)),", overlay)
+        self.assertIn("strokeWidth: Appearance.borderWidth.standard * Math.min(1, cardJoin.lift * overlayWindow.liftRide / Math.max(1, cardJoin.travel)),", overlay)
         bar = _strip((ROOT / "modules/imi/bar/Bar.qml").read_text())
         self.assertIn("? Appearance.borderWidth.standard * Math.min(1, barJoin.lift / barJoin.travel) : 0", bar)
         self.assertEqual(bar.count("strokeWidth: barRoot.plateStroke, strokeColor: Appearance.colors.colLayer0Border,"), 2, "the plate and the islands")
         dock = _strip((ROOT / "modules/imi/dock/Dock.qml").read_text())
         self.assertIn(": Appearance.borderWidth.standard * Math.min(1, dockJoin.lift / dockJoin.travel)", dock)
         self.assertIn("strokeWidth: dockJoin.strokeWidth, strokeColor: dockJoin.strokeColor", dock)
+
+    def test_a_fresh_fused_open_reveals_its_content(self):
+        # frame-pin-grammar.md §7, the entrance: a fused plate cannot fade, so
+        # its content is there from the first frame and the growing plate
+        # reveals it; the pause-then-fade is the takeover's alone.
+        overlay = _strip((ROOT / "modules/imi/bar/BarPopupOverlay.qml").read_text())
+        self.assertIn("const fresh = card.width <= 0 || card.openHeight <= 0;", overlay)
+        self.assertRegex(overlay, r"if \(fresh && overlayWindow\.unrolls\) \{\s*arriving\.opacity = 1;\s*\} else \{\s*arriving\.opacity = 0;\s*contentEnter\.item = arriving;\s*contentEnter\.restart\(\);")
+
+    def test_the_docks_window_preview_emerges_from_the_pill(self):
+        # frame-pin-grammar.md, the dock preview row: the card is always a
+        # released card, but it emerges from the pill - a join on the dock's
+        # plate, fused while it grows, lifting off once grown - and lands and
+        # sinks back into it on close. The frame paints it under "dockPreview"
+        # against the dock record's inner edge.
+        frame = _strip((ROOT / "modules/imi/frame/Frame.qml").read_text())
+        self.assertIn('if (key === "dockPreview" && d && d.edge === edge)', frame)
+        self.assertIn('if (key === "dockPreview") return 480;', frame)
+        drag = _strip((ROOT / "modules/imi/dock/DragApps.qml").read_text())
+        self.assertIn("readonly property bool previewJoinsFrame: root.frameJoined && FrameGeometry.enabled", drag)
+        self.assertIn("id: previewJoin", drag)
+        self.assertIn("attached: previewPopup.fusedNow", drag)
+        self.assertIn("paintsAtRest: true", drag.split("id: previewJoin", 1)[1].split("}", 1)[0])
+        self.assertIn('GlobalStates.publishFrameJoin(name, "dockPreview", record);', drag)
+        self.assertIn("rect: previewPopup.innerEdgeRect", drag, "the popup hangs off the pill's inner edge, so bandInset is 0")
+        self.assertIn("bandInset: 0", drag)
+        # The phases: grow fused; release once grown OR the moment the card
+        # outgrows the pill's flat (a wider card fused under a narrow pill had
+        # shoulders past its sides - seen live); on close a card that
+        # outgrows shrinks first and re-attaches when it fits, one that fits
+        # lands before sinking.
+        self.assertIn("readonly property bool outgrows: (root.vertical ? popupBackground.height : popupBackground.width) > previewPopup.pillFlat", drag)
+        self.assertIn("readonly property bool willOutgrow: (root.vertical ? popupBackground.implicitHeight : popupBackground.implicitWidth) > previewPopup.pillFlat", drag, "decided from the settled width, so it lifts from the first frame")
+        self.assertIn("readonly property bool fusedNow: previewPopup.show ? !(previewPopup.willOutgrow || previewPopup.openDone) : !previewPopup.outgrows", drag)
+        self.assertRegex(drag, r"if \(!previewPopup\.openAnim\.running && previewPopup\.show && previewPopup\.openProgress >= 0\.999\)\s*previewPopup\.openDone = true;")
+        # ...and released when the growth arrives, not when the tier's
+        # animation ends (a 280 ms pause between growth and lift, footage).
+        self.assertIn("if (previewPopup.show && !previewPopup.openDone && previewPopup.openProgress >= 0.97) previewPopup.openDone = true;", drag)
+        self.assertIn("if (GlobalStates.osdVolumeOpen && !osdRoot.openDone && osdRoot.openProgress >= 0.97) osdRoot.openDone = true;", _strip((ROOT / "modules/imi/onScreenDisplay/OnScreenDisplay.qml").read_text()))
+        self.assertIn("if (previewPopup.willOutgrow || previewJoin.lift <= 0.5) {\n                previewPopup.submerge();", drag)
+        self.assertIn("const necked = previewPopup.willOutgrow ? 0 : grown;", drag, "no meniscus under a card that was never fused")
+        self.assertIn("neck: previewJoin.state.neck * necked, bulge: previewJoin.state.bulge * necked,", drag)
+        self.assertIn("if (previewPopup.landing && previewJoin.lift < 0.75 && previewJoin.state.neck > 0.9) previewPopup.submerge();", drag)
+        # The card slides between icons by its centre, never by `x`: the
+        # width grows with the content and a Behavior on x glided the card
+        # sideways after it had grown (traced).
+        self.assertIn("property real slideCenter: previewPopup.cachedCenter", drag)
+        self.assertNotIn("Behavior on x", drag.split("id: popupMouseArea", 1)[1].split("id: previewJoin", 1)[0])
+        # No fade in frame mode; the content is revealed by the growth from
+        # the pill's side, and the card's own plate stands down for the frame.
+        self.assertIn("opacity: root.previewJoinsFrame ? 1 : (previewPopup.show ? 1 : 0)", drag)
+        self.assertIn('color: plateOnFrame ? "transparent" : Appearance.m3colors.m3surfaceContainer', drag)
+        self.assertIn("height: Math.max(0, implicitHeight * grow)", drag)
+        # The strip's hover: a button's leave is guarded on being the hovered
+        # button, and the hide debounce outlasts the show's, or the card closed
+        # on the way from one icon to the next (footage).
+        self.assertIn("} else if (root.lastHoveredButton === dockBtn) {\n                        root.buttonHovered = false", drag)
+        self.assertIn("interval: previewPopup.shouldShow ? 100 : 250", drag)
+        dock = _strip((ROOT / "modules/imi/dock/Dock.qml").read_text())
+        self.assertIn("surfaceOrigin: dockRoot.surfaceOriginPoint", dock)
+        self.assertIn("frameJoined: dockJoin.active && !dockRoot.fullscreenOnThisMonitor", dock)
+        self.assertIn("readonly property point surfaceOriginPoint:", dock)
+
+    def test_the_osd_grows_out_of_the_bars_plate(self):
+        # frame-pin-grammar.md, the OSD row: transient, so fused - it grows
+        # out of the bar's plate (the island under its centre, else the band)
+        # and sinks back when it times out; the frame paints it under "osd" by
+        # the same rule the window places itself with (Geo.barInnerEdgeAt).
+        geo = (ROOT / "services/frame_geometry.js").read_text()
+        self.assertIn("function barInnerEdgeAt(joins, edge, along, fallback) {", geo)
+        frame = _strip((ROOT / "modules/imi/frame/Frame.qml").read_text())
+        self.assertIn('if (key === "osd") {', frame)
+        self.assertIn("return Geo.barInnerEdgeAt(surface.joins, edge, along, zone);", frame)
+        self.assertIn('if (key === "osd") return 240;', frame)
+        osd = _strip((ROOT / "modules/imi/onScreenDisplay/OnScreenDisplay.qml").read_text())
+        self.assertIn("readonly property bool joinsFrame: FrameGeometry.popupsJoinBar", osd, "not under M3, whose bar has no plate")
+        self.assertIn("active: root.windowUp", osd, "the window's lifetime is set in order, never bound to the trigger")
+        self.assertIn("} else if (root.joinsFrame && root.windowUp) {\n                root.leaving = true;", osd, "the window outlives the timeout for the sink")
+        self.assertIn("if (root.leaving && osdRoot.openProgress <= 0.001) {\n                        root.leaving = false;\n                        root.windowUp = false;", osd)
+        self.assertIn("const inner = Geo.barInnerEdgeAt(joins, osdRoot.edge, w / 2, band);", osd)
+        self.assertIn("function onFrameJoinsChanged() { Qt.callLater(osdRoot.takeBarInner); }", osd)
+        self.assertIn("left: root.joinsFrame\n                right: root.joinsFrame", osd, "spans the screen, so the card's x is its screen x")
+        self.assertIn("top: root.joinsFrame ? osdRoot.barInner : Appearance.sizes.barHeight", osd)
+        self.assertIn("id: osdJoin", osd)
+        # Attached or Detached (Settings > Appearance > Frame), Detached the
+        # default: the dock preview's phases, fused while it grows, off once
+        # grown or from the first frame when it outgrows the plate's flat.
+        self.assertIn("attached: osdRoot.fusedNow", osd.split("id: osdJoin", 1)[1].split("}", 1)[0])
+        self.assertIn("readonly property bool fusedNow: FrameGeometry.osdAttached ? true", osd)
+        self.assertIn("const necked = (!FrameGeometry.osdAttached && osdRoot.willOutgrow) || FrameGeometry.barPlateless ? 0 : grown;", osd)
+        self.assertIn("strokeWidth: Appearance.borderWidth.standard * Math.min(1, osdJoin.lift * osdRoot.liftRide / Math.max(1, osdJoin.travel)),", osd)
+        self.assertIn('property string osd: "detached"', _strip((ROOT / "modules/common/Config.qml").read_text()))
+        geometry = _strip((ROOT / "services/FrameGeometry.qml").read_text())
+        self.assertIn('readonly property string osdLook: String(Config.options.appearance.frame.osd ?? "detached")', geometry)
+        self.assertIn('readonly property bool osdAttached: root.osdLook === "attached"', geometry)
+        settings = _strip((ROOT / "modules/imi/settings/pages/AppearanceConfig.qml").read_text())
+        self.assertIn('currentValue: Config.options.appearance.frame.osd ?? "detached"', settings)
+        self.assertIn("function barRecordAt(joins, edge, along) {", geo)
+        self.assertIn('GlobalStates.publishFrameJoin(name, "osd", record);', osd)
+        self.assertIn("regionItem: osdRoot.plateOnFrame ? null : (osdIndicatorLoader.item?.backgroundItem ?? null)", osd)
+        self.assertIn("implicitHeight: root.joinsFrame ? Math.max(0, fullHeight * grow) : contentColumnLayout.implicitHeight", osd)
+        for rel in ("modules/imi/onScreenDisplay/OsdValueIndicator.qml", "modules/imi/onScreenDisplay/OsdTextIndicator.qml"):
+            ind = _strip((ROOT / rel).read_text())
+            self.assertIn("property bool plateOnFrame: false", ind, rel)
+            self.assertIn('color: root.plateOnFrame ? "transparent" : Appearance.colors.colLayer0', ind, rel)
+
+    def test_a_takeover_never_shows_both_contents_at_once(self):
+        # frame-pin-grammar.md §7, the takeover: the leaving tree sits UNDER
+        # the arriving one, and the arriving fade waits for the leaving fade
+        # to end - for four frames both texts were legible, the weather at
+        # full strength over the calendar (footage).
+        overlay = _strip((ROOT / "modules/imi/bar/BarPopupOverlay.qml").read_text())
+        # ...in its own host, declared before (under) the arriving tree's and
+        # inset by the LEAVING popup's padding: the arriving host's margins
+        # had already become the arriving popup's padding, so the leaving
+        # content jumped by the difference on the first frame (footage).
+        self.assertIn("leaving.parent = leaveHost;", overlay)
+        self.assertLess(overlay.index("id: leaveHost"), overlay.index("id: contentHost"))
+        self.assertIn("anchors.margins: overlayWindow.outgoing?.contentPadding ?? 0", overlay.split("id: leaveHost", 1)[1].split("}", 1)[0])
+        self.assertRegex(overlay, r"id: contentEnter\s*property Item item: null\s*PauseAnimation \{\s*duration: Appearance\.animation\.elementMoveExit\.duration\s*\}")
+
+    def test_a_leaving_card_fades_its_content_in_place_as_it_sinks(self):
+        # frame-pin-grammar.md §7, the sink: the content vanishes in place -
+        # the fast tier, decelerating - as the card starts to collapse, one
+        # motion. A clip over a full-strength content cut it (footage); a
+        # fade held first stalled the close; a scale squashed it (review).
+        # The bar popup, the dock preview and the OSD alike.
+        overlay = _strip((ROOT / "modules/imi/bar/BarPopupOverlay.qml").read_text())
+        self.assertNotIn("sinking", overlay)
+        self.assertRegex(overlay, r"id: sinkFade\s*property: \"opacity\"\s*to: 0\s*duration: Appearance\.animation\.elementMoveFast\.duration\s*easing\.type: Easing\.BezierSpline\s*easing\.bezierCurve: Appearance\.animationCurves\.emphasizedDecel")
+        self.assertNotIn("onFinished: overlayWindow.sink()", overlay, "nothing waits for the fade")
+        host = overlay.split("id: contentHost", 1)[1].split("Item {", 1)[0]
+        self.assertIn("clip: true", host)
+        self.assertNotIn("Scale {", host)
+        for rel in ("modules/imi/dock/DragApps.qml", "modules/imi/onScreenDisplay/OnScreenDisplay.qml"):
+            src = _strip((ROOT / rel).read_text())
+            self.assertNotIn("sinking", src, rel)
+            self.assertRegex(src, r"id: sinkFade\s*target: \w+\s*property: \"opacity\"\s*to: 0\s*duration: Appearance\.animation\.elementMoveFast\.duration", rel)
+
+    def test_a_plateless_bar_still_joins_its_popups_and_osd(self):
+        # A bar with its background off (a transparent bar, review) publishes
+        # no plate, and its popups and OSD used to fall out of frame mode
+        # altogether: popping in fully formed, the OSD's frost gone in the
+        # first frame of its exit while its text lingered. Plateless, they
+        # join the bar's ZONE edge (barThickness from the screen edge, not the
+        # 2 px hairline) as released cards: no meniscus (nothing to fuse to),
+        # but the same emergence - fused while growing, lifting off when the
+        # growth arrives - so a released card is one motion, not an unroll.
+        geometry = _strip((ROOT / "services/FrameGeometry.qml").read_text())
+        self.assertIn("readonly property bool barPlate: root.barCovers || root.barIslands", geometry)
+        self.assertIn("readonly property bool barPlateless: root.popupsJoinBar && !root.barPlate", geometry)
+        frame = _strip((ROOT / "modules/imi/frame/Frame.qml").read_text())
+        self.assertIn('target: "frame"', frame, "the diagnosis that found it: the frame IPC target, `geometry` and `joins <screen>`")
+        self.assertIn("const zone = edge === FrameGeometry.barEdge && FrameGeometry.barPlateless", frame)
+        self.assertIn("? Geo.joinBandEdge(edge, FrameGeometry.barThickness, surface.width, surface.height)", frame)
+        self.assertIn("return Geo.barInnerEdgeAt(surface.joins, edge, along, zone);", frame)
+        self.assertIn('if (key === "barPopup") return zone;', frame)
+        overlay = _strip((ROOT / "modules/imi/bar/BarPopupOverlay.qml").read_text())
+        self.assertIn("property bool emerging: false", overlay)
+        self.assertIn("overlayWindow.emerging = overlayWindow.joinsFrame && !FrameGeometry.barPlateless;", overlay, "a fresh open in frame mode emerges")
+        self.assertIn("onOpenProgressChanged: if (overlayWindow.emerging && card.openProgress >= 0.97) overlayWindow.emerging = false", overlay)
+        self.assertIn("neck: overlayWindow.cardOverhangs || FrameGeometry.barPlateless ? 0 : cardJoin.state.neck * grown,", overlay)
+        osd = _strip((ROOT / "modules/imi/onScreenDisplay/OnScreenDisplay.qml").read_text())
+        self.assertIn("readonly property real bandFallback: FrameGeometry.barPlateless && osdRoot.edge === FrameGeometry.barEdge", osd)
+        self.assertIn("property real barInner: osdRoot.bandFallback", osd)
+        self.assertIn("const necked = (!FrameGeometry.osdAttached && osdRoot.willOutgrow) || FrameGeometry.barPlateless ? 0 : grown;", osd)
+        # ...and the lift RIDES the growth there (footage, 60 fps: on the
+        # join's own spring the pill grew, then crept 10 px away over 400 ms,
+        # and crept back before it collapsed - two motions read as a drift;
+        # with no neck there is no cleavage to make the second one an event).
+        # Released from the first frame, no landing: one scalar each way.
+        self.assertIn("readonly property real liftRide: FrameGeometry.barPlateless ? osdValuesWrapper.grow : 1", osd)
+        self.assertIn("gap: osdJoin.state.gap * osdRoot.liftRide,", osd)
+        self.assertIn("osdRoot.height - height - osdJoin.lift * osdRoot.liftRide : osdJoin.lift * osdRoot.liftRide)", osd)
+        self.assertIn("if (FrameGeometry.osdAttached || FrameGeometry.barPlateless || osdRoot.willOutgrow || osdJoin.lift <= 0.5) osdRoot.sink();", osd)
+        self.assertIn(": FrameGeometry.barPlateless ? false", osd, "released from the first frame")
+        self.assertIn("readonly property real liftRide: FrameGeometry.barPlateless ? Math.max(0, Math.min(1, card.openProgress)) : 1", overlay)
+        self.assertIn("gap: cardJoin.state.gap * overlayWindow.liftRide,", overlay)
+        self.assertIn("readonly property real offBar: overlayWindow.joinsFrame ? cardJoin.lift * overlayWindow.liftRide : Appearance.sizes.elevationMargin", overlay)
+        self.assertIn("if (overlayWindow.joinsFrame && !FrameGeometry.barPlateless && cardJoin.lift > 0.5) {", overlay, "no landing where nothing was fused")
+        self.assertIn("readonly property bool unrolls: overlayWindow.cardFused || (overlayWindow.joinsFrame && FrameGeometry.barPlateless)", overlay, "from nothing, to nothing, content revealed by the growth")
 
     def test_the_family_gates_the_surface_on_the_option(self):
         fam = FAMILY.read_text()

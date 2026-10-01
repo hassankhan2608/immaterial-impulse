@@ -12,6 +12,7 @@ import Quickshell
 import Quickshell.Widgets
 import Quickshell.Wayland
 import "dock_geometry.js" as DockGeometry
+import "../../../services/frame_geometry.js" as Geo
 
 Scope {
     id: root
@@ -32,6 +33,15 @@ Scope {
 
         PanelWindow {
             id: dockRoot
+            // Where this window sits on the screen (the compositor was asked
+            // for it, DockGeometry.surfaceOrigin): what the plate's record and
+            // the window-preview card's add to their own coordinates.
+            readonly property point surfaceOriginPoint: {
+                const o = DockGeometry.surfaceOrigin(root.edge,
+                    dockRoot.screen?.width ?? 0, dockRoot.screen?.height ?? 0, dockRoot.width, dockRoot.height,
+                    dockRoot.frameMargins[DockGeometry.outwardSide(root.edge)]);
+                return Qt.point(o.x, o.y);
+            }
             required property var modelData
             screen: modelData
             // The Lockscreen tab rides the lock's own teardown (spec §1.5).
@@ -57,12 +67,20 @@ Scope {
                     return true
                 if (fullscreenOnThisMonitor)
                     return Config.options?.dock.hoverToReveal && dockMouseArea.containsMouse
+                // Hidden for a focused window only when that window is in
+                // the dock's way: a tiled one, or a floating one within the
+                // dock's strip (Geo.edgeOccupied). A floating window focused
+                // far from the dock used to hide it (review).
                 return root.pinned
                     || (Config.options?.dock.hoverToReveal && dockMouseArea.containsMouse)
                     || activeAppsArea.requestDockShow
                     || dragSlots.requestDockShow
-                    || (!ToplevelManager.activeToplevel?.activated)
+                    || !(ToplevelManager.activeToplevel?.activated && dockRoot.dockOccupied)
             }
+            // The dock's strip: its thickness, its lift and the gap.
+            readonly property bool dockOccupied: Geo.edgeOccupied(HyprlandData.windowList,
+                HyprlandData.monitors.find(m => m.name === (dockRoot.modelData?.name ?? "")) ?? null,
+                root.edge, dockRoot.dockThickness + Appearance.sizes.hyprlandGapsOut * 2)
 
             // Everything positional comes from one derivation
             // (dock_geometry.js), so the four places that used to spell the
@@ -524,6 +542,17 @@ Scope {
                             DragApps {
                                 id: dragSlots
                                 visible: dockRow.hasPinnedApps
+                                // What the window-preview card joins in frame
+                                // mode (frame-pin-grammar.md, the dock preview
+                                // row): the pill's rect in this window, the
+                                // window's place on the screen, and whether the
+                                // frame is painting the pill at all.
+                                plateRect: Qt.rect(
+                                    dockMouseArea.x + dockHoverRegion.x + dockBackground.x + dockVisualBackground.x,
+                                    dockMouseArea.y + dockHoverRegion.y + dockBackground.y + dockVisualBackground.y,
+                                    dockVisualBackground.width, dockVisualBackground.height)
+                                surfaceOrigin: dockRoot.surfaceOriginPoint
+                                frameJoined: dockJoin.active && !dockRoot.fullscreenOnThisMonitor
                                 // space25 across the thickness; the negative
                                 // margin is a pull-in at the LEADING end of the
                                 // strip, closing the gap an absent pin button

@@ -108,6 +108,16 @@ Singleton {
     // this and the overlay reads the bar's records, and a value carried on
     // the records would be a loop. null while no card overhangs.
     property var barPopupTab: null
+    // The wallpaper's brightness along each screen edge, per screen name
+    // ({ top, bottom, left, right }, 0..1), sampled by Background.qml for the
+    // bar's adaptive edge shadow (edge_shade.js). Reassigned whole, never
+    // mutated, so a binding on it re-evaluates.
+    property var wallpaperEdgeLuma: ({})
+    function publishWallpaperEdgeLuma(screen: string, lumas: var): void {
+        const next = Object.assign({}, root.wallpaperEdgeLuma);
+        if (lumas) next[screen] = lumas; else delete next[screen];
+        root.wallpaperEdgeLuma = next;
+    }
     // The active Wallpaper Engine scene's content aspect (w/h), published by
     // Background from the live surface's real content size - which the crop
     // picker needs because the scene's authored aspect is not the preview

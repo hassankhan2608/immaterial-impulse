@@ -116,7 +116,12 @@ QtObject {
     // an empty plate landed and sank (frame-pin-grammar.md §7, the Docker and
     // Discord cards). The plugins bind their Loader's `active` to this.
     property bool held: false
-    onAboutToRelease: root.held = false
+    // Let go from the event loop, never inside the overlay's release(): the
+    // click-only plugins unload this popup the moment `held` drops, and
+    // dropped synchronously it was destroyed while release() still held the
+    // popup and its content in hand - a segfault at the end of an exit
+    // (crash report, the Discord popup).
+    onAboutToRelease: Qt.callLater(() => { root.held = false; })
 
     // Asked by the arbiter when another popup takes the card: drop the hover
     // grace if that is all that is keeping this one up. The CONDITION stays

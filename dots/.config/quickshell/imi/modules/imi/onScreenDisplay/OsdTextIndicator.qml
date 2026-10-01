@@ -15,6 +15,9 @@ Item {
     // is the "round me completely" sentinel (9999) and not a length - a region is
     // a plain rounded rect and would otherwise be squared off against the pill.
     readonly property Item backgroundItem: indicator
+    // The frame paints the pill (frame-pin-grammar.md, the OSD row): the
+    // pill's own fill and shadow stand down, its content stays.
+    property bool plateOnFrame: false
     readonly property real backgroundRadius: Math.round(indicator.height / 2)
 
     implicitWidth: Appearance.sizes.osdWidth + 4 * Appearance.sizes.elevationMargin
@@ -22,6 +25,7 @@ Item {
 
     StyledRectangularShadow {
         target: indicator
+        visible: !root.plateOnFrame
     }
     Rectangle {
         id: indicator
@@ -30,7 +34,7 @@ Item {
             margins: Appearance.sizes.elevationMargin
         }
         radius: Appearance.rounding.full
-        color: Appearance.colors.colLayer0
+        color: root.plateOnFrame ? "transparent" : Appearance.colors.colLayer0
         implicitWidth: contentRow.implicitWidth + 30
         implicitHeight: contentRow.implicitHeight + 18
 

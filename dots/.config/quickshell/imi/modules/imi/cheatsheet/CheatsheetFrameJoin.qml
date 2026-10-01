@@ -10,23 +10,24 @@ import QtQuick.Layouts
  * The join (modules/common/widgets/FrameJoin.qml) is how an element leaves the
  * frame's band and comes back: one solver, one distance field, and a silhouette
  * that has to read as two bodies parting rather than a box sliding. None of
- * that can be judged from a still, and the only surface that currently uses it
- * is the dock - so a change to the field was reviewed by toggling the dock and
- * watching one edge of one element at one size.
+ * that can be judged from a still, and each surface that joins the frame is
+ * reviewed on its own edge at its own size - so a change to the field was
+ * reviewed by toggling one element and watching one edge.
  *
- * This page is the rest of the evidence. Every surface that will have to do
- * this join is here at TRUE size, on its own edge, running the same solver at
- * the same time, so a change can be read against a 120 px pill and a 630 px
- * dock at once - the ratio of the blend radius to the body is what the eye
- * actually reads, and it is the thing that differs most between them.
+ * This page is the rest of the evidence. Every surface that joins the frame
+ * (frame-pin-grammar.md, the table) is here at TRUE size, with its own corner
+ * radii and on its own edge, running the same solver at the same time, so a
+ * change can be read against a 51 px pill and a 630 px dock at once - the ratio
+ * of the blend radius to the body is what the eye actually reads, and it is
+ * the thing that differs most between them. What each surface does at the
+ * band is what it does in the shell: the bar's plate and its islands square
+ * their band-side corners as they fuse and round them as they lift; the
+ * released cards take the 1 px stroke the field draws along their free outline
+ * as they lift; the notification takes none, its card never had one.
  *
- * The two columns are the open question the field poses. Its blend is ONE
- * radius, so the fillet it draws climbs the body's corner about 1.6x as far as
- * it spreads along the band; `climbFraction` fades the radius with height
- * instead, which caps the climb and keeps the spread. The shell ships the
- * isotropic answer (`climbFraction: 0`); the second column is what the other
- * one would look like, kept because the question comes back every time the
- * meniscus is retuned.
+ * The field's blend is one radius (its `climbFraction` stays 0); the
+ * anisotropic variant this page once showed beside it was retired with the
+ * question it answered.
  *
  * Behind Config.options.developer.enable - see Cheatsheet.qml for the tab. The
  * same page runs standalone as `qs -p <shell>/bench_frame_join.qml`, which is
@@ -49,15 +50,35 @@ Item {
     property real travel: 8
     property real slant: 1.1
     property real meniscus: 45
-    property real climbFraction: 0.55
     property bool cycling: true
 
-    // Every surface that has to join the frame, at the size it will really be.
-    readonly property var surfaces: [
-        { label: Translation.tr("dock"), edge: "bottom", w: 630, h: 60, r: Appearance.rounding.large },
-        { label: Translation.tr("bar widget popup"), edge: "top", w: 300, h: 120, r: Appearance.rounding.normal },
-        { label: Translation.tr("notification"), edge: "right", w: 330, h: 92, r: Appearance.rounding.normal },
-        { label: Translation.tr("small pill"), edge: "bottom", w: 120, h: 40, r: Appearance.rounding.small }
+    // Every surface that joins the frame, at the size it really is, in the
+    // rows they share on this page. `w: 0` is the plate that spans its edge.
+    // `bandCorners`: the band-side corners round with the lift (the bar's
+    // plateRadius). `stroke`: the released card's border, drawn by the field
+    // with the lift.
+    readonly property var rows: [
+        [
+            { label: Translation.tr("bar plate  ·  Hug / Float"), edge: "top", w: 0, h: 40,
+              r: Appearance.rounding.windowRounding, bandCorners: true, stroke: true }
+        ],
+        [
+            { label: Translation.tr("bar island"), edge: "top", w: 230, h: 40,
+              r: Appearance.rounding.windowRounding, bandCorners: true, stroke: true },
+            { label: Translation.tr("OSD"), edge: "top", w: 280, h: 51, r: 25.5, bandCorners: false, stroke: true }
+        ],
+        [
+            { label: Translation.tr("bar widget popup"), edge: "top", w: 482, h: 216,
+              r: Appearance.rounding.normal + 4, bandCorners: false, stroke: true },
+            { label: Translation.tr("dock window preview"), edge: "bottom", w: 320, h: 208,
+              r: Appearance.rounding.normal, bandCorners: false, stroke: true }
+        ],
+        [
+            { label: Translation.tr("notification"), edge: "right", w: 330, h: 92,
+              r: Appearance.rounding.normal, bandCorners: false, stroke: false },
+            { label: Translation.tr("dock"), edge: "bottom", w: 630, h: 60,
+              r: Appearance.rounding.large, bandCorners: false, stroke: true }
+        ]
     ]
 
     Timer {
@@ -72,14 +93,19 @@ Item {
     // sequences anything, which is the whole point of the widget.
     component Surface: Item {
         id: cell
-        required property string label
-        required property string edge
-        required property real plateW
-        required property real plateH
-        required property real plateRadius
-        required property real climb
+        required property var spec
+        readonly property string edge: cell.spec.edge
         readonly property bool sideways: cell.edge === "left" || cell.edge === "right"
         readonly property real band: 2
+        readonly property real gap: Appearance.spacing.space150
+        // The plate's size: its own, or the edge's span less a margin.
+        readonly property real plateW: cell.spec.w > 0 ? cell.spec.w : Math.max(0, cell.width - 2 * cell.gap)
+        readonly property real plateH: cell.spec.h
+        // The band-side corners round with the lift where the surface's do
+        // (the bar's plateRadius); the rest keep their own radius.
+        readonly property real bandRadius: cell.spec.bandCorners
+            ? cell.spec.r * Math.min(1, join.lift / Math.max(1, join.travel)) : cell.spec.r
+        readonly property real awayRadius: cell.spec.r
 
         Rectangle {
             color: root.chrome
@@ -96,7 +122,10 @@ Item {
         Rectangle {
             id: plate
             color: root.chrome
-            radius: cell.plateRadius
+            topLeftRadius: cell.edge === "top" || cell.edge === "left" ? cell.bandRadius : cell.awayRadius
+            topRightRadius: cell.edge === "top" || cell.edge === "right" ? cell.bandRadius : cell.awayRadius
+            bottomRightRadius: cell.edge === "bottom" || cell.edge === "right" ? cell.bandRadius : cell.awayRadius
+            bottomLeftRadius: cell.edge === "bottom" || cell.edge === "left" ? cell.bandRadius : cell.awayRadius
             // The travel axis carries the lift and the stretch; the other axis
             // is the plate's own size.
             width: cell.sideways ? cell.plateW + join.press : cell.plateW
@@ -127,7 +156,11 @@ Item {
             color: root.chrome
             slant: root.slant
             meniscus: root.meniscus * root.slant
-            climbFraction: cell.climb
+            // The released card's border, as the shell draws it: the field's
+            // stroke along the free outline, its width following the lift.
+            strokeWidth: cell.spec.stroke
+                ? Appearance.borderWidth.standard * Math.min(1, join.lift / Math.max(1, join.travel)) : 0
+            strokeColor: Appearance.colors.colLayer0Border
         }
 
         // On the INWARD side, away from the band being joined, so a label
@@ -138,7 +171,7 @@ Item {
                                    : Appearance.spacing.space50
             spacing: 0
             StyledText {
-                text: cell.label
+                text: cell.spec.label
                 color: Appearance.colors.colSubtext
                 font.pixelSize: Appearance.font.pixelSize.smaller
             }
@@ -192,32 +225,14 @@ Item {
                 usePercentTooltip: false
                 onValueModified: newValue => root.meniscus = Math.round(newValue)
             }
-            ConfigSlider {
-                text: Translation.tr("Climb")
-                from: 0.15
-                to: 1.5
-                value: root.climbFraction
-                usePercentTooltip: false
-                onValueModified: newValue => root.climbFraction = Math.round(newValue * 20) / 20
-            }
             Item { Layout.fillWidth: true }
         }
 
-        RowLayout {
+        StyledText {
             Layout.fillWidth: true
-            spacing: 0
-            StyledText {
-                Layout.fillWidth: true
-                horizontalAlignment: Text.AlignHCenter
-                text: Translation.tr("Isotropic — one radius, the climb follows the spread (shipped)")
-                color: Appearance.colors.colOnLayer1
-            }
-            StyledText {
-                Layout.fillWidth: true
-                horizontalAlignment: Text.AlignHCenter
-                text: Translation.tr("Anisotropic — the climb is capped, the spread is kept")
-                color: Appearance.colors.colOnLayer1
-            }
+            horizontalAlignment: Text.AlignHCenter
+            text: Translation.tr("Every surface that joins the frame, at true size: fused on its band, then released a lift off it")
+            color: Appearance.colors.colOnLayer1
         }
 
         ColumnLayout {
@@ -226,61 +241,36 @@ Item {
             spacing: Appearance.spacing.space100
 
             Repeater {
-                model: root.surfaces
-                delegate: Item {
+                model: root.rows
+                delegate: RowLayout {
                     id: surfaceRow
                     required property var modelData
-                    readonly property var spec: surfaceRow.modelData
-                    readonly property bool sideways: spec.edge === "left" || spec.edge === "right"
-                    // What one pane needs to hold this surface at TRUE size,
-                    // with room for the lift and a readout.
-                    readonly property real paneW: (sideways ? spec.w + root.travel + 2 : spec.w) + 48
-                    readonly property real paneH: (sideways ? spec.h : spec.h + root.travel + 2) + 48
-                    // Side by side while the pair fits, stacked when it does
-                    // not. This page is shown in a window the compositor sizes
-                    // and in a cheatsheet tab that sizes itself; a layout that
-                    // only reads correctly at one width silently crops the
-                    // outline it exists to show.
-                    readonly property bool paired: width >= paneW * 2 + Appearance.spacing.space100
-
+                    readonly property var specs: surfaceRow.modelData
+                    // What a pane needs to hold its surface at TRUE size, with
+                    // room for the lift and a readout; the row takes the
+                    // tallest.
+                    function paneHeight(spec) {
+                        const sideways = spec.edge === "left" || spec.edge === "right";
+                        return (sideways ? spec.h : spec.h + root.travel + 2) + 48;
+                    }
+                    readonly property real rowHeight: Math.max(...surfaceRow.specs.map(s => surfaceRow.paneHeight(s)))
                     Layout.fillWidth: true
-                    Layout.preferredHeight: paired ? paneH : paneH * 2 + Appearance.spacing.space100
+                    Layout.preferredHeight: rowHeight
+                    spacing: Appearance.spacing.space100
 
-                    Grid {
-                        anchors.fill: parent
-                        columns: surfaceRow.paired ? 2 : 1
-                        spacing: Appearance.spacing.space100
-
-                        Repeater {
-                            // The spec is reached by ID rather than by counting
-                            // `parent`s: a delegate inside a Grid inside a
-                            // Repeater is several levels from its own model
-                            // row, and that chain breaks silently the first
-                            // time the layout changes.
-                            model: [0, root.climbFraction]
-                            delegate: Rectangle {
-                                id: pane
-                                required property real modelData
-                                width: surfaceRow.paired
-                                    ? (surfaceRow.width - Appearance.spacing.space100) / 2
-                                    : surfaceRow.width
-                                height: surfaceRow.paired
-                                    ? surfaceRow.height
-                                    : (surfaceRow.height - Appearance.spacing.space100) / 2
-                                color: root.ground
-                                radius: Appearance.rounding.small
-                                Surface {
-                                    anchors.fill: parent
-                                    anchors.margins: Appearance.borderWidth.standard
-                                    label: pane.modelData > 0
-                                        ? surfaceRow.spec.label + "  ·  climb " + pane.modelData.toFixed(2)
-                                        : surfaceRow.spec.label + "  ·  isotropic"
-                                    edge: surfaceRow.spec.edge
-                                    plateW: surfaceRow.spec.w
-                                    plateH: surfaceRow.spec.h
-                                    plateRadius: surfaceRow.spec.r
-                                    climb: pane.modelData
-                                }
+                    Repeater {
+                        model: surfaceRow.specs
+                        delegate: Rectangle {
+                            id: pane
+                            required property var modelData
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            color: root.ground
+                            radius: Appearance.rounding.small
+                            Surface {
+                                anchors.fill: parent
+                                anchors.margins: Appearance.borderWidth.standard
+                                spec: pane.modelData
                             }
                         }
                     }

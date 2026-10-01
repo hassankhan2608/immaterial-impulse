@@ -4,6 +4,7 @@ import qs.modules.common.widgets
 import qs.services
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import "../../../services/frame_geometry.js" as Geo
@@ -40,6 +41,20 @@ import "../../../services/frame_geometry.js" as Geo
  */
 Scope {
     id: frame
+    // The join records, for a terminal: `qs -c imi ipc call frame joins
+    // <screen>`. Read-only, and the same map the surfaces paint from - the
+    // way to see what a surface published while a motion is on screen, on
+    // the machine it is on screen on (the sandbox is not NVIDIA).
+    IpcHandler {
+        target: "frame"
+        function joins(screen: string): string { return JSON.stringify(GlobalStates.frameJoins[screen] ?? null); }
+        function geometry(): string {
+            return JSON.stringify({ enabled: FrameGeometry.enabled, barEdge: FrameGeometry.barEdge, barCovers: FrameGeometry.barCovers,
+                barIslands: FrameGeometry.barIslands, popupsJoinBar: FrameGeometry.popupsJoinBar, paintsBarPlate: FrameGeometry.paintsBarPlate,
+                barLook: FrameGeometry.barLook, dockLook: FrameGeometry.dockLook, osdLook: FrameGeometry.osdLook, thickness: FrameGeometry.thickness,
+                barThickness: FrameGeometry.barThickness, gap: FrameGeometry.gap, insets: FrameGeometry.insets });
+        }
+    }
 
     // One band. A Rectangle on the surface: the two horizontal bands span the
     // width, the two side bands run between them, so no two overlap - the
@@ -248,12 +263,34 @@ Scope {
                 function joinBandEdgeFor(key, edge) {
                     const b = surface.barRecord;
                     if (key === "barPopup" && b && b.edge === edge) return surface.barInnerEdge;
+                    // A bar with no plate to join (its background off): the
+                    // popups and the OSD join its zone's edge instead of the
+                    // hairline behind its widgets.
+                    const zone = edge === FrameGeometry.barEdge && FrameGeometry.barPlateless
+                        ? Geo.joinBandEdge(edge, FrameGeometry.barThickness, surface.width, surface.height)
+                        : surface.bandEdgeFor(edge);
+                    // The dock's window-preview card joins the dock's PLATE on
+                    // its inner edge, wherever the dock's own lift put it
+                    // (frame-pin-grammar.md, the dock preview row).
+                    // The OSD joins the bar's plate, or the island under its
+                    // centre, else the band (Geo.barInnerEdgeAt, the rule the
+                    // OSD's own window places itself by).
+                    if (key === "osd") {
+                        const o = surface.joins.osd ?? null;
+                        const along = o ? o.plate.x + o.plate.width / 2 : surface.width / 2;
+                        return Geo.barInnerEdgeAt(surface.joins, edge, along, zone);
+                    }
+                    const d = surface.joins.dock ?? null;
+                    if (key === "dockPreview" && d && d.edge === edge)
+                        return edge === "bottom" ? d.plate.y : edge === "top" ? d.plate.y + d.plate.height
+                             : edge === "right" ? d.plate.x : d.plate.x + d.plate.width;
                     // Islands: the popup's band is its section's island (the
                     // popup's record names the section; Bar.qml publishes the
                     // islands' records).
                     const pop = surface.joins.barPopup ?? null;
                     const isl = key === "barPopup" && pop && pop.section ? (surface.joins["barIsland:" + pop.section] ?? null) : null;
                     if (isl) return edge === "bottom" ? isl.plate.y : isl.plate.y + isl.plate.height;
+                    if (key === "barPopup") return zone;
                     const band = surface.bandEdgeFor(edge);
                     if (key === "bar" && b && b.edge === edge)
                         return edge === "bottom" ? Math.max(band, surface.barInnerEdge) : Math.min(band, surface.barInnerEdge);
@@ -271,6 +308,8 @@ Scope {
                 // plate would remake the field every frame.
                 function joinStripDepthFor(key) {
                     if (key === "barPopup") return 720;
+                    if (key === "dockPreview") return 480;
+                    if (key === "osd") return 240;
                     if (String(key).startsWith("notification")) return 480;
                     return 160;
                 }

@@ -214,8 +214,8 @@ Scope { // Scope
                     id: componentsPage
                     CheatsheetComponents {}
                 }
-                // The frame join's silhouette, on every surface that will have
-                // to do it, at true size. Developer-mode only for the same
+                // The frame join's silhouette, on every surface that joins the
+                // frame, at true size. Developer-mode only for the same
                 // reason the gallery is: it builds a live shader per pane and
                 // steps a solver while it is open, which is not a cost a tab
                 // nobody opened should carry.

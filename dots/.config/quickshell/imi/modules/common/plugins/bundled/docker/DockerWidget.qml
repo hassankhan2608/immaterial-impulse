@@ -110,7 +110,16 @@ MouseArea {
         // Loaded while open, and until the overlay has released the card's
         // content after the exit (StyledPopup.held): unloaded at the click
         // that closed it, the content was destroyed under the leaving card.
-        active: root.popupOpen || (popupLoader.item?.held ?? false)
+        // A plain flag, not a binding on the item's own `held`: that binding
+        // re-evaluated while its write was unloading the item - a binding
+        // loop, and a popup destroyed under the overlay's hand.
+        property bool cardHeld: false
+        active: root.popupOpen || popupLoader.cardHeld
+        onLoaded: popupLoader.cardHeld = popupLoader.item?.held ?? false
+        Connections {
+            target: popupLoader.item
+            function onHeldChanged() { popupLoader.cardHeld = popupLoader.item?.held ?? false; }
+        }
         sourceComponent: DockerPopup {
             pinnedOpen: root.popupOpen
             // Needed for popup positioning; root does not track hover.

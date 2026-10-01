@@ -21,6 +21,9 @@ Item {
     // Appearance.rounding.full sentinel already resolved, so OnScreenDisplay.qml
     // can build one blur region without caring which indicator type is loaded.
     readonly property Item backgroundItem: valueIndicator
+    // The frame paints the pill (frame-pin-grammar.md, the OSD row): the
+    // pill's own fill and shadow stand down, its content stays.
+    property bool plateOnFrame: false
     readonly property real backgroundRadius: Math.round(valueIndicator.height / 2)
 
     implicitWidth: Appearance.sizes.osdWidth + 4 * Appearance.sizes.elevationMargin + 80
@@ -33,7 +36,7 @@ Item {
             margins: Appearance.sizes.elevationMargin
         }
         radius: Appearance.rounding.full
-        color: Appearance.colors.colLayer0
+        color: root.plateOnFrame ? "transparent" : Appearance.colors.colLayer0
         implicitWidth: valueRow.implicitWidth
         implicitHeight: valueRow.implicitHeight
 

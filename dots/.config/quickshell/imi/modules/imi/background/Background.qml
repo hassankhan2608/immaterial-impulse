@@ -22,6 +22,7 @@ import Quickshell.Wayland
 import Quickshell.Hyprland
 
 import qs.modules.common.plugins
+import "../../common/functions/edge_shade.js" as EdgeShade
 
 Variants {
     id: root
@@ -368,6 +369,70 @@ Variants {
         // loaded. If the module is missing (stock binary) the Loader errors and
         // weShown stays false, so the static wallpaper still shows.
         property bool weShown: weLoader.status === Loader.Ready && !bgRoot.weFailed
+
+        // The wallpaper's brightness along each screen edge, for the bar's
+        // adaptive edge shadow (edge_shade.js): the wallpaper item - the WE
+        // surface when it is the wallpaper - grabbed at 64x36, its edge rows
+        // and columns averaged. Sampled once the image is ready, again when
+        // the window is resized, and on a slow clock while a WE scene plays
+        // (a scene moves; an image does not). The Canvas is the only way QML
+        // reads pixels, and it will not load a grab's in-memory url
+        // (measured: imageLoaded never came), so the grab goes through a
+        // tiny file in the cache, one per screen, its url stamped so the
+        // Canvas does not hand back the previous one.
+        readonly property string edgeLumaFile: `${Directories.edgeLuma}/${bgRoot.screen?.name ?? "screen"}.png`
+        // The directory is made here as well as at startup (Directories):
+        // a shell that hot-reloaded into this code has not run that startup.
+        property bool edgeLumaDirMade: false
+        function sampleEdgeLuma() {
+            const item = bgRoot.weShown ? weLoader.item : wallpaper;
+            if (!item || !bgRoot.screen || bgRoot.suppressContents) return;
+            if (!bgRoot.weShown && wallpaper.status !== Image.Ready) return;
+            if (!bgRoot.edgeLumaDirMade) {
+                bgRoot.edgeLumaDirMade = true;
+                Quickshell.execDetached(["mkdir", "-p", Directories.edgeLuma]);
+                edgeSampleDelay.restart();
+                return;
+            }
+            const file = bgRoot.edgeLumaFile;
+            item.grabToImage(result => {
+                if (!result.saveToFile(file)) return;
+                edgeSampler.grabUrl = "file://" + file + "?t=" + Date.now();
+                edgeSampler.loadImage(edgeSampler.grabUrl);
+            }, Qt.size(64, 36));
+        }
+        Timer {
+            id: edgeSampleDelay
+            interval: 800
+            onTriggered: bgRoot.sampleEdgeLuma()
+        }
+        Timer {
+            interval: 15000
+            repeat: true
+            running: bgRoot.weShown && !bgRoot.suppressContents
+            onTriggered: bgRoot.sampleEdgeLuma()
+        }
+        onWeShownChanged: edgeSampleDelay.restart()
+        onWidthChanged: edgeSampleDelay.restart()
+        onHeightChanged: edgeSampleDelay.restart()
+        Canvas {
+            id: edgeSampler
+            property url grabUrl
+            width: 64
+            height: 36
+            opacity: 0
+            renderTarget: Canvas.Image
+            renderStrategy: Canvas.Immediate
+            onImageLoaded: {
+                if (!edgeSampler.grabUrl.toString() || !edgeSampler.isImageLoaded(edgeSampler.grabUrl)) return;
+                const ctx = edgeSampler.getContext("2d");
+                ctx.drawImage(edgeSampler.grabUrl, 0, 0, edgeSampler.width, edgeSampler.height);
+                const data = ctx.getImageData(0, 0, edgeSampler.width, edgeSampler.height).data;
+                GlobalStates.publishWallpaperEdgeLuma(bgRoot.screen.name, EdgeShade.edgeLumas(data, edgeSampler.width, edgeSampler.height, 2));
+                edgeSampler.unloadImage(edgeSampler.grabUrl);
+            }
+        }
+        Component.onDestruction: GlobalStates.publishWallpaperEdgeLuma(bgRoot.screen?.name ?? "", null)
 
         // Lock wallpaper peel (WE desktop + a distinct lock image). Rendered here
         // on the background - below the desktop widgets, which must stay visible on
@@ -1126,6 +1191,7 @@ Variants {
                     if (status === Image.Ready && implicitWidth > 0 && implicitHeight > 0) {
                         bgRoot.wallpaperIsPortrait = implicitHeight > implicitWidth
                     }
+                    if (status === Image.Ready) edgeSampleDelay.restart()
                 }
             }
 

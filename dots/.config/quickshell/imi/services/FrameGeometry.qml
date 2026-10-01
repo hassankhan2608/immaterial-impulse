@@ -3,6 +3,7 @@ import QtQuick
 import Quickshell
 
 import qs.modules.common
+import qs.services
 import "frame_geometry.js" as Geo
 
 /**
@@ -40,11 +41,22 @@ Singleton {
     // The Islands style with painted islands: each section its own plate.
     readonly property bool barIslands: (Config.options.bar.cornerStyle ?? 0) === 4
         && (Config.options.bar.showBackground ?? true)
-    // Whether a bar widget's popup joins the bar (frame-pin-grammar.md): where
-    // the frame paints the bar's plate the popup fuses to it; where the bar is
-    // islands the popup fuses to its section's island - the island the drop,
-    // the popup's edge the pond, since the island is the narrower of the two.
-    readonly property bool popupsJoinBar: root.enabled && (root.barCovers || root.barIslands)
+    // Whether the bar publishes a plate to join (its plate record, or its
+    // islands'); a bar with its background off has none.
+    readonly property bool barPlate: root.barCovers || root.barIslands
+    // Whether a bar widget's popup and the OSD join the bar (frame-pin-
+    // grammar.md): where the frame paints the bar's plate the popup fuses to
+    // it; where the bar is islands the popup fuses to its section's island -
+    // the island the drop, the popup's edge the pond, since the island is the
+    // narrower of the two. Plate or Islands, background or not: with the
+    // background off (a transparent bar, review) they used to fall back to
+    // the old surfaces - popping in, vanishing - and the frame's design
+    // language stopped at the bar. Plateless, they join the bar's ZONE edge
+    // (barPlateless: Frame.qml's fallback, the OSD's) as released cards that
+    // emerge from it as drops, with no meniscus - there is nothing to fuse
+    // to. Float still draws its own inset plate and M3 its own popups.
+    readonly property bool popupsJoinBar: root.enabled && [0, 4].includes(Number(Config.options.bar.cornerStyle ?? 0))
+    readonly property bool barPlateless: root.popupsJoinBar && !root.barPlate
     // Whether the FRAME's surface paints the bar's plate (frame-one-surface.md
     // stage 3, frame-pin-grammar.md the bar row): only where the bar is the
     // frame's edge - a covering plate - because there the plate is a
@@ -67,11 +79,30 @@ Singleton {
     // "floating" force one look. The pin and the occupancy are the bar's
     // facts, handed in.
     readonly property string barLook: String(Config.options.appearance.frame.bar ?? "auto")
+    // Whether the bar has a window to hug for, per monitor (Geo.barOccupied):
+    // a tiled window on the active workspace, or a floating one within the
+    // bar's strip - its zone and the gap. A floating window elsewhere on the
+    // screen does not turn the bar (review: "a floating window should not
+    // toggle the attached state unless it came within their spaces").
+    // The strip: the bar's zone, the lift it floats by, and the gap under it
+    // - a window whose edge touches the floating plate's gap is in its space.
+    readonly property real barStripDepth: root.barThickness + root.gap * 2
+    readonly property var barOccupiedByMonitorName: {
+        const out = ({});
+        for (const mon of HyprlandData.monitors)
+            out[mon.name] = Geo.edgeOccupied(HyprlandData.windowList, mon, root.barEdge, root.barStripDepth);
+        return out;
+    }
     function barAttachedFor(pinned: bool, occupied: bool): bool {
         if (root.barLook === "floating") return false;
         if (root.barLook === "attached") return true;
         return !pinned && occupied;
     }
+    // How the OSD meets the bar's plate (frame-pin-grammar.md, the OSD row):
+    // "detached" (default) emerges from the plate and lifts off once grown;
+    // "attached" stays fused. Anything else detaches.
+    readonly property string osdLook: String(Config.options.appearance.frame.osd ?? "detached")
+    readonly property bool osdAttached: root.osdLook === "attached"
     readonly property real thickness: Geo.bandThickness(Config.options.appearance.frame.thickness)
     // How the dock meets the band on its edge, given its pin
     // (frame-pin-grammar.md: pinned means released, unpinned means fused).

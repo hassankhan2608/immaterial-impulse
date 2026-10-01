@@ -10,6 +10,7 @@ import qs.modules.common.plugins
 import qs.modules.common.widgets
 import qs.modules.common.functions
 import "bar_widget_source.js" as BarWidgetSource
+import "../../common/functions/edge_shade.js" as EdgeShade
 
 Item {
     id: root
@@ -180,10 +181,23 @@ Item {
         visible: Config.options.bar.edgeShadow && !Config.options.bar.showBackground
             && Config.options.bar.borderless === "transparent"
             && (Config.options.bar.cornerStyle === 0 || Config.options.bar.cornerStyle === 1 || Config.options.bar.cornerStyle === 4)
+        // Adaptive (edge_shade.js): the shade's side follows the text -
+        // light text wants a dark shade, dark text a light one - and its
+        // strength how little the wallpaper's strip under this bar already
+        // contrasts with the text (Background.qml samples it per screen).
+        // Nothing over a strip that contrasts on its own; the full shade
+        // where it does not; the fixed shade until the first sample.
+        readonly property string shadeEdge: Config.options.bar.bottom ? "bottom" : "top"
+        readonly property var shadeSpec: EdgeShade.edgeShade(
+            GlobalStates.wallpaperEdgeLuma[root.screen?.name ?? ""]?.[shadeEdge],
+            Appearance.colors.colOnLayer0.hslLightness > 0.5, 0.55)
+        readonly property color shadeBase: shadeSpec.dark ? Appearance.m3colors.m3shadow : "#ffffff"
+        property color shade: Qt.rgba(shadeBase.r, shadeBase.g, shadeBase.b, shadeSpec.alpha)
+        Behavior on shade { animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this) }
         gradient: Gradient {
             orientation: Gradient.Vertical
-            GradientStop { position: 0; color: Config.options.bar.bottom ? "transparent" : Appearance.colors.colBarEdgeShade }
-            GradientStop { position: 1; color: Config.options.bar.bottom ? Appearance.colors.colBarEdgeShade : "transparent" }
+            GradientStop { position: 0; color: Config.options.bar.bottom ? "transparent" : edgeShadow.shade }
+            GradientStop { position: 1; color: Config.options.bar.bottom ? edgeShadow.shade : "transparent" }
         }
     }
 

@@ -11,6 +11,64 @@ own repo; the installer pins which revision it builds.
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-09-23
+
+### Fixed
+- Frame mode: a bar with its background off (Settings > Bar > Show background) left the bar's
+  popups and the on-screen display out of the frame's motion - they popped in fully formed, and
+  the OSD's frost and plate vanished in the first frame of its exit while its text lingered. They
+  now join the bar's edge as their own cards, background or not: emerging from it, lifting off
+  once grown, landing and sinking back into it. Frame widget popups that open as their own card
+  emerge the same way instead of unrolling from a parked square. On a bar with no plate the
+  gap is part of the growth itself - the card grows out of the bar's edge and settles its gap
+  in one motion, and sinks back the same way - instead of creeping away after it has grown and
+  creeping back before it collapses.
+- `qs -c imi ipc call frame geometry` and `frame joins <screen>` report the frame's geometry and
+  a screen's live join records, for diagnosing a surface that will not join.
+
+## [1.4.0] — 2026-09-23
+
+### Added
+- Frame mode: the dock's window previews follow the pin grammar. The card is always a floating
+  card, but it emerges from the dock's pill - growing out of it, its thumbnails revealed as it
+  grows, detaching as it widens past the pill - slides along the dock as the pointer moves between
+  icons, and lands on the pill and sinks into it when the pointer leaves. Outside frame mode
+  it fades as before.
+
+- Frame mode: the on-screen display (volume, brightness, caps lock and the rest) grows out of
+  the bar's plate, lifts off it as its own card, and lands and sinks back into it when it
+  times out, instead of appearing and vanishing under the bar. Settings > Appearance > Frame
+  gains an On-screen display row: Detached (that, the default) or Attached (it stays on the
+  plate).
+
+### Changed
+- Developer mode: the cheatsheet's Frame join tab (and `qs -p bench_frame_join.qml`) shows
+  every surface that joins the frame at true size - the bar's plate and an island, the OSD,
+  a bar widget popup, the dock's window preview, a notification and the dock - with their own
+  corner radii and the released border, in one column; the anisotropic comparison is gone.
+
+- The bar's edge shadow (Settings > Bar, with the background off) adapts to the wallpaper
+  under it: it is dark behind light text and light behind dark text, and only as strong as
+  the strip under the bar needs - nothing where the wallpaper already contrasts, the full
+  shade over a bright sky. Wallpaper Engine scenes are re-read every 15 s.
+
+### Fixed
+- Frame mode: a floating window no longer turns the bar from Float to Hug unless it comes
+  within the bar's space (its zone, its lift and the gap along its edge, touching counts);
+  tiled windows still do. An unpinned dock no longer hides for a focused floating window
+  that is nowhere near it; it hides for one in its way, a special workspace's window over
+  it included.
+- Moving between bar widgets no longer shows the previous popup's content over the next one:
+  the leaving content fades out underneath, without the first-frame jump it had when the
+  next popup's padding differed, and the arriving content fades in after it.
+- A bar popup, the dock's window preview and the OSD fade their content out as they start to
+  sink back into the frame, instead of cropping it as they shrink.
+- Closing a Docker or Discord bar popup could crash the shell at the end of its exit; it no
+  longer does.
+- The dock's window preview no longer closes and reopens on the way from one icon to the next.
+- Frame mode: a bar widget's popup opened by hover no longer grows out of the band empty
+  and fills in afterwards; its content is revealed by the plate as it grows.
+
 ## [1.3.1] — 2026-09-21
 
 ### Fixed
@@ -4039,7 +4097,8 @@ illogical-impulse), collecting the work done to date:
   (`Super`+`/`).
 - This changelog and versioning.
 
-[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/XephyLon/immaterial-impulse/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/XephyLon/immaterial-impulse/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/XephyLon/immaterial-impulse/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/XephyLon/immaterial-impulse/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/XephyLon/immaterial-impulse/compare/v1.1.0...v1.2.0

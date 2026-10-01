@@ -54,7 +54,7 @@ ShellRoot {
         }
 
         //   qs -p <this file> ipc call bench detach
-        //   qs -p <this file> ipc call bench set climb 0.8
+        //   qs -p <this file> ipc call bench set meniscus 60
         // A bench whose only control is a cycling timer can be watched but not
         // measured: every capture lands on a different frame of the motion.
         IpcHandler {
@@ -65,13 +65,11 @@ ShellRoot {
             function set(key: string, value: real): void {
                 if (key === "travel") page.travel = value;
                 else if (key === "meniscus") page.meniscus = value;
-                else if (key === "climb") page.climbFraction = value;
                 else if (key === "slant") page.slant = value;
             }
             function state(): string {
                 return "attached=" + page.attached + " travel=" + page.travel
-                     + " meniscus=" + page.meniscus + " climb=" + page.climbFraction
-                     + " slant=" + page.slant;
+                     + " meniscus=" + page.meniscus + " slant=" + page.slant;
             }
         }
     }

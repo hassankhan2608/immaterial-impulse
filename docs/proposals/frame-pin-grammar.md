@@ -32,6 +32,8 @@ Settings > Appearance > Frame gets one row per surface to override the default.
 | bar widget popup | click (`StyledPopup.pinnedOpen`, tray menus, Docker/Discord plugins) | released, as today | already pinned | close: swallow into the band, submerge |
 | notification | arrives (`Notifications.popupList`), emerging from its band | fused to the band on its edge (`*_right`, `*_left`; the centre positions stay released) | a **Pin** button, or a drag away from the band past a threshold: releases it and cancels its timeout - it persists. Unpin (the button, or a drag back that ends nearer the band than the pinned rest) fuses it back and restarts its clock | close (the x) or timeout: a released card lands first, then slides into the band. A drag toward the band is never stopped: the join forms with the approach, past the edge the card goes under, and let go there it slides the rest of the way in and closes. Away from the band the pull is elastic to a limit and springs back short of the threshold |
 | dock | reveal at the edge (unpinned) | fused: reveals out of the band and hides back into it | the dock's pin: released, reserves its edge (`DockReservation`) | unpin: lands, fuses; then hides into the band when the pointer leaves |
+| OSD (volume, brightness, locks) | a value changing (`OnScreenDisplay.triggerOsd`) | **Detached** (default, `appearance.frame.osd`): grows out of the bar's plate (the island under its centre, else the band) and lifts off once grown, its own card a gap off the plate; **Attached**: stays fused; the indicator swap keeps its crossfade. A bar with no plate (background off): released, from the bar's zone edge, no meniscus | none (transient); the setting is the choice | timeout, or the pointer entering it: a detached pill lands first, then sinks into the plate; an attached one sinks |
+| dock window preview | hovering a dock icon (`DragApps.previewPopup`) | released - always floating - but it **emerges from the pill**: a join on the dock's plate (`dockPreview`), growing out of the pill from a parked square; a card that fits the pill's flat grows fused and lifts off once grown, one that will outgrow it lifts from the first frame, so the drop emerges and detaches in one motion; slides along the dock between icons | none (never pinned) | pointer leaving: lands on the pill, then sinks into it |
 | bar | always on | Plate style: **Hug** (fused to the hairline band on its edge) while a window is on the monitor's active workspace - the frame is the border around the windows - and **Float** (lifted by the compositor's gap from the band's inner edge, inset from the side bands by the same, corners rounding with the lift) over an empty workspace (`FrameGeometry.barAttachedFor`; the Bar state row / `appearance.frame.bar` "auto"/"attached"/"floating"). Islands follow the same state, each on its own; M3 only floats | `bar togglePin` over IPC (`GlobalStates.barPinned`): pinned is released whatever the workspace holds; unpin returns to the workspace rule | released, the bar reserves its lift as well (the dock's flip rule: once per state change, on the compositor's own animation), so windows make room and the island has its gap on every side; bar popups fuse to the plate's inner edge wherever the lift put it; auto-hide in frame mode is still a split (out of scope, frame-one-surface.md §7) |
 
 Two things the table changes on purpose:
@@ -347,3 +349,142 @@ translucent against the band, it is the band.
   in with the lift where a Rectangle's border would have popped at 1. Notifications carry
   none - their card never had one. In the translucent layer the stroke's colour is made
   solid like the fill's and takes the frame's alpha once, with the rest of the paint.
+- **The entrance's empty plate** (burst at 12 ms frames, sandbox): a fused card opened fresh
+  grew out of the band for its first 200 ms with nothing in it, and its content faded into a
+  card that had already arrived. The content's pause-then-fade is the takeover's - sized to the
+  outgoing content's fade - and a free card hid the lag behind its own opacity ramp; a fused
+  plate is painted by the frame at full strength from its first row and cannot fade (that
+  would be the seam). A fresh fused open now puts the content in at full strength and lets
+  the growing plate reveal it - the host clips and the slot is pinned to the band-side edge,
+  so this is the unroll - while the sections below the fold still park and cascade once the
+  card has arrived. Takeovers and released opens keep the pause and the fade.
+- **The dock's window preview** (2026-09-23): the card is a join on the dock's plate under
+  `dockPreview` - the frame paints it against the dock record's inner edge, 480 deep. The popup
+  hangs off the pill's inner edge rather than the dock window's edge (a zero-thickness anchor
+  rect in the dock window's coordinates), so its dock-side edge is the band the card joins and
+  `bandInset` is 0. Three phases: `openProgress` grows the card out of the pill fused (width from
+  a parked square, height from nothing, the content pinned to the pill's side and revealed by the
+  growth); a card that fits the pill's flat is released when the growth's own animation
+  finishes, one whose SETTLED width outgrows the flat is released from the first frame - fused
+  under a narrower pill its shoulders stood past the pill's sides (seen live), and releasing on
+  the current width still left three frames of that, the spring being slower off the mark than
+  the growth, and such a card publishes no neck and no bulge at all - released from its first
+  frame, the join's neck still starts whole and decays over the spring's first frames, which drew
+  fillets under a card that was never fused (seen live); the pointer leaving lands a fitting card first and sinks it when landed (the bar
+  popup's landing test), and shrinks an outgrowing one first, re-attaching it as a drop once it
+  fits. No fade in frame mode - the frame's plate cannot fade. Two things measured
+  in the sandbox (top edge; the nested output's screen height is wrong in Quickshell there, so a
+  bottom dock's screen y is stale - sandbox only): a Behavior on the mouse area's `x` glided the
+  card 200 px sideways after it had grown, because the width grows with the content and `x` is
+  centred on it - the CENTRE slides now, not the coordinate; and at the growth's peak the plate
+  is one vblank behind the content (60 px at 60 Hz, the cross-window skew from
+  frame-one-surface.md stage 2), a quarter of that at 240 Hz. Cursor moves in the nested
+  compositor do not hover the dock's buttons; the drive is signal-level (a probe sets
+  `lastHoveredButton`/`buttonHovered`).
+- **The preview closing on the way between icons** (footage, 2026-09-23): the card collapsed
+  to its drop and re-emerged with the next app instead of sliding. Two causes in the strip's
+  hover. The pinned buttons' leave turned the strip's hover off unguarded, so the next button's
+  enter landing before the previous one's leave switched the hover off under a pointer that was
+  on a button (the running apps' buttons guard theirs on being the hovered button; the pinned
+  ones now do too). And the hide debounce was as quick as the show's (100 ms), so the hover
+  dropping for a moment between two buttons closed the card; the hide waits 250 ms now. A
+  window appearing or leaving under a live preview does not close it (measured: TaskbarApps
+  re-mints its entries and the card grows to the new thumbnail).
+- **The OSD** (2026-09-23): transient, so fused. In frame mode the window spans the screen's
+  width and sits at the plate's inner edge (`barInner`, taken up from the join records through
+  `Geo.barInnerEdgeAt` - the bar's plate, the island under the OSD's centre, else the band; the
+  frame's painter places the `osd` field by the same function), so the pill's screen x is its
+  window x and `bandInset` is 0. One scalar grows the pill out of the plate - width from a
+  parked square, height from nothing, the wrapper clipping and the pill pinned to the plate's
+  side, the message row below coming with the height - and the same run back sinks it; the
+  window lives on through the sink (`leaving`) and goes when the run is over. The pill's own
+  fill and shadow stand down while the frame paints it, its blur region with them; the frame
+  paints the pill in the band's colour, as every fused thing is. The M3 bar style publishes no
+  plate to grow out of, so the OSD keeps its place under the bar there (`popupsJoinBar`).
+  Attached or Detached is a setting (Settings > Appearance > Frame > On-screen display,
+  `appearance.frame.osd`, Detached by default): detached runs the dock preview's phases - fused
+  while it grows, lifting off once grown (or from the first frame, without a meniscus, when the
+  pill outgrows the plate's flat between the corner radii, read off the record the OSD centres
+  on), landing first and sinking when landed on the timeout; the released pill takes its own
+  colour and the 1 px stroke with the lift. The window's lifetime is a flag set in order
+  (`windowUp`), never a binding on the trigger: bound, the Loader re-evaluated on the very
+  signal that was to set `leaving` inside the window and destroyed it first - the pill vanished
+  in one frame instead of sinking (burst).
+- **A bar with no plate** (footage, 2026-09-23 15:53): the reviewer's bar has its background off,
+  and `popupsJoinBar` read "the frame paints the bar's plate or its islands" - false there, so
+  the OSD and the bar's popups took the old surfaces: the OSD popped in fully formed, and on its
+  exit the plate and the frost went in one frame while the indicator lingered. The join is the
+  bar's, not the plate's: Plate or Islands, background or not, the popups and the OSD join the
+  bar's ZONE edge (`barThickness` from the screen edge, where the plate's inner edge would be)
+  as released cards, `barPlateless` in the authority; Frame.qml's and the OSD's fallbacks name
+  that edge instead of the 2 px hairline, and the records carry no neck, there being nothing to
+  fuse to. And a released card in frame mode now EMERGES like the dock preview and the OSD
+  (`emerging`: attached while the growth runs, released when it arrives at 0.97) instead of
+  unrolling from its parked square - the same phases in every surface, whichever way it ends
+  up. `qs -c imi ipc call frame geometry` and `frame joins <screen>` are the diagnosis that
+  found it. Float keeps its own inset plate and stays out; M3 its own popups.
+- **The plateless drift** (footage, 2026-09-23 16:18, 60 fps): with the join's own spring
+  carrying the lift, the plateless OSD grew in 8 frames, then crept 10 px away over 24, and on
+  the timeout crept back over 15 before it collapsed in 6 - two motions in sequence each way,
+  read as a directional drift ("looks strange"). The spring's pace is the cleavage's: a stiff,
+  well-damped settle after the neck's cut, where the cut is the event and the travel an
+  aftermath. With no neck there is no event, so the travel stood alone. On a plateless bar the
+  card is released from its first frame and the lift RIDES the growth (`liftRide`: the OSD's
+  `grow`, the overlay's clamped `openProgress`) - the pill grows out of the bar's edge and
+  settles its gap on the one scalar, and sinks back the same way; no emergence phase, no
+  landing, the join never fused. The record's gap and stroke ride with it so the frame paints
+  where the card is. And a plateless card `unrolls` like a fused one: from nothing, its content
+  revealed by the growth, back to nothing - grown from the parked square it left a dot on the
+  bar edge for the exit timer's length after it had gone, and an empty card for the content
+  fade's first 200 ms.
+- **The pause before the lift** (footage, 2026-09-23, 30 fps frames): the OSD grew in about
+  170 ms, sat fully grown for 280 ms, then lifted. The release waited for the growth's
+  animation to END, and the spatial tier's curve has the pill at full size a third of the way in
+  and spends the rest settling. The OSD and the dock preview now release when the growth
+  ARRIVES - `openProgress` first crossing 0.97 - with the animation's end kept as the fallback;
+  the lift starts while the growth settles its last pixels, one motion.
+- **A floating window does not turn the bar** (review, 2026-09-23): Auto hugged for any window
+  on the active workspace, floating ones included, so a calculator in the middle of the screen
+  turned the frame's border on. The bar hugs for a tiled window, or a floating one within its
+  strip - its zone, the lift it floats by and the gap under it, touching counts, since a
+  Settings window whose top sat two pixels under the floating plate read as overlapping and
+  did not turn it (screenshot) - `Geo.edgeOccupied`, mapped per monitor by
+  `FrameGeometry.barOccupiedByMonitorName`; the strip is measured in logical pixels under the
+  monitor's scale and transform. The dock's Auto follows its pin, but an UNPINNED dock hid for
+  any focused window; it hides for a focused window only when that window is in its way, by
+  the same rule on its own edge (a tiled one, or a floating one within the dock's strip).
+  A shown special workspace's windows count by their rect too - they never fill the screen,
+  and one over the dock left it up (screenshot); hidden, they do not count at all. Floating
+  windows move without a Hyprland event, so while one is on an active workspace, or a special
+  workspace is shown, the clients are re-read once a second (HyprlandData.floatingOnActive);
+  none up, the clock is off.
+- **Both contents at once on a takeover** (footage, 2026-09-23, 60 fps frames): moving from the
+  weather widget to the calendar, the weather drew at full strength over the arriving calendar
+  for four frames, both texts legible. Two causes: the leaving tree was reparented into the host
+  after the arriving one and so stacked above it; and the arriving fade started 100 ms in (the
+  spatial tier less the enter tier), while the leaving fade had 200 ms to run. Now the leaving
+  tree goes under (`z: -1`, reset on release) and the arriving fade waits the leaving fade's
+  whole length, so the two are never both legible; the card's move keeps its own tier under
+  both. And the leaving tree has its own host (`leaveHost`, declared under the arriving tree's,
+  inset by the LEAVING popup's padding): in the arriving tree's host the margins had already
+  become the arriving popup's padding, so the leaving content jumped by the difference on the
+  first frame - 16 px from the weather's padding to the calendar's (footage, 60 fps frames).
+- **The sink cropped its content** (footage, 2026-09-23): a bar popup leaving collapsed the card
+  with its content still up, and the clip ate the elements as the card shrank. Three cuts: the
+  content faded whole and the card sank after - the elements stayed whole, and the close
+  stalled by the fade (review); the content scaled down with the card - no cut, no stall, and
+  the text squashed (review: "somehow worse"); now the content vanishes IN PLACE as the card
+  starts to collapse, on the fast tier with the decelerating curve, so it is mostly gone within
+  the collapse's first frames and the clip has little left to cut - one motion, nothing held,
+  nothing scaled; a re-hover of the leaving widget hands the content back whole. The dock's
+  window preview and the OSD sink the same way. The entrance keeps its reveal: a growing plate
+  uncovering content is the unroll, a shrinking one cutting it is a crop.
+- **A segfault at the end of an exit** (crash report, 2026-09-23 11:25, the Discord popup): the
+  overlay's `release()` calls the popup's `aboutToRelease()` before it reparents the content
+  (a tray menu once segfaulted the other way round), and the click-only plugins unload their
+  popup the moment `held` drops - so the popup and its content were destroyed inside
+  `release()`, which then wrote to them. The log's last lines were the plugin Loader's binding
+  loop (its `active` read the item's own `held` and re-evaluated while its write was unloading
+  the item) and the popup layer closing. The hold is let go from the event loop now
+  (`Qt.callLater`), after `release()` has finished with the popup, and the plugin Loaders keep a
+  plain `cardHeld` flag fed by a Connections on the item rather than a binding on it.

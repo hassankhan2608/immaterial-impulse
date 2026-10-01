@@ -38,6 +38,17 @@ Item {
     // Shared DockContextMenu instance (provided by the dock window)
     property var contextMenu: null
     property bool requestDockShow: previewPopup.show
+    // The window-preview card's join to the dock (frame-pin-grammar.md, the
+    // dock preview row). The dock window hands in the pill's rect in its own
+    // coordinates, its place on the screen, and whether the frame paints the
+    // pill; the card is always a released card, but it EMERGES from the
+    // pill - fused, growing out of it - and lifts off once grown, then lands
+    // and sinks back into it when it closes. Outside frame mode the card
+    // fades as it always did.
+    property rect plateRect: Qt.rect(0, 0, 0, 0)
+    property point surfaceOrigin: Qt.point(0, 0)
+    property bool frameJoined: false
+    readonly property bool previewJoinsFrame: root.frameJoined && FrameGeometry.enabled
     signal orderChanged(var newOrder)
     property var  _workOrder: pinnedApps.slice()
     property int  activeDragVisualIndex: -1
@@ -194,11 +205,17 @@ Item {
                 insetOutward: Appearance.sizes.hyprlandGapsOut + Appearance.spacing.space100
 
                 hoverEnabled: true
+                // The exit is guarded on being the button the strip still
+                // counts as hovered: the next button's enter can land before
+                // this one's leave, and an unguarded leave then turned the
+                // strip's hover off under a pointer that was on a button -
+                // the preview closed and had to re-emerge (footage). The
+                // running apps' buttons (DockAppButton) guard theirs the same.
                 onHoveredChanged: {
                     if (hovered) {
                         root.lastHoveredButton = dockBtn
                         root.buttonHovered = true
-                    } else {
+                    } else if (root.lastHoveredButton === dockBtn) {
                         root.buttonHovered = false
                     }
                 }
@@ -470,6 +487,123 @@ Item {
         // edge, a y at a vertical one.
         property real cachedCenter: 0
 
+        // ---- the join (frame mode) ------------------------------------
+        //
+        // One scalar grows the card out of the pill: 0 nothing, 1 the whole
+        // card, on the spatial tier. A card that FITS the pill's flat is
+        // fused while it grows and lifts off once grown. A card that will
+        // outgrow the pill - wider, settled, than the flat between the pill's
+        // corners - lifts from the first frame, so the drop emerges and
+        // detaches in one motion and is only ever wide once it is off: fused
+        // under a narrower pill its shoulders stood past the pill's sides
+        // (seen live, KCalc's preview under a two-icon pill), and releasing
+        // on the CURRENT width still left three frames of that, the spring
+        // being slower off the mark than the growth. The close is the
+        // mirror: a card that outgrows the pill shrinks first and
+        // re-attaches when it fits again, landing as a drop; one that fits
+        // lands first (`landing`) and sinks when landed - the grammar's
+        // close: swallow, then sink.
+        property real openProgress: 0
+        property bool openDone: false
+        property bool landing: false
+        // The pill's flat along the dock, between its corner radii.
+        readonly property real pillFlat: (root.vertical ? root.plateRect.height : root.plateRect.width) - 2 * Appearance.rounding.large
+        readonly property bool willOutgrow: (root.vertical ? popupBackground.implicitHeight : popupBackground.implicitWidth) > previewPopup.pillFlat
+        readonly property bool outgrows: (root.vertical ? popupBackground.height : popupBackground.width) > previewPopup.pillFlat
+        readonly property bool fusedNow: previewPopup.show ? !(previewPopup.willOutgrow || previewPopup.openDone) : !previewPopup.outgrows
+        readonly property NumberAnimation openAnim: Appearance.animation.elementMove.numberAnimation.createObject(previewPopup)
+        Behavior on openProgress {
+            enabled: root.previewJoinsFrame
+            animation: previewPopup.openAnim
+        }
+        onShowChanged: {
+            if (!root.previewJoinsFrame) return;
+            if (previewPopup.show) previewPopup.emerge();
+            else previewPopup.leave();
+        }
+        function emerge() {
+            previewPopup.landing = false;
+            sinkFade.stop();
+            previewRowLayout.opacity = 1;
+            // Already up (a re-hover that reversed a landing): lift again.
+            previewPopup.openDone = previewPopup.openProgress >= 0.999 && popupBackground.height > 0;
+            previewPopup.openProgress = 1;
+        }
+        // Released when the growth ARRIVES, not when its animation ends (the
+        // OSD says why: a 280 ms pause between the growth and the lift
+        // otherwise). The end stays as the fallback.
+        onOpenProgressChanged: {
+            if (previewPopup.show && !previewPopup.openDone && previewPopup.openProgress >= 0.97) previewPopup.openDone = true;
+        }
+        Connections {
+            target: previewPopup.openAnim
+            function onRunningChanged() {
+                if (!previewPopup.openAnim.running && previewPopup.show && previewPopup.openProgress >= 0.999)
+                    previewPopup.openDone = true;
+            }
+        }
+        function leave() {
+            previewPopup.openDone = false;
+            if (previewPopup.willOutgrow || previewJoin.lift <= 0.5) {
+                previewPopup.submerge();
+                return;
+            }
+            previewPopup.landing = true;
+        }
+        // The sink: the thumbnails vanish in place as the card starts to
+        // collapse - the fast tier, decelerating (the bar popup's lesson: a
+        // clip cut them, a fade held first stalled the close, a scale
+        // squashed them).
+        function submerge() {
+            previewPopup.landing = false;
+            if (!sinkFade.running) sinkFade.restart();
+            previewPopup.openProgress = 0;
+        }
+        NumberAnimation {
+            id: sinkFade
+            target: previewRowLayout
+            property: "opacity"
+            to: 0
+            duration: Appearance.animation.elementMoveFast.duration
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: Appearance.animationCurves.emphasizedDecel
+        }
+        // Landed when the gap is closed and the neck whole, not when the
+        // spring has stopped ringing (BarPopupOverlay says why).
+        Connections {
+            target: previewJoin
+            function onStateChanged() {
+                if (previewPopup.landing && previewJoin.lift < 0.75 && previewJoin.state.neck > 0.9) previewPopup.submerge();
+            }
+            function onMovingChanged() {
+                if (!previewJoin.moving && previewPopup.landing) previewPopup.submerge();
+            }
+        }
+        // The pill's inner edge, as the rect this popup hangs off in frame
+        // mode: a zero-thickness line in the dock window's coordinates, so
+        // the popup's dock-side edge IS the band the card joins (bandInset 0)
+        // and a fused card at lift 0 sits on the pill. Outside frame mode the
+        // popup hangs off the window's own edge as it always did.
+        readonly property rect innerEdgeRect: {
+            const w = root.QsWindow.window?.width ?? 0, h = root.QsWindow.window?.height ?? 0;
+            if (!root.previewJoinsFrame) return Qt.rect(0, 0, w, h);
+            const r = root.plateRect;
+            if (root.dockEdge === "bottom") return Qt.rect(0, r.y, w, 0);
+            if (root.dockEdge === "top") return Qt.rect(0, r.y + r.height, w, 0);
+            if (root.dockEdge === "left") return Qt.rect(r.x + r.width, 0, 0, h);
+            return Qt.rect(r.x, 0, 0, h);
+        }
+        // Where this popup sits on the screen: the dock window's origin, and
+        // across the dock the pill's inner edge - what the record adds to the
+        // card's own coordinates.
+        readonly property point screenOrigin: {
+            const o = root.surfaceOrigin, r = root.plateRect;
+            if (root.dockEdge === "bottom") return Qt.point(o.x, o.y + r.y - previewPopup.height);
+            if (root.dockEdge === "top") return Qt.point(o.x, o.y + r.y + r.height);
+            if (root.dockEdge === "left") return Qt.point(o.x + r.x + r.width, o.y);
+            return Qt.point(o.x + r.x - previewPopup.width, o.y);
+        }
+
         Connections {
             target: root
             function onLastHoveredButtonChanged() {
@@ -487,9 +621,14 @@ Item {
             updateTimer.restart()
         }
 
+        // Debounced both ways, and the hide waits longer than the show: the
+        // strip's hover drops for a moment between two buttons, and a hide
+        // as quick as the show closed the card on the way from one icon to
+        // the next and made it re-emerge (footage). A card lingering a
+        // quarter second after the pointer has left reads as nothing.
         Timer {
             id: updateTimer
-            interval: 100
+            interval: previewPopup.shouldShow ? 100 : 250
             onTriggered: {
                 previewPopup.show = previewPopup.shouldShow
             }
@@ -520,15 +659,16 @@ Item {
             // left-top, so those two were correct by accident; a left dock
             // wants (width, 0) and a top dock (0, height), and both opened
             // ON TOP of the dock instead of beside it.
-            rect: Qt.rect(0, 0,
-                root.QsWindow.window?.width ?? 0,
-                root.QsWindow.window?.height ?? 0)
+            rect: previewPopup.innerEdgeRect
             adjustment: PopupAdjustment.None
             gravity: previewPopup.edgeFlags(previewPopup.anchorSides.gravity)
             edges: previewPopup.edgeFlags(previewPopup.anchorSides.edges)
         }
 
-        visible: popupBackground.opacity > 0
+        // In frame mode the card has no fade: it is on screen while it has
+        // any height, and from the moment it is asked for (the window has to
+        // be mapped before the card can grow in it).
+        visible: root.previewJoinsFrame ? (previewPopup.show || popupBackground.height > 0.5) : popupBackground.opacity > 0
         color: "transparent"
         // The popup spans the dock's own long axis so the card can be placed
         // anywhere along it, and is content-sized across.
@@ -562,12 +702,76 @@ Item {
             // as Dock.qml's own strip, one surface up.
             readonly property real acrossX: dockSide === "right" ? parent.width - width : 0
             readonly property real acrossY: dockSide === "bottom" ? parent.height - height : 0
-            x: root.vertical ? acrossX : previewPopup.cachedCenter - width / 2
-            y: root.vertical ? previewPopup.cachedCenter - height / 2 : acrossY
+            // A floating card slides to the next icon rather than jumping -
+            // only while it is up, so an entrance starts at its own icon -
+            // and it is the CENTRE that slides, not the coordinate: the
+            // width grows with the content too, and a Behavior on `x` made
+            // the card glide 200 px sideways after it had grown (traced).
+            readonly property bool slides: root.previewJoinsFrame && previewPopup.show && popupBackground.height > 0.5
+            property real slideCenter: previewPopup.cachedCenter
+            Behavior on slideCenter { enabled: popupMouseArea.slides; animation: Appearance.animation.elementMove.numberAnimation.createObject(this) }
+            x: root.vertical ? acrossX : slideCenter - width / 2
+            y: root.vertical ? slideCenter - height / 2 : acrossY
+
+            // The join: the card on the pill's inner edge, which is this
+            // item's dock-side edge (innerEdgeRect). Physics only - the frame
+            // paints the field from the record below.
+            FrameJoin {
+                id: previewJoin
+                anchors.fill: parent
+                plate: popupBackground
+                edge: root.dockEdge
+                attached: previewPopup.fusedNow
+                travel: Appearance.sizes.elevationMargin
+                bandInset: 0
+                color: FrameGeometry.color
+                active: root.previewJoinsFrame && previewPopup.visible
+                paintsLocally: false
+                paintsAtRest: true
+            }
+            // The plate's colour: the band's while fused, the card's while
+            // released, on the card's colour tier.
+            property color platePaint: previewJoin.fused ? FrameGeometry.color : Appearance.m3colors.m3surfaceContainer
+            Behavior on platePaint { animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this) }
+            readonly property var frameJoinRecord: {
+                if (!previewJoin.active || !previewJoin.painting) return null;
+                // Nothing to paint for a card with no height, and the neck
+                // grows and shrinks with the card (BarPopupOverlay says why).
+                if (popupBackground.height <= 3) return null;
+                const o = previewPopup.screenOrigin;
+                const grown = Math.pow(Math.min(1, popupBackground.height / Math.max(1, previewJoin.meniscus)), 2);
+                // No meniscus for a card that outgrows the pill: released from
+                // its first frame, the join's neck still starts whole and
+                // decays over the spring's first frames, and those frames
+                // drew fillets under a card that was never fused (seen live).
+                // Same rule as the bar popup's card wider than its island.
+                const necked = previewPopup.willOutgrow ? 0 : grown;
+                return {
+                    edge: root.dockEdge,
+                    plate: { x: o.x + popupMouseArea.x + popupBackground.x, y: o.y + popupMouseArea.y + popupBackground.y,
+                             width: popupBackground.width, height: popupBackground.height },
+                    radii: { topLeft: popupBackground.radius, topRight: popupBackground.radius,
+                             bottomRight: popupBackground.radius, bottomLeft: popupBackground.radius },
+                    gap: previewJoin.state.gap, neck: previewJoin.state.neck * necked, bulge: previewJoin.state.bulge * necked,
+                    meniscus: previewJoin.meniscus, blendPerPixel: previewJoin.blendPerPixel,
+                    climbFraction: previewJoin.climbFraction, color: popupMouseArea.platePaint,
+                    // The released card's border, fading in with the lift.
+                    strokeWidth: Appearance.borderWidth.standard * Math.min(1, previewJoin.lift / Math.max(1, previewJoin.travel)),
+                    strokeColor: Appearance.colors.colLayer0Border
+                };
+            }
+            function publishFrameJoin(record) {
+                const name = root.QsWindow?.window?.screen?.name ?? "";
+                if (!name) return;
+                GlobalStates.publishFrameJoin(name, "dockPreview", record);
+            }
+            onFrameJoinRecordChanged: publishFrameJoin(frameJoinRecord)
+            Component.onCompleted: publishFrameJoin(frameJoinRecord)
+            Component.onDestruction: publishFrameJoin(null)
 
             StyledRectangularShadow {
                 target: popupBackground
-                opacity: previewPopup.show ? 1 : 0
+                opacity: previewPopup.show && !popupBackground.plateOnFrame ? 1 : 0
                 visible: opacity > 0
                 Behavior on opacity {
                     animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
@@ -577,29 +781,42 @@ Item {
             Rectangle {
                 id: popupBackground
                 property real padding: Appearance.spacing.space100
-                opacity: previewPopup.show ? 1 : 0
+                // Frame mode: no fade - the frame paints the plate at full
+                // strength from its first row and a fused plate cannot fade
+                // (the seam); the card grows instead and its content is
+                // revealed by the growth. Outside frame mode, the fade.
+                opacity: root.previewJoinsFrame ? 1 : (previewPopup.show ? 1 : 0)
                 visible: opacity > 0
                 Behavior on opacity {
+                    enabled: !root.previewJoinsFrame
                     animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                 }
                 clip: true
-                color: Appearance.m3colors.m3surfaceContainer
+                // Stood down while the frame paints the plate; the content stays.
+                readonly property bool plateOnFrame: root.previewJoinsFrame && previewJoin.drawsPlate
+                color: plateOnFrame ? "transparent" : Appearance.m3colors.m3surfaceContainer
                 radius: Appearance.rounding.normal
-                // Pushed off the side facing the dock by the elevation margin,
-                // so the shadow has somewhere to fall - said as a push from
-                // the centre rather than as an anchor on that side, for the
-                // reason the running dots above carry: the side an anchor
-                // lands on moves when the dock turns, and it moves onto the
-                // axis the centre anchor was holding.
-                readonly property real cardPushX:
-                    (parent.width - width) / 2 - Appearance.sizes.elevationMargin
-                readonly property real cardPushY:
-                    (parent.height - height) / 2 - Appearance.sizes.elevationMargin
-                anchors.centerIn: parent
-                anchors.horizontalCenterOffset: popupMouseArea.dockSide === "right" ? cardPushX
-                    : (popupMouseArea.dockSide === "left" ? -cardPushX : 0)
-                anchors.verticalCenterOffset: popupMouseArea.dockSide === "bottom" ? cardPushY
-                    : (popupMouseArea.dockSide === "top" ? -cardPushY : 0)
+                // Off the side facing the dock by the join's lift in frame
+                // mode - nothing while fused, the elevation margin released -
+                // and by the elevation margin outright otherwise, so the
+                // shadow has somewhere to fall. Written as coordinates rather
+                // than anchors, for the reason the running dots above carry:
+                // the side an anchor lands on moves when the dock turns.
+                readonly property real offDock: root.previewJoinsFrame ? previewJoin.lift : Appearance.sizes.elevationMargin
+                // The growth, in frame mode: the card unrolls out of the pill
+                // from a parked square's width and no height.
+                readonly property real grow: root.previewJoinsFrame ? Math.max(0, Math.min(1, previewPopup.openProgress)) : 1
+                readonly property real parkedSize: Appearance.sizes.elevationMargin * 2
+                x: root.vertical
+                    ? (popupMouseArea.dockSide === "left" ? offDock : parent.width - offDock - width)
+                    : (parent.width - width) / 2
+                y: root.vertical
+                    ? (parent.height - height) / 2
+                    : (popupMouseArea.dockSide === "bottom" ? parent.height - offDock - height : offDock)
+                width: implicitWidth <= 0 ? 0 : Math.max(0, root.previewJoinsFrame
+                    ? Math.min(implicitWidth, parkedSize) + (implicitWidth - Math.min(implicitWidth, parkedSize)) * grow
+                    : implicitWidth)
+                height: Math.max(0, implicitHeight * grow)
                 implicitHeight: previewRowLayout.implicitHeight + padding * 2
                 implicitWidth:  previewRowLayout.implicitWidth  + padding * 2
                 Behavior on implicitWidth {
@@ -611,7 +828,17 @@ Item {
 
                 RowLayout {
                     id: previewRowLayout
-                    anchors.centerIn: parent
+                    // Pinned to the side facing the dock, centred along it:
+                    // the card grows out of the pill and its content is
+                    // revealed from the pill outward, not from the middle.
+                    // Coordinates, never anchors that follow the edge
+                    // (test_dock_position_contract says why).
+                    x: root.vertical
+                        ? (popupMouseArea.dockSide === "left" ? popupBackground.padding : parent.width - popupBackground.padding - width)
+                        : (parent.width - width) / 2
+                    y: root.vertical
+                        ? (parent.height - height) / 2
+                        : (popupMouseArea.dockSide === "bottom" ? parent.height - popupBackground.padding - height : popupBackground.padding)
 
                     Repeater {
                         model: ScriptModel {
