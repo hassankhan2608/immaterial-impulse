@@ -15,6 +15,34 @@ hl.bind("SUPER + SUPER_R", hl.dsp.global("quickshell:searchToggleRelease"))
 hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
 hl.bind("SUPER + SUPER_R", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
 
+-- Super tap opens search only when Super is released on its own. Quickshell's
+-- GlobalShortcut.onReleased fires even if another key was pressed while Super
+-- was held, so Super + Enter also opened search. Watch raw key presses and send
+-- the shell's interrupt for anything pressed while Super is down; this runs
+-- before that key's own bind.
+if not SUPER_RELEASE_WATCH then
+    SUPER_RELEASE_WATCH = true
+    local super_held = false
+    local super_keycodes = { [125] = true, [126] = true } -- Super_L, Super_R
+    hl.on("input.keyboard.key", function(keycode, _time, state)
+        local pressed = state == 1 -- wl_keyboard_key_state: 1 = pressed
+        if super_keycodes[keycode] then
+            super_held = pressed
+        elseif pressed and super_held then
+            hl.dispatch(hl.dsp.global("quickshell:searchToggleReleaseInterrupt"))
+        end
+    end)
+end
+
+-- Super + mouse (drag, resize, wheel) produces no key event, so interrupt those too.
+for _, combo in ipairs({
+    "SUPER + mouse:272", "SUPER + mouse:273", "SUPER + mouse:274", "SUPER + mouse:275",
+    "SUPER + mouse_up", "SUPER + mouse_down",
+    "CTRL + SUPER + mouse_up", "CTRL + SUPER + mouse_down",
+}) do
+    hl.bind(combo, hl.dsp.global("quickshell:searchToggleReleaseInterrupt"), { non_consuming = true })
+end
+
 hl.bind("SUPER_L", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })
 hl.bind("SUPER_R", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })
 hl.bind("SUPER_L", hl.dsp.global("quickshell:workspaceNumber"),
